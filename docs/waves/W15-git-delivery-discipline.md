@@ -32,6 +32,7 @@ Enforce that completed waves are verified and closed only from clean committed g
 |---|---|---|---|
 | `W15-S01` | done | persist the previously uncommitted local W07-W14 backlog into git history before more development continues | `git status --short`, `git log --oneline --max-count=5` |
 | `W15-S02` | done | fail the wave gate when the tree is dirty or the wave doc is not marked done | `./scripts/check-git-discipline.sh --mode wave --wave W15-git-delivery-discipline` |
+| `W15-S03` | done | make the git-discipline guard executable so the wave gate can call it directly | `./scripts/check-git-discipline.sh --mode wave --wave W15-git-delivery-discipline` |
 
 ## Language impact
 
