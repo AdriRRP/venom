@@ -1,7 +1,7 @@
 # W19. Postgres Durable State
 
 Wave: `W19-postgres-durable-state`
-Status: `in_progress`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -33,7 +33,7 @@ Add a real Postgres-backed durable app backend that preserves the current invent
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W19-S01` | done | add a Postgres-backed durable app backend, preserve the current HTTP contracts, and prove reload durability locally | `./scripts/check-quality.sh`, `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W19-postgres-durable-state --slice W19-S01 --lane integration` |
-| `W19-S02` | blocked | wire the db infra rehearsal against Docker Compose and validate the Postgres backend against real local infrastructure | `./scripts/rehearse-infra.sh --profile db` |
+| `W19-S02` | done | wire the db infra rehearsal against Docker Compose and validate the Postgres backend against real local infrastructure | `./scripts/rehearse-infra.sh --profile db` |
 
 ## Language impact
 
@@ -51,4 +51,4 @@ Add a real Postgres-backed durable app backend that preserves the current invent
 
 - Postgres must remain a backend detail behind the app boundary
 - the local JSONL path remains the default local-first fallback
-- the real db rehearsal is currently blocked by the local Docker image pull path, not by the VENOM code path
+- `postgres:18-alpine` is the first Postgres 18 alpine tag that worked correctly on this ARM64 host
