@@ -95,7 +95,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker compose "${compose_args[@]}" up -d
+docker compose "${compose_args[@]}" up -d --wait
 
 VENOM_INFRA_COMPOSE_FILE="$compose_file" \
 VENOM_INFRA_PROFILE="$profile" \

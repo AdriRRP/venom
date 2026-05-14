@@ -34,6 +34,7 @@ Add a real Postgres-backed durable app backend that preserves the current invent
 |---|---|---|---|
 | `W19-S01` | done | add a Postgres-backed durable app backend, preserve the current HTTP contracts, and prove reload durability locally | `./scripts/check-quality.sh`, `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W19-postgres-durable-state --slice W19-S01 --lane integration` |
 | `W19-S02` | done | wire the db infra rehearsal against Docker Compose and validate the Postgres backend against real local infrastructure | `./scripts/rehearse-infra.sh --profile db` |
+| `W19-S03` | done | wait for Postgres health before running db infra smoke so the rehearsal is deterministic | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W19-postgres-durable-state` |
 
 ## Language impact
 
@@ -52,3 +53,4 @@ Add a real Postgres-backed durable app backend that preserves the current invent
 - Postgres must remain a backend detail behind the app boundary
 - the local JSONL path remains the default local-first fallback
 - `postgres:18-alpine` is the first Postgres 18 alpine tag that worked correctly on this ARM64 host
+- db infra rehearsal must wait for actual database health, not just container start
