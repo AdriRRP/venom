@@ -132,7 +132,7 @@ else
 fi
 
 ruleset_id="$(
-  python3 - "$ruleset_name" <<'PY' <<<"$rulesets_json"
+  printf '%s' "$rulesets_json" | python3 -c '
 import json
 import sys
 
@@ -142,7 +142,7 @@ for item in rulesets:
     if item.get("name") == name:
         print(item["id"])
         break
-PY
+' "$ruleset_name"
 )"
 
 if [[ -n "$ruleset_id" ]]; then

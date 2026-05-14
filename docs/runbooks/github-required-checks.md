@@ -57,5 +57,5 @@ Verify after apply:
 
 1. the repository has an active ruleset targeting `refs/heads/main`
 2. the required contexts are `quality`, `tests`, and `audit`
-3. a real remote `main` branch exists so the rule can govern actual updates
+3. first branch creation is allowed, but later updates to `main` are governed by the required checks
 4. add separate pull-request review rules later only if the workflow needs them
