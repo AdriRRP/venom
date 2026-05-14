@@ -10,9 +10,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
-    ComponentRegistrationRequest, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
-    RunNextScanResponse, ScanCommandStatusResponse,
+    ComponentRegistrationRequest, DrainWorkerCommand, DrainWorkerResponse,
+    ProviderScanReportRequest, RecordProviderReportResponse, RegisterComponentResponse,
+    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
+    ScanCommandStatusResponse,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,6 +64,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route("/scan-workers/run-next", post(run_next_scan))
+        .route("/scan-workers/drain", post(drain_worker))
         .route("/provider-reports", post(record_provider_report))
         .route("/findings/active", get(list_active_findings))
         .with_state(state)
@@ -151,6 +153,20 @@ async fn run_next_scan(
         .lock()
         .await
         .run_next_scan(request)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn drain_worker(
+    State(state): State<ApiState>,
+    Json(request): Json<DrainWorkerCommand>,
+) -> Result<Json<DrainWorkerResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .await
+        .run_worker_until_idle(request)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -442,6 +458,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_drains_pending_scan_commands_until_idle() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("drain-worker", "state"),
+                temp_path("drain-worker", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "drained");
+        assert_eq!(payload["processed"], 2);
+        assert_eq!(payload["completed"], 2);
+        assert_eq!(payload["failed"], 0);
+        assert_eq!(payload["pending_remaining"], 0);
+    }
+
+    #[tokio::test]
     async fn postgres_backend_reloads_findings_and_scan_status() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -532,6 +599,57 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn postgres_worker_loop_drains_until_idle() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("drain");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "drained");
+        assert_eq!(payload["completed"], 2);
+        assert_eq!(payload["pending_remaining"], 0);
     }
 
     async fn bind_owned_artifact(router: axum::Router) -> axum::response::Response {
@@ -626,5 +744,35 @@ mod tests {
             )
             .await
             .expect("run-next request should succeed")
+    }
+
+    async fn drain_worker_with_fixture(
+        router: axum::Router,
+        max_commands: usize,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/scan-workers/drain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "max_commands": max_commands,
+                            "provider_key": "fixture-provider",
+                            "knowledge_revision": "fixture-db:2026-05-14",
+                            "findings": [
+                                {
+                                    "vulnerability_id": "CVE-2026-0001",
+                                    "package_name": "openssl",
+                                    "package_version": "3.0.0",
+                                    "severity": "high"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("drain request should succeed")
     }
 }

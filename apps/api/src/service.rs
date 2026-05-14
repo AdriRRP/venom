@@ -280,6 +280,94 @@ impl AppService {
         })
     }
 
+    /// Drain pending scan commands through one bounded worker loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the provider input or the worker limit is invalid,
+    /// or when the durable runtime/state fails.
+    pub async fn run_worker_until_idle(
+        &mut self,
+        request: DrainWorkerCommand,
+    ) -> Result<DrainWorkerResponse, AppServiceError> {
+        let provider = ApiExecutionProvider::new(request.provider)?;
+        let max_commands = request.max_commands.ok_or_else(|| {
+            AppServiceError::InvalidRequest("max_commands is required".to_owned())
+        })?;
+        if max_commands == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "max_commands must be greater than zero".to_owned(),
+            ));
+        }
+
+        let mut processed = 0_usize;
+        let mut completed = 0_usize;
+        let mut failed = 0_usize;
+        let mut last_command_id = None;
+        let mut last_command_status = None;
+        let mut last_error_code = None;
+        let mut last_retryable = None;
+
+        while processed < max_commands {
+            let outcome = match &mut self.backend {
+                AppBackend::Local(local) => local
+                    .runtime
+                    .run_next(&mut local.state, &provider)
+                    .await
+                    .map_err(|error| AppServiceError::State(error.to_string()))?,
+                AppBackend::Postgres(postgres) => postgres
+                    .run_next(&provider)
+                    .await
+                    .map_err(AppServiceError::State)?,
+            };
+
+            match outcome {
+                RunNextScanResult::Idle => break,
+                RunNextScanResult::Completed(result) => {
+                    processed += 1;
+                    completed += 1;
+                    last_command_id = Some(result.command_id.into());
+                    last_command_status = Some(ScanCommandStatus::Completed.as_str().to_owned());
+                    last_error_code = None;
+                    last_retryable = None;
+                }
+                RunNextScanResult::Failed(result) => {
+                    processed += 1;
+                    failed += 1;
+                    last_command_id = Some(result.command_id.into());
+                    last_command_status = Some(ScanCommandStatus::Failed.as_str().to_owned());
+                    last_error_code = Some(result.error_code.into());
+                    last_retryable = Some(result.retryable);
+                }
+            }
+        }
+
+        let pending_remaining = match &self.backend {
+            AppBackend::Local(local) => local.runtime.pending_commands(),
+            AppBackend::Postgres(postgres) => postgres.pending_commands(),
+        };
+
+        let outcome = if processed == 0 {
+            "idle"
+        } else if pending_remaining == 0 {
+            "drained"
+        } else {
+            "limited"
+        };
+
+        Ok(DrainWorkerResponse {
+            outcome: outcome.to_owned(),
+            processed,
+            completed,
+            failed,
+            pending_remaining,
+            last_command_id,
+            last_command_status,
+            last_error_code,
+            last_retryable,
+        })
+    }
+
     /// Execute the next queued scan through an injected canonical provider input.
     ///
     /// # Errors
@@ -474,6 +562,26 @@ pub struct RunNextScanResponse {
     pub active: Option<usize>,
     pub error_code: Option<String>,
     pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DrainWorkerCommand {
+    pub max_commands: Option<usize>,
+    #[serde(flatten)]
+    pub provider: RunNextScanCommand,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DrainWorkerResponse {
+    pub outcome: String,
+    pub processed: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub pending_remaining: usize,
+    pub last_command_id: Option<String>,
+    pub last_command_status: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_retryable: Option<bool>,
 }
 
 fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, AppServiceError> {

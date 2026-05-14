@@ -7,7 +7,7 @@ if [[ -n "${VENOM_INFRA_COMPOSE_FILE:-}" ]]; then
   case "$profile" in
     db|full)
       export VENOM_TEST_POSTGRES_URL="${VENOM_TEST_POSTGRES_URL:-postgres://venom:venom@127.0.0.1:55432/venom}"
-      cargo test -p venom-api postgres_backend -- --nocapture
+      cargo test -p venom-api postgres_ -- --nocapture
       exit 0
       ;;
     messaging)

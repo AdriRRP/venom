@@ -153,6 +153,14 @@ impl PostgresBackend {
         self.read_model.active_findings(component_key, artifact)
     }
 
+    #[must_use]
+    pub fn pending_commands(&self) -> usize {
+        self.commands
+            .values()
+            .filter(|command| command.status == ScanCommandStatus::Pending)
+            .count()
+    }
+
     /// Durably enqueue one canonical scan request in Postgres.
     ///
     /// # Errors
