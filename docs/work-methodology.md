@@ -286,6 +286,11 @@ Advisory or scheduled checks:
 - `dependency-freshness`
 - future stress, resilience, and infra rehearsal workflows
 
+Default expectation:
+
+- advisory checks should run on `schedule` or `workflow_dispatch` by default
+- do not attach an advisory-only gate to normal PR flow unless it has explicitly graduated into the required path
+
 Rule:
 
 - do not add a PR-required check until it is stable, high-signal, and cheap enough to run on the default path
