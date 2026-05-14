@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
     ComponentRegistrationRequest, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, ScanCommandStatusResponse,
+    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
+    RunNextScanResponse, ScanCommandStatusResponse,
 };
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -45,6 +47,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
+        .route("/scan-workers/run-next", post(run_next_scan))
         .route("/provider-reports", post(record_provider_report))
         .route("/findings/active", get(list_active_findings))
         .with_state(state)
@@ -61,7 +64,7 @@ async fn register_component(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .register_component(request)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -75,7 +78,7 @@ async fn bind_artifact(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .bind_artifact(&component_key, request)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -88,7 +91,7 @@ async fn record_provider_report(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .record_provider_report(request)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -101,7 +104,7 @@ async fn request_scan(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .request_scan(request)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -114,8 +117,22 @@ async fn scan_command_status(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .scan_command_status(&command_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn run_next_scan(
+    State(state): State<ApiState>,
+    Json(request): Json<RunNextScanCommand>,
+) -> Result<Json<RunNextScanResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .await
+        .run_next_scan(request)
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -127,7 +144,7 @@ async fn list_active_findings(
     let response = state
         .service
         .lock()
-        .expect("api service mutex should not be poisoned")
+        .await
         .list_active_findings(query.into_request())
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -252,52 +269,10 @@ mod tests {
             .expect("register request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components/component:payments-api/artifacts")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "artifact_kind": "container-image",
-                            "artifact_identity": "registry.example/payments@sha256:111"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("bind request should succeed");
+        let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/provider-reports")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "provider_key": "fixture-provider",
-                            "component_key": "component:payments-api",
-                            "artifact_kind": "container-image",
-                            "artifact_identity": "registry.example/payments@sha256:111",
-                            "freshness": "deterministic",
-                            "knowledge_revision": "fixture-db:2026-05-14",
-                            "findings": [
-                                {
-                                    "vulnerability_id": "CVE-2026-0001",
-                                    "package_name": "openssl",
-                                    "package_version": "3.0.0",
-                                    "severity": "high"
-                                }
-                            ]
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("provider report request should succeed");
+        let response = record_provider_report(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = router
@@ -341,42 +316,10 @@ mod tests {
             .expect("register request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components/component:payments-api/artifacts")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "artifact_kind": "container-image",
-                            "artifact_identity": "registry.example/payments@sha256:111"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("bind request should succeed");
+        let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/scan-requests")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "artifact_kind": "container-image",
-                            "artifact_identity": "registry.example/payments@sha256:111",
-                            "freshness": "deterministic"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("scan request should succeed");
+        let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = http_body_util::BodyExt::collect(response.into_body())
             .await
@@ -399,5 +342,163 @@ mod tests {
             .await
             .expect("status request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_runs_next_scan_and_marks_command_completed() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("run-next", "state"),
+                temp_path("run-next", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        let command_id = payload["command_id"]
+            .as_str()
+            .expect("command id should be present")
+            .to_owned();
+
+        let response = run_next_scan_with_fixture(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get(format!("/scan-commands/{command_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("status request should succeed");
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["status"], "completed");
+    }
+
+    async fn bind_owned_artifact(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/components/component:payments-api/artifacts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bind request should succeed")
+    }
+
+    async fn record_provider_report(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/provider-reports")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider_key": "fixture-provider",
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "freshness": "deterministic",
+                            "knowledge_revision": "fixture-db:2026-05-14",
+                            "findings": [
+                                {
+                                    "vulnerability_id": "CVE-2026-0001",
+                                    "package_name": "openssl",
+                                    "package_version": "3.0.0",
+                                    "severity": "high"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("provider report request should succeed")
+    }
+
+    async fn enqueue_scan_request(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/scan-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "freshness": "deterministic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("scan request should succeed")
+    }
+
+    async fn run_next_scan_with_fixture(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/scan-workers/run-next")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider_key": "fixture-provider",
+                            "knowledge_revision": "fixture-db:2026-05-14",
+                            "findings": [
+                                {
+                                    "vulnerability_id": "CVE-2026-0001",
+                                    "package_name": "openssl",
+                                    "package_version": "3.0.0",
+                                    "severity": "high"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("run-next request should succeed")
     }
 }

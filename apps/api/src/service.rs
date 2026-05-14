@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use venom_domain::{
     ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
-    EvidenceFreshness, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanCommandStatus,
-    ScanPlanner, Severity,
+    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RunNextScanResult, ScanCommandStatus,
+    ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -220,6 +221,62 @@ impl AppService {
             status: status.as_str().to_owned(),
         })
     }
+
+    /// Execute the next queued scan through an injected canonical provider input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the provider input is invalid or the durable runtime/state fails.
+    pub async fn run_next_scan(
+        &mut self,
+        request: RunNextScanCommand,
+    ) -> Result<RunNextScanResponse, AppServiceError> {
+        let provider = ApiExecutionProvider::new(request)?;
+        let outcome = self
+            .runtime
+            .run_next(&mut self.state, &provider)
+            .await
+            .map_err(|error| AppServiceError::State(error.to_string()))?;
+
+        Ok(match outcome {
+            RunNextScanResult::Idle => RunNextScanResponse {
+                outcome: "idle".to_owned(),
+                command_id: None,
+                provider_key: None,
+                findings_reported: None,
+                discovered: None,
+                repeated: None,
+                withdrawn: None,
+                active: None,
+                error_code: None,
+                retryable: None,
+            },
+            RunNextScanResult::Completed(result) => RunNextScanResponse {
+                outcome: "completed".to_owned(),
+                command_id: Some(result.command_id.into()),
+                provider_key: Some(result.provider_key.into()),
+                findings_reported: Some(result.findings_reported),
+                discovered: Some(result.change_set.discovered),
+                repeated: Some(result.change_set.repeated),
+                withdrawn: Some(result.change_set.withdrawn),
+                active: Some(result.change_set.active),
+                error_code: None,
+                retryable: None,
+            },
+            RunNextScanResult::Failed(result) => RunNextScanResponse {
+                outcome: "failed".to_owned(),
+                command_id: Some(result.command_id.into()),
+                provider_key: None,
+                findings_reported: None,
+                discovered: None,
+                repeated: None,
+                withdrawn: None,
+                active: None,
+                error_code: Some(result.error_code.into()),
+                retryable: Some(result.retryable),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +387,30 @@ pub struct ScanCommandStatusResponse {
     pub status: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunNextScanCommand {
+    pub provider_key: String,
+    pub knowledge_revision: Option<String>,
+    pub findings: Option<Vec<ProviderReportFindingRequest>>,
+    pub error_kind: Option<String>,
+    pub error_message: Option<String>,
+    pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunNextScanResponse {
+    pub outcome: String,
+    pub command_id: Option<String>,
+    pub provider_key: Option<String>,
+    pub findings_reported: Option<usize>,
+    pub discovered: Option<usize>,
+    pub repeated: Option<usize>,
+    pub withdrawn: Option<usize>,
+    pub active: Option<usize>,
+    pub error_code: Option<String>,
+    pub retryable: Option<bool>,
+}
+
 fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, AppServiceError> {
     match value {
         "container-image" => Ok(ArtifactKind::ContainerImage),
@@ -372,5 +453,107 @@ const fn severity_name(value: Severity) -> &'static str {
         Severity::Medium => "medium",
         Severity::High => "high",
         Severity::Critical => "critical",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ApiExecutionProvider {
+    mode: ApiExecutionMode,
+}
+
+#[derive(Debug, Clone)]
+enum ApiExecutionMode {
+    Success {
+        findings: Vec<ReportedFinding>,
+        knowledge_revision: Option<Box<str>>,
+    },
+    Failure(FindingProviderError),
+}
+
+impl ApiExecutionProvider {
+    fn new(request: RunNextScanCommand) -> Result<Self, AppServiceError> {
+        let RunNextScanCommand {
+            provider_key,
+            knowledge_revision,
+            findings,
+            error_kind,
+            error_message,
+            retryable,
+        } = request;
+
+        if provider_key != API_WORKER_PROVIDER_KEY {
+            return Err(AppServiceError::InvalidRequest(format!(
+                "unsupported worker provider key: {provider_key}"
+            )));
+        }
+
+        if let Some(error_kind) = error_kind {
+            let message = error_message.unwrap_or_else(|| "provider execution failed".to_owned());
+            return Ok(Self {
+                mode: ApiExecutionMode::Failure(FindingProviderError::new(
+                    parse_error_kind(&error_kind)?,
+                    retryable.unwrap_or(false),
+                    message,
+                )),
+            });
+        }
+
+        let findings = findings
+            .unwrap_or_default()
+            .into_iter()
+            .map(ProviderReportFindingRequest::into_domain)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            mode: ApiExecutionMode::Success {
+                findings,
+                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
+            },
+        })
+    }
+}
+
+impl FindingProvider for ApiExecutionProvider {
+    fn provider_key(&self) -> &'static str {
+        API_WORKER_PROVIDER_KEY
+    }
+
+    async fn scan<'a>(
+        &'a self,
+        request: &'a ScanRequest,
+    ) -> Result<ProviderScanReport, FindingProviderError> {
+        match &self.mode {
+            ApiExecutionMode::Success {
+                findings,
+                knowledge_revision,
+            } => {
+                let mut report = ProviderScanReport::new(
+                    API_WORKER_PROVIDER_KEY,
+                    request.component_key.clone(),
+                    request.artifact.clone(),
+                    SystemTime::now(),
+                    request.freshness,
+                    findings.clone(),
+                );
+                report.knowledge_revision.clone_from(knowledge_revision);
+                Ok(report)
+            }
+            ApiExecutionMode::Failure(error) => Err(error.clone()),
+        }
+    }
+}
+
+const API_WORKER_PROVIDER_KEY: &str = "fixture-provider";
+
+fn parse_error_kind(value: &str) -> Result<FindingProviderErrorKind, AppServiceError> {
+    match value {
+        "invalid-request" => Ok(FindingProviderErrorKind::InvalidRequest),
+        "unavailable" => Ok(FindingProviderErrorKind::Unavailable),
+        "unauthorized" => Ok(FindingProviderErrorKind::Unauthorized),
+        "corrupt-response" => Ok(FindingProviderErrorKind::CorruptResponse),
+        "rate-limited" => Ok(FindingProviderErrorKind::RateLimited),
+        _ => Err(AppServiceError::InvalidRequest(format!(
+            "unsupported provider error kind: {value}"
+        ))),
     }
 }
