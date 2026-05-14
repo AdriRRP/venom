@@ -5,4 +5,4 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-venom-vulnerability-management = { path = "../../crates/venom-vulnerability-management" }
+venom-domain = { path = "../../crates/venom-domain" }

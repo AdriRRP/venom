@@ -1,0 +1,18 @@
+{
+  "provider_key": "fixture-provider",
+  "knowledge_revision": "fixture-db:2026-05-14",
+  "findings": [
+    {
+      "vulnerability_id": "CVE-2026-0001",
+      "provider_finding_key": "fixture-provider:1",
+      "package": {
+        "name": "openssl",
+        "version": "3.0.0",
+        "purl": "pkg:apk/openssl@3.0.0"
+      },
+      "fix_version": "3.0.1",
+      "severity": "high",
+      "aliases": ["GHSA-1234"]
+    }
+  ]
+}

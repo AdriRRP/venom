@@ -1,24 +1,25 @@
-name: tests
+name: dependency-freshness
 
 on:
   pull_request:
   push:
     branches: [main]
-  merge_group:
+  schedule:
+    - cron: "0 5 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.ref }}
+  group: dependency-freshness-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  tests:
+  dependency-freshness:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -33,11 +34,5 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
 
-      - name: Run test gate
-        run: ./scripts/check-tests.sh
-
-      - name: Run acceptance gate
-        run: ./scripts/check-acceptance.sh
-
-      - name: Run contract gate
-        run: ./scripts/check-contracts.sh
+      - name: Run dependency freshness gate
+        run: ./scripts/check-dependency-freshness.sh

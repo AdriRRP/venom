@@ -62,7 +62,13 @@ esac
 compose_file="$(find_compose_file || true)"
 
 if [[ -z "$compose_file" ]]; then
-  echo "SKIP: no infra compose file is wired yet"
+  if [[ -x "scripts/infra-smoke.sh" ]]; then
+    VENOM_INFRA_PROFILE="$profile" ./scripts/infra-smoke.sh
+    echo "RESULT: PASS"
+    exit 0
+  fi
+
+  echo "SKIP: no infra compose file or infra smoke runner is wired yet"
   echo "RESULT: PASS"
   exit 0
 fi

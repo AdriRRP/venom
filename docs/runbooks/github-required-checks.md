@@ -26,6 +26,7 @@ Recommended:
 Do not require at this stage:
 
 - `unused-deps`
+- `dependency-freshness`
 
 Reason:
 

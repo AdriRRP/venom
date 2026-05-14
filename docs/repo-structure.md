@@ -29,7 +29,7 @@ Do not keep:
 ├── apps/
 │   └── api/
 ├── crates/
-│   └── venom-vulnerability-management/
+│   └── venom-domain/
 ├── docs/
 ├── features/
 │   └── e2e/

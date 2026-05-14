@@ -24,7 +24,7 @@ Bootstrap the repository so the wave/slice workflow, repo layout, and Rust works
 - `Cargo.toml`
 - `.gitignore`
 - `apps/api/...`
-- `crates/venom-vulnerability-management/...`
+- `crates/venom-domain/...`
 - `docs/repo-structure.md`
 - `docs/adr/0001-repo-structure-and-workspace-layout.md`
 
