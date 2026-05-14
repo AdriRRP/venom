@@ -3,7 +3,7 @@
 Wave: `W21-provider-runtime-config`
 Status: `done`
 BDD impact: `none`
-Agentic impact: `none`
+Agentic impact: `compact`
 Infra profile: `db`
 
 ## Goal
@@ -24,7 +24,9 @@ Resolve the execution provider from durable managed-component configuration inst
 
 - `apps/api/**`
 - `crates/venom-domain/**`
+- `scripts/rehearse-infra.sh`
 - `docs/ubiquitous-language.md`
+- `docs/work-methodology.md`
 - `docs/waves/W21-provider-runtime-config.md`
 
 ## Slices
@@ -32,6 +34,7 @@ Resolve the execution provider from durable managed-component configuration inst
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W21-S01` | done | add durable provider runtime configuration for managed components and make worker execution resolve provider choice from that state | `./scripts/check-quality.sh`, `cargo test --workspace --all-targets --all-features`, `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W21-provider-runtime-config` |
+| `W21-S02` | done | make compose-backed infra rehearsal exclusive so concurrent runs fail explicitly instead of colliding through shared Docker state | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W21-provider-runtime-config` |
 
 ## Language impact
 

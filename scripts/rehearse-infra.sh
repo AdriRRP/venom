@@ -33,6 +33,7 @@ find_compose_file() {
 }
 
 profile="full"
+lock_dir=".tmp/infra-rehearsal.lock"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,8 +93,14 @@ esac
 
 cleanup() {
   docker compose "${compose_args[@]}" down -v >/dev/null 2>&1 || true
+  rmdir "$lock_dir" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+mkdir -p .tmp
+if ! mkdir "$lock_dir" >/dev/null 2>&1; then
+  fail "another infra rehearsal is already running in this repo"
+fi
 
 docker compose "${compose_args[@]}" up -d --wait
 

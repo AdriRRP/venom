@@ -139,6 +139,7 @@ Real production-shaped infrastructure such as PostgreSQL and the message broker,
 Purpose:
 
 - catch startup, networking, broker, migration, readiness, and multi-process faults early
+- fail explicitly if another compose-backed rehearsal is already running in the same repo
 
 Owned under:
 
