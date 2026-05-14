@@ -1,0 +1,60 @@
+# Product Direction
+
+## Mission
+
+Turn raw vulnerability scanner output into contextual, operational decisions on real software components.
+
+The platform target is:
+
+- near embedded-grade efficiency in steady-state execution
+- near nation-grade reliability for durable business paths
+
+## Product outcomes
+
+- know which components and collections are under management
+- ingest findings from multiple providers or local fixtures
+- separate canonical vulnerabilities from component-specific findings
+- classify findings using execution context and governance decisions
+- expose durable operational views that survive restarts and infrastructure faults
+- keep hot paths, memory use, and infrastructure chatter aggressively lean
+
+## Capability map
+
+| Capability | Why it exists | Typical canonical feature shape |
+|---|---|---|
+| Inventory | know what is under management | `register-component.feature` |
+| Finding ingestion | import concrete observations | `report-finding.feature` |
+| Contextual risk | change meaning by runtime context | `classify-finding.feature` |
+| Governance | accept, suppress, withdraw, explain | `accept-risk.feature` |
+| Operations | answer what is active, changed, pending | `view-active-findings.feature` |
+| Reliability substrate | keep all of the above durable and rebuildable | usually verified by infra and acceptance gates rather than a standalone business feature |
+
+## Wave discovery rule
+
+Use this file when `docs/waves/ACTIVE` is `NONE` or when the current wave is about to close.
+
+Choose the next wave by crossing:
+
+1. one missing capability or one reliability gap
+2. one observable outcome for a user or operator
+3. one session-sized boundary that can end with a green wave gate
+
+Default priority:
+
+1. broken or unsafe behavior
+2. missing capability on the critical product path
+3. infrastructure risk that can invalidate the next capability
+4. observability or operator clarity
+5. convenience or ergonomics
+
+Prefer a pure infrastructure wave only when:
+
+- it unblocks the next capability; or
+- it closes a reliability risk that would make the next capability misleading or unsafe
+
+A wave is too large if at least one is true:
+
+- it changes more than one primary capability
+- it needs unrelated BDD features
+- it needs both new business behavior and a large infrastructure redesign
+- it cannot name one dominant verification story

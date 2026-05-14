@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = [
+  "apps/api",
+  "crates/venom-vulnerability-management",
+]
+default-members = [
+  "apps/api",
+  "crates/venom-vulnerability-management",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+

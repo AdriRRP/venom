@@ -1,0 +1,19 @@
+/target
+/node_modules
+/dist
+/.env
+/.env.*
+/tmp
+/artifacts
+/.DS_Store
+
+# Local tool output
+/.nextest
+/.cargo
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log

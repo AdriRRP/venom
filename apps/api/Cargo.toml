@@ -1,0 +1,8 @@
+[package]
+name = "venom-api"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+venom-vulnerability-management = { path = "../../crates/venom-vulnerability-management" }
