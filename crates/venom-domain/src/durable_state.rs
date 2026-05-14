@@ -1,6 +1,7 @@
 use crate::{
-    ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration, EvidenceFreshness,
-    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingReadModel, PackageCoordinate,
+    ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration,
+    ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FindingChangeSet,
+    FindingIngestion, FindingIngestionError, FindingReadModel, PackageCoordinate,
     ProviderScanReport, RegisterComponentChange, RegisterComponentResult, ReportedFinding,
     Severity,
 };
@@ -106,6 +107,31 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably configure one provider runtime for a managed component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn configure_provider(
+        &mut self,
+        component_key: &str,
+        provider_key: impl Into<Box<str>>,
+    ) -> Result<ConfigureProviderResult, DurableStateError> {
+        let provider_key = provider_key.into();
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .configure_provider(component_key, provider_key.clone());
+        if result.change == ConfigureProviderChange::Configured {
+            self.append_event(&DurableEvent::ComponentProviderConfigured {
+                component_key: component_key.into(),
+                provider_key,
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably record one accepted provider snapshot and update the projection.
     ///
     /// # Errors
@@ -184,6 +210,24 @@ impl DurableState {
                     BindArtifactChange::Rejected => Err(DurableStateError::CorruptHistory {
                         line,
                         reason: "invalid artifact binding".into(),
+                    }),
+                }
+            }
+            DurableEvent::ComponentProviderConfigured {
+                component_key,
+                provider_key,
+            } => {
+                let result = self
+                    .ingestion
+                    .inventory_mut()
+                    .configure_provider(component_key.as_ref(), provider_key);
+                match result.change {
+                    ConfigureProviderChange::Configured | ConfigureProviderChange::Unchanged => {
+                        Ok(())
+                    }
+                    ConfigureProviderChange::Rejected => Err(DurableStateError::CorruptHistory {
+                        line,
+                        reason: "invalid provider configuration".into(),
                     }),
                 }
             }
@@ -271,6 +315,10 @@ enum DurableEvent {
     ArtifactBound {
         component_key: Box<str>,
         artifact: ArtifactRef,
+    },
+    ComponentProviderConfigured {
+        component_key: Box<str>,
+        provider_key: Box<str>,
     },
     ProviderScanRecorded {
         report: StoredProviderScanReport,
@@ -417,8 +465,8 @@ impl StoredPackageCoordinate {
 mod tests {
     use super::DurableState;
     use crate::{
-        ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, PackageCoordinate,
-        ProviderScanReport, ReportedFinding,
+        ArtifactKind, ArtifactRef, ComponentRegistration, ConfigureProviderChange,
+        EvidenceFreshness, PackageCoordinate, ProviderScanReport, ReportedFinding,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -525,6 +573,34 @@ mod tests {
                 .read_model()
                 .active_finding_count("component:payments-api", &artifact()),
             0
+        );
+    }
+
+    #[test]
+    fn replay_keeps_provider_runtime_configuration() {
+        let path = temp_path("durable-state-provider");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+
+        let result = state
+            .configure_provider("component:payments-api", "fixture-provider")
+            .expect("provider config should persist");
+
+        assert_eq!(result.change, ConfigureProviderChange::Configured);
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+
+        assert_eq!(
+            rebuilt
+                .ingestion()
+                .inventory()
+                .configured_provider("component:payments-api"),
+            Some("fixture-provider")
         );
     }
 }

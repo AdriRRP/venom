@@ -10,10 +10,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
-    ComponentRegistrationRequest, DrainWorkerCommand, DrainWorkerResponse,
-    ProviderScanReportRequest, RecordProviderReportResponse, RegisterComponentResponse,
-    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
-    ScanCommandStatusResponse,
+    ComponentRegistrationRequest, ConfigureProviderRequest, ConfigureProviderResponse,
+    DrainWorkerCommand, DrainWorkerResponse, ProviderScanReportRequest,
+    RecordProviderReportResponse, RegisterComponentResponse, RequestScanCommand,
+    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,6 +61,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/components", post(register_component))
         .route("/components/{component_key}/artifacts", post(bind_artifact))
+        .route(
+            "/components/{component_key}/provider-runtime",
+            post(configure_provider),
+        )
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route("/scan-workers/run-next", post(run_next_scan))
@@ -98,6 +102,21 @@ async fn bind_artifact(
         .lock()
         .await
         .bind_artifact(&component_key, request)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn configure_provider(
+    State(state): State<ApiState>,
+    Path(component_key): Path<String>,
+    Json(request): Json<ConfigureProviderRequest>,
+) -> Result<Json<ConfigureProviderResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .await
+        .configure_provider(&component_key, request)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -424,6 +443,9 @@ mod tests {
         let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         let body = http_body_util::BodyExt::collect(response.into_body())
             .await
@@ -488,6 +510,9 @@ mod tests {
         let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let response = enqueue_scan_request(router.clone()).await;
@@ -539,6 +564,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_provider(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = enqueue_scan_request(router.clone()).await;
@@ -634,6 +662,9 @@ mod tests {
         let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let response = enqueue_scan_request(router.clone()).await;
@@ -668,6 +699,23 @@ mod tests {
             )
             .await
             .expect("bind request should succeed")
+    }
+
+    async fn configure_fixture_provider(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/components/component:payments-api/provider-runtime")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider_key": "fixture-provider"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("configure provider request should succeed")
     }
 
     async fn record_provider_report(router: axum::Router) -> axum::response::Response {
@@ -727,7 +775,6 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
-                            "provider_key": "fixture-provider",
                             "knowledge_revision": "fixture-db:2026-05-14",
                             "findings": [
                                 {
@@ -757,7 +804,6 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "max_commands": max_commands,
-                            "provider_key": "fixture-provider",
                             "knowledge_revision": "fixture-db:2026-05-14",
                             "findings": [
                                 {

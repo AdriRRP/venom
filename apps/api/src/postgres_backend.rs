@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
     ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CompletedScanCommand,
-    ComponentRegistration, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
-    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, ProviderScanReport, RegisterComponentChange, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest,
-    as_provider_error, validate_provider_scan_report,
+    ComponentRegistration, ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness,
+    FailedScanCommand, FindingChangeSet, FindingIngestion, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, ProviderScanReport, RegisterComponentChange,
+    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
+    ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -103,6 +103,38 @@ impl PostgresBackend {
         Ok(result)
     }
 
+    /// Durably configure one provider runtime for a managed component in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn configure_provider(
+        &mut self,
+        component_key: &str,
+        provider_key: &str,
+    ) -> Result<ConfigureProviderResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .configure_provider(component_key, provider_key);
+        if result.change == ConfigureProviderChange::Configured {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (component_key, provider_key) VALUES ($1, $2) ",
+                    "ON CONFLICT (component_key) DO UPDATE SET provider_key = EXCLUDED.provider_key, updated_at = NOW()"
+                ),
+                self.names.provider_runtime_configs
+            ))
+            .bind(component_key)
+            .bind(provider_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres provider config upsert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably record one canonical provider report in Postgres.
     ///
     /// # Errors
@@ -159,6 +191,23 @@ impl PostgresBackend {
             .values()
             .filter(|command| command.status == ScanCommandStatus::Pending)
             .count()
+    }
+
+    #[must_use]
+    pub fn next_pending_component_key(&self) -> Option<&str> {
+        self.order.iter().find_map(|command_id| {
+            self.commands.get(command_id.as_ref()).and_then(|record| {
+                (record.status == ScanCommandStatus::Pending)
+                    .then_some(record.request.component_key.as_ref())
+            })
+        })
+    }
+
+    #[must_use]
+    pub fn configured_provider(&self, component_key: &str) -> Option<&str> {
+        self.ingestion
+            .inventory()
+            .configured_provider(component_key)
     }
 
     /// Durably enqueue one canonical scan request in Postgres.
@@ -406,6 +455,22 @@ impl PostgresBackend {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT PRIMARY KEY REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "provider_key TEXT NOT NULL, ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.provider_runtime_configs, self.names.components
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres provider runtime configs table create failed: {error}")
+        })?;
+
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
                 "id BIGSERIAL PRIMARY KEY, ",
                 "provider_key TEXT NOT NULL, ",
                 "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
@@ -457,6 +522,7 @@ impl PostgresBackend {
 
         self.load_components().await?;
         self.load_artifact_bindings().await?;
+        self.load_provider_runtime_configs().await?;
         self.load_provider_reports().await?;
         self.load_scan_commands().await?;
 
@@ -547,6 +613,29 @@ impl PostgresBackend {
         Ok(())
     }
 
+    async fn load_provider_runtime_configs(&mut self) -> Result<(), String> {
+        let configs = sqlx::query_as::<_, ProviderRuntimeConfigRow>(&format!(
+            "SELECT component_key, provider_key FROM {} ORDER BY component_key",
+            self.names.provider_runtime_configs
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider runtime configs load failed: {error}"))?;
+        for row in configs {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .configure_provider(&row.component_key, row.provider_key);
+            if result.change == ConfigureProviderChange::Rejected {
+                return Err(
+                    "postgres provider runtime config references unknown component".to_owned(),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     async fn load_scan_commands(&mut self) -> Result<(), String> {
         let commands = sqlx::query_as::<_, ScanCommandRow>(&format!(
             concat!(
@@ -593,6 +682,7 @@ struct TableNames {
     schema: Box<str>,
     components: Box<str>,
     artifact_bindings: Box<str>,
+    provider_runtime_configs: Box<str>,
     provider_reports: Box<str>,
     scan_commands: Box<str>,
 }
@@ -603,6 +693,7 @@ impl TableNames {
         Ok(Self {
             components: format!("{schema}.components").into_boxed_str(),
             artifact_bindings: format!("{schema}.artifact_bindings").into_boxed_str(),
+            provider_runtime_configs: format!("{schema}.provider_runtime_configs").into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             schema,
@@ -621,6 +712,12 @@ struct ArtifactBindingRow {
     component_key: String,
     artifact_kind: String,
     artifact_identity: String,
+}
+
+#[derive(Debug, FromRow)]
+struct ProviderRuntimeConfigRow {
+    component_key: String,
+    provider_key: String,
 }
 
 #[derive(Debug, FromRow)]

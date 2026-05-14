@@ -12,7 +12,8 @@ pub mod syft_grype;
 
 pub use component_inventory::{
     BindArtifactChange, BindArtifactResult, ComponentInventory, ComponentRegistration,
-    RegisterComponentChange, RegisterComponentResult,
+    ConfigureProviderChange, ConfigureProviderResult, RegisterComponentChange,
+    RegisterComponentResult,
 };
 pub use durable_scan_runtime::{
     CompletedScanCommand, DurableScanRuntime, DurableScanRuntimeError, EnqueueScanResult,

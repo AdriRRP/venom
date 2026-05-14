@@ -83,10 +83,42 @@ pub struct BindArtifactResult {
     pub bound_artifacts: usize,
 }
 
+/// Observable outcome of configuring one component provider runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigureProviderChange {
+    /// The component now has a provider runtime configuration.
+    Configured,
+    /// The exact same provider runtime configuration already existed.
+    Unchanged,
+    /// The configuration was rejected because the component is missing.
+    Rejected,
+}
+
+impl ConfigureProviderChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of configuring one component provider runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureProviderResult {
+    /// Observable state change caused by the configuration attempt.
+    pub change: ConfigureProviderChange,
+    /// Configured provider key after the operation when the component exists.
+    pub provider_key: Option<Box<str>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComponentRecord {
     registration: ComponentRegistration,
     artifacts: BTreeSet<ArtifactRef>,
+    provider_key: Option<Box<str>>,
 }
 
 /// Minimal in-memory inventory of managed components and their immutable artifacts.
@@ -116,6 +148,7 @@ impl ComponentInventory {
                     ComponentRecord {
                         registration,
                         artifacts: BTreeSet::new(),
+                        provider_key: None,
                     },
                 );
                 RegisterComponentChange::Registered
@@ -163,6 +196,34 @@ impl ComponentInventory {
         }
     }
 
+    /// Configure one finding provider runtime for a managed component.
+    #[must_use]
+    pub fn configure_provider(
+        &mut self,
+        component_key: &str,
+        provider_key: impl Into<Box<str>>,
+    ) -> ConfigureProviderResult {
+        let provider_key = provider_key.into();
+        let Some(record) = self.components.get_mut(component_key) else {
+            return ConfigureProviderResult {
+                change: ConfigureProviderChange::Rejected,
+                provider_key: None,
+            };
+        };
+
+        let change = if record.provider_key.as_deref() == Some(provider_key.as_ref()) {
+            ConfigureProviderChange::Unchanged
+        } else {
+            record.provider_key = Some(provider_key);
+            ConfigureProviderChange::Configured
+        };
+
+        ConfigureProviderResult {
+            change,
+            provider_key: record.provider_key.clone(),
+        }
+    }
+
     #[must_use]
     pub fn is_managed(&self, component_key: &str) -> bool {
         self.components.contains_key(component_key)
@@ -186,12 +247,20 @@ impl ComponentInventory {
             .get(component_key)
             .map_or(0, |record| record.artifacts.len())
     }
+
+    #[must_use]
+    pub fn configured_provider(&self, component_key: &str) -> Option<&str> {
+        self.components
+            .get(component_key)
+            .and_then(|record| record.provider_key.as_deref())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BindArtifactChange, ComponentInventory, ComponentRegistration, RegisterComponentChange,
+        BindArtifactChange, ComponentInventory, ComponentRegistration, ConfigureProviderChange,
+        RegisterComponentChange,
     };
     use crate::{ArtifactKind, ArtifactRef};
 
@@ -297,5 +366,48 @@ mod tests {
 
         assert_eq!(result.change, BindArtifactChange::Rejected);
         assert_eq!(result.bound_artifacts, 0);
+    }
+
+    #[test]
+    fn managed_component_can_configure_one_provider() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+
+        let result = inventory.configure_provider("component:payments-api", "fixture-provider");
+
+        assert_eq!(result.change, ConfigureProviderChange::Configured);
+        assert_eq!(result.provider_key.as_deref(), Some("fixture-provider"));
+        assert_eq!(
+            inventory.configured_provider("component:payments-api"),
+            Some("fixture-provider")
+        );
+    }
+
+    #[test]
+    fn repeated_provider_configuration_is_idempotent() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.configure_provider("component:payments-api", "fixture-provider");
+
+        let result = inventory.configure_provider("component:payments-api", "fixture-provider");
+
+        assert_eq!(result.change, ConfigureProviderChange::Unchanged);
+        assert_eq!(result.provider_key.as_deref(), Some("fixture-provider"));
+    }
+
+    #[test]
+    fn unknown_component_cannot_configure_one_provider() {
+        let mut inventory = ComponentInventory::default();
+
+        let result = inventory.configure_provider("component:payments-api", "fixture-provider");
+
+        assert_eq!(result.change, ConfigureProviderChange::Rejected);
+        assert!(result.provider_key.is_none());
     }
 }

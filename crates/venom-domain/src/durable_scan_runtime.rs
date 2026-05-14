@@ -87,6 +87,16 @@ impl DurableScanRuntime {
         self.commands.get(command_id).map(|record| record.status)
     }
 
+    #[must_use]
+    pub fn next_pending_component_key(&self) -> Option<&str> {
+        self.order.iter().find_map(|command_id| {
+            self.commands.get(command_id.as_ref()).and_then(|record| {
+                (record.status == ScanCommandStatus::Pending)
+                    .then_some(record.request.component_key.as_ref())
+            })
+        })
+    }
+
     /// Run the oldest pending scan command against one provider and durable state.
     ///
     /// # Errors

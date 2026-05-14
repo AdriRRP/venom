@@ -133,6 +133,34 @@ impl AppService {
         })
     }
 
+    /// Configure the runtime provider that one managed component will use for scan execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the provider key is unsupported or the durable write fails.
+    pub async fn configure_provider(
+        &mut self,
+        component_key: &str,
+        request: ConfigureProviderRequest,
+    ) -> Result<ConfigureProviderResponse, AppServiceError> {
+        let provider_key = resolve_supported_provider_key(&request.provider_key)?;
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .configure_provider(component_key, provider_key)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .configure_provider(component_key, provider_key)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(ConfigureProviderResponse {
+            change: result.change.as_str().to_owned(),
+            provider_key: result.provider_key.map(Into::into),
+        })
+    }
+
     /// Record one canonical provider report through the application boundary.
     ///
     /// # Errors
@@ -290,7 +318,6 @@ impl AppService {
         &mut self,
         request: DrainWorkerCommand,
     ) -> Result<DrainWorkerResponse, AppServiceError> {
-        let provider = ApiExecutionProvider::new(request.provider)?;
         let max_commands = request.max_commands.ok_or_else(|| {
             AppServiceError::InvalidRequest("max_commands is required".to_owned())
         })?;
@@ -309,6 +336,10 @@ impl AppService {
         let mut last_retryable = None;
 
         while processed < max_commands {
+            let Some(provider_key) = self.next_pending_provider_key()? else {
+                break;
+            };
+            let provider = ApiExecutionProvider::new(provider_key, request.provider.clone())?;
             let outcome = match &mut self.backend {
                 AppBackend::Local(local) => local
                     .runtime
@@ -377,7 +408,21 @@ impl AppService {
         &mut self,
         request: RunNextScanCommand,
     ) -> Result<RunNextScanResponse, AppServiceError> {
-        let provider = ApiExecutionProvider::new(request)?;
+        let Some(provider_key) = self.next_pending_provider_key()? else {
+            return Ok(RunNextScanResponse {
+                outcome: "idle".to_owned(),
+                command_id: None,
+                provider_key: None,
+                findings_reported: None,
+                discovered: None,
+                repeated: None,
+                withdrawn: None,
+                active: None,
+                error_code: None,
+                retryable: None,
+            });
+        };
+        let provider = ApiExecutionProvider::new(provider_key, request)?;
         let outcome =
             match &mut self.backend {
                 AppBackend::Local(local) => local
@@ -430,6 +475,36 @@ impl AppService {
             },
         })
     }
+
+    fn next_pending_provider_key(&self) -> Result<Option<&'static str>, AppServiceError> {
+        let Some(component_key) = self.next_pending_component_key() else {
+            return Ok(None);
+        };
+        let Some(provider_key) = self.configured_provider(component_key) else {
+            return Err(AppServiceError::State(format!(
+                "missing provider runtime configuration for component: {component_key}"
+            )));
+        };
+        resolve_supported_provider_key(provider_key).map(Some)
+    }
+
+    fn next_pending_component_key(&self) -> Option<&str> {
+        match &self.backend {
+            AppBackend::Local(local) => local.runtime.next_pending_component_key(),
+            AppBackend::Postgres(postgres) => postgres.next_pending_component_key(),
+        }
+    }
+
+    fn configured_provider(&self, component_key: &str) -> Option<&str> {
+        match &self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .ingestion()
+                .inventory()
+                .configured_provider(component_key),
+            AppBackend::Postgres(postgres) => postgres.configured_provider(component_key),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -457,6 +532,17 @@ pub struct BindArtifactResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ConfigureProviderRequest {
+    pub provider_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigureProviderResponse {
+    pub change: String,
+    pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ProviderScanReportRequest {
     pub provider_key: String,
     pub component_key: String,
@@ -467,7 +553,7 @@ pub struct ProviderScanReportRequest {
     pub findings: Vec<ProviderReportFindingRequest>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProviderReportFindingRequest {
     pub vulnerability_id: String,
     pub package_name: String,
@@ -540,9 +626,8 @@ pub struct ScanCommandStatusResponse {
     pub status: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RunNextScanCommand {
-    pub provider_key: String,
     pub knowledge_revision: Option<String>,
     pub findings: Option<Vec<ProviderReportFindingRequest>>,
     pub error_kind: Option<String>,
@@ -631,6 +716,7 @@ const fn severity_name(value: Severity) -> &'static str {
 
 #[derive(Debug, Clone)]
 struct ApiExecutionProvider {
+    provider_key: &'static str,
     mode: ApiExecutionMode,
 }
 
@@ -644,9 +730,11 @@ enum ApiExecutionMode {
 }
 
 impl ApiExecutionProvider {
-    fn new(request: RunNextScanCommand) -> Result<Self, AppServiceError> {
+    fn new(
+        provider_key: &'static str,
+        request: RunNextScanCommand,
+    ) -> Result<Self, AppServiceError> {
         let RunNextScanCommand {
-            provider_key,
             knowledge_revision,
             findings,
             error_kind,
@@ -654,15 +742,10 @@ impl ApiExecutionProvider {
             retryable,
         } = request;
 
-        if provider_key != API_WORKER_PROVIDER_KEY {
-            return Err(AppServiceError::InvalidRequest(format!(
-                "unsupported worker provider key: {provider_key}"
-            )));
-        }
-
         if let Some(error_kind) = error_kind {
             let message = error_message.unwrap_or_else(|| "provider execution failed".to_owned());
             return Ok(Self {
+                provider_key,
                 mode: ApiExecutionMode::Failure(FindingProviderError::new(
                     parse_error_kind(&error_kind)?,
                     retryable.unwrap_or(false),
@@ -678,6 +761,7 @@ impl ApiExecutionProvider {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
+            provider_key,
             mode: ApiExecutionMode::Success {
                 findings,
                 knowledge_revision: knowledge_revision.map(String::into_boxed_str),
@@ -688,7 +772,7 @@ impl ApiExecutionProvider {
 
 impl FindingProvider for ApiExecutionProvider {
     fn provider_key(&self) -> &'static str {
-        API_WORKER_PROVIDER_KEY
+        self.provider_key
     }
 
     async fn scan<'a>(
@@ -701,7 +785,7 @@ impl FindingProvider for ApiExecutionProvider {
                 knowledge_revision,
             } => {
                 let mut report = ProviderScanReport::new(
-                    API_WORKER_PROVIDER_KEY,
+                    self.provider_key,
                     request.component_key.clone(),
                     request.artifact.clone(),
                     SystemTime::now(),
@@ -717,6 +801,15 @@ impl FindingProvider for ApiExecutionProvider {
 }
 
 const API_WORKER_PROVIDER_KEY: &str = "fixture-provider";
+
+fn resolve_supported_provider_key(value: &str) -> Result<&'static str, AppServiceError> {
+    match value {
+        API_WORKER_PROVIDER_KEY => Ok(API_WORKER_PROVIDER_KEY),
+        _ => Err(AppServiceError::InvalidRequest(format!(
+            "unsupported provider key: {value}"
+        ))),
+    }
+}
 
 fn parse_error_kind(value: &str) -> Result<FindingProviderErrorKind, AppServiceError> {
     match value {
