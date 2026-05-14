@@ -1,3 +1,4 @@
+use crate::postgres_backend::PostgresBackend;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -28,6 +29,15 @@ impl core::fmt::Display for AppServiceError {
 impl std::error::Error for AppServiceError {}
 
 pub struct AppService {
+    backend: AppBackend,
+}
+
+enum AppBackend {
+    Local(LocalBackend),
+    Postgres(PostgresBackend),
+}
+
+struct LocalBackend {
     state: DurableState,
     runtime: DurableScanRuntime,
 }
@@ -38,7 +48,7 @@ impl AppService {
     /// # Errors
     ///
     /// Returns [`AppServiceError`] when the durable state or durable runtime cannot be opened.
-    pub fn open(
+    pub fn open_local(
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, AppServiceError> {
@@ -46,7 +56,23 @@ impl AppService {
             .map_err(|error| AppServiceError::State(error.to_string()))?;
         let runtime = DurableScanRuntime::open(runtime_path)
             .map_err(|error| AppServiceError::State(error.to_string()))?;
-        Ok(Self { state, runtime })
+        Ok(Self {
+            backend: AppBackend::Local(LocalBackend { state, runtime }),
+        })
+    }
+
+    /// Open the application service over a Postgres durable backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the Postgres durable backend cannot be opened.
+    pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, AppServiceError> {
+        let backend = PostgresBackend::open(database_url, schema)
+            .await
+            .map_err(AppServiceError::State)?;
+        Ok(Self {
+            backend: AppBackend::Postgres(backend),
+        })
     }
 
     /// Register one managed component through the application boundary.
@@ -54,17 +80,21 @@ impl AppService {
     /// # Errors
     ///
     /// Returns [`AppServiceError`] when the durable state write fails.
-    pub fn register_component(
+    pub async fn register_component(
         &mut self,
         request: ComponentRegistrationRequest,
     ) -> Result<RegisterComponentResponse, AppServiceError> {
-        let result = self
-            .state
-            .register_component(ComponentRegistration::new(
-                request.component_key,
-                request.name,
-            ))
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let registration = ComponentRegistration::new(request.component_key, request.name);
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .register_component(registration)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .register_component(registration)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
 
         Ok(RegisterComponentResponse {
             change: result.change.as_str().to_owned(),
@@ -77,7 +107,7 @@ impl AppService {
     /// # Errors
     ///
     /// Returns [`AppServiceError`] when the request is invalid or the durable state write fails.
-    pub fn bind_artifact(
+    pub async fn bind_artifact(
         &mut self,
         component_key: &str,
         request: BindArtifactRequest,
@@ -86,10 +116,16 @@ impl AppService {
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity,
         );
-        let result = self
-            .state
-            .bind_artifact(component_key, artifact)
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .bind_artifact(component_key, artifact)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .bind_artifact(component_key, artifact)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
 
         Ok(BindArtifactResponse {
             change: result.change.as_str().to_owned(),
@@ -102,7 +138,7 @@ impl AppService {
     /// # Errors
     ///
     /// Returns [`AppServiceError`] when the request is invalid or the durable state write fails.
-    pub fn record_provider_report(
+    pub async fn record_provider_report(
         &mut self,
         request: ProviderScanReportRequest,
     ) -> Result<RecordProviderReportResponse, AppServiceError> {
@@ -123,10 +159,16 @@ impl AppService {
         );
         report.knowledge_revision = request.knowledge_revision.map(String::into_boxed_str);
 
-        let result = self
-            .state
-            .record_scan_report(&report)
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .record_scan_report(&report)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .record_scan_report(&report)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
 
         Ok(RecordProviderReportResponse {
             discovered: result.discovered,
@@ -149,18 +191,23 @@ impl AppService {
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity.clone(),
         );
-        let findings = self
-            .state
-            .read_model()
-            .active_findings(&request.component_key, &artifact)
-            .into_iter()
-            .map(|finding| ActiveFindingItem {
-                vulnerability_id: finding.vulnerability_id.into(),
-                package_name: finding.package.name.into(),
-                package_version: finding.package.version.into(),
-                severity: severity_name(finding.severity).to_owned(),
-            })
-            .collect::<Vec<_>>();
+        let findings = match &self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .read_model()
+                .active_findings(&request.component_key, &artifact),
+            AppBackend::Postgres(postgres) => {
+                postgres.active_findings(&request.component_key, &artifact)
+            }
+        }
+        .into_iter()
+        .map(|finding| ActiveFindingItem {
+            vulnerability_id: finding.vulnerability_id.into(),
+            package_name: finding.package.name.into(),
+            package_version: finding.package.version.into(),
+            severity: severity_name(finding.severity).to_owned(),
+        })
+        .collect::<Vec<_>>();
 
         Ok(ActiveFindingsResponse {
             component_key: request.component_key,
@@ -176,7 +223,7 @@ impl AppService {
     ///
     /// Returns [`AppServiceError`] when the request is invalid, ownership is unmanaged,
     /// or the durable runtime cannot append the command.
-    pub fn request_scan(
+    pub async fn request_scan(
         &mut self,
         request: RequestScanCommand,
     ) -> Result<RequestScanResponse, AppServiceError> {
@@ -185,16 +232,25 @@ impl AppService {
             request.artifact_identity.clone(),
         );
         let freshness = parse_freshness(&request.freshness)?;
-        let scan_request = ScanPlanner::new(self.state.ingestion().inventory())
-            .plan(&request.component_key, artifact, freshness)
-            .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
-        let enqueue = self
-            .runtime
-            .enqueue(scan_request)
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let command_id = match &mut self.backend {
+            AppBackend::Local(local) => {
+                let scan_request = ScanPlanner::new(local.state.ingestion().inventory())
+                    .plan(&request.component_key, artifact, freshness)
+                    .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+                local
+                    .runtime
+                    .enqueue(scan_request)
+                    .map_err(|error| AppServiceError::State(error.to_string()))?
+                    .command_id
+            }
+            AppBackend::Postgres(postgres) => postgres
+                .request_scan(&request.component_key, artifact, freshness)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
 
         Ok(RequestScanResponse {
-            command_id: enqueue.command_id.into(),
+            command_id: command_id.into(),
             status: ScanCommandStatus::Pending.as_str().to_owned(),
             component_key: request.component_key,
             artifact_kind: request.artifact_kind,
@@ -212,9 +268,11 @@ impl AppService {
         &self,
         command_id: &str,
     ) -> Result<ScanCommandStatusResponse, AppServiceError> {
-        let status = self.runtime.command_status(command_id).ok_or_else(|| {
-            AppServiceError::NotFound(format!("unknown scan command: {command_id}"))
-        })?;
+        let status = match &self.backend {
+            AppBackend::Local(local) => local.runtime.command_status(command_id),
+            AppBackend::Postgres(postgres) => postgres.command_status(command_id),
+        }
+        .ok_or_else(|| AppServiceError::NotFound(format!("unknown scan command: {command_id}")))?;
 
         Ok(ScanCommandStatusResponse {
             command_id: command_id.to_owned(),
@@ -232,11 +290,18 @@ impl AppService {
         request: RunNextScanCommand,
     ) -> Result<RunNextScanResponse, AppServiceError> {
         let provider = ApiExecutionProvider::new(request)?;
-        let outcome = self
-            .runtime
-            .run_next(&mut self.state, &provider)
-            .await
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let outcome =
+            match &mut self.backend {
+                AppBackend::Local(local) => local
+                    .runtime
+                    .run_next(&mut local.state, &provider)
+                    .await
+                    .map_err(|error| AppServiceError::State(error.to_string()))?,
+                AppBackend::Postgres(postgres) => postgres
+                    .run_next(&provider)
+                    .await
+                    .map_err(AppServiceError::State)?,
+            };
 
         Ok(match outcome {
             RunNextScanResult::Idle => RunNextScanResponse {

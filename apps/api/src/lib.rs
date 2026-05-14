@@ -1,3 +1,4 @@
+pub mod postgres_backend;
 pub mod service;
 
 use axum::{
@@ -33,7 +34,21 @@ impl ApiState {
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, String> {
         let service =
-            AppService::open(state_path, runtime_path).map_err(|error| error.to_string())?;
+            AppService::open_local(state_path, runtime_path).map_err(|error| error.to_string())?;
+        Ok(Self {
+            service: Arc::new(Mutex::new(service)),
+        })
+    }
+
+    /// Open the API state over a Postgres durable backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the Postgres durable backend cannot be opened.
+    pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
+        let service = AppService::open_postgres(database_url, schema)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             service: Arc::new(Mutex::new(service)),
         })
@@ -66,6 +81,7 @@ async fn register_component(
         .lock()
         .await
         .register_component(request)
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -80,6 +96,7 @@ async fn bind_artifact(
         .lock()
         .await
         .bind_artifact(&component_key, request)
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -93,6 +110,7 @@ async fn record_provider_report(
         .lock()
         .await
         .record_provider_report(request)
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -106,6 +124,7 @@ async fn request_scan(
         .lock()
         .await
         .request_scan(request)
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -239,6 +258,20 @@ mod tests {
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("venom-api-{name}-{suffix}-{nanos}-{counter}.jsonl"))
+    }
+
+    fn temp_schema(name: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("venom_{name}_{nanos}_{counter}")
+    }
+
+    fn postgres_test_url() -> Option<String> {
+        std::env::var("VENOM_TEST_POSTGRES_URL").ok()
     }
 
     #[tokio::test]
@@ -399,6 +432,99 @@ mod tests {
             )
             .await
             .expect("status request should succeed");
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_reloads_findings_and_scan_status() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("reload");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        let command_id = payload["command_id"]
+            .as_str()
+            .expect("command id should be present")
+            .to_owned();
+
+        let response = run_next_scan_with_fixture(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = reloaded
+            .clone()
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"].as_array().map_or(0, Vec::len), 1);
+
+        let response = reloaded
+            .oneshot(
+                Request::get(format!("/scan-commands/{command_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("status request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
         let body = http_body_util::BodyExt::collect(response.into_body())
             .await
             .expect("response body should collect")
