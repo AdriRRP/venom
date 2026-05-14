@@ -1,7 +1,7 @@
 # W16. App Service And Api
 
 Wave: `W16-app-service-and-api`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `none`
@@ -31,7 +31,7 @@ Expose the current durable inventory and finding flow through a minimal HTTP API
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W16-S01` | done | move dependency freshness back to a truly advisory workflow so PR delivery is not blocked by a non-required noisy gate | workflow inspection, `gh pr checks 1` |
-| `W16-S02` | in_progress | add an application service and minimal HTTP API for component registration, artifact binding, provider report ingestion, and active finding queries | `cargo test --workspace --all-targets --all-features`, `./scripts/check-wave.sh --wave W16-app-service-and-api` |
+| `W16-S02` | done | add an application service and minimal HTTP API for component registration, artifact binding, provider report ingestion, and active finding queries | `cargo test --workspace --all-targets --all-features`, `./scripts/check-wave.sh --wave W16-app-service-and-api` |
 
 ## Language impact
 

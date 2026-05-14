@@ -377,6 +377,21 @@ impl DurableScanRuntimeError {
     }
 }
 
+impl core::fmt::Display for DurableScanRuntimeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "io error: {error}"),
+            Self::Serialize(error) => write!(f, "serialization error: {error}"),
+            Self::CorruptHistory { line, reason } => {
+                write!(f, "corrupt history at line {line}: {reason}")
+            }
+            Self::State(error) => write!(f, "state error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DurableScanRuntimeError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum DurableScanEvent {

@@ -52,6 +52,21 @@ impl FindingReadModel {
                     .any(|finding| finding.vulnerability_id.as_ref() == vulnerability_id)
             })
     }
+
+    #[must_use]
+    pub fn active_findings(
+        &self,
+        component_key: &str,
+        artifact: &ArtifactRef,
+    ) -> Vec<ReportedFinding> {
+        self.active
+            .get(&TrackedArtifactKey::new(
+                component_key.into(),
+                artifact.clone(),
+            ))
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

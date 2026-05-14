@@ -246,6 +246,22 @@ impl DurableStateError {
     }
 }
 
+impl core::fmt::Display for DurableStateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "io error: {error}"),
+            Self::Serialize(error) => write!(f, "serialization error: {error}"),
+            Self::CorruptHistory { line, reason } => {
+                write!(f, "corrupt history at line {line}: {reason}")
+            }
+            Self::Ingestion(error) => write!(f, "ingestion error: {}", error.as_str()),
+            Self::Time(error) => write!(f, "time error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DurableStateError {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum DurableEvent {
