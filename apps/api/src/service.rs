@@ -2,20 +2,24 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use venom_domain::{
-    ArtifactKind, ArtifactRef, ComponentRegistration, DurableState, EvidenceFreshness,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, Severity,
+    ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
+    EvidenceFreshness, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanCommandStatus,
+    ScanPlanner, Severity,
 };
 
 #[derive(Debug)]
 pub enum AppServiceError {
     InvalidRequest(String),
+    NotFound(String),
     State(String),
 }
 
 impl core::fmt::Display for AppServiceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::InvalidRequest(message) | Self::State(message) => f.write_str(message),
+            Self::InvalidRequest(message) | Self::NotFound(message) | Self::State(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -24,6 +28,7 @@ impl std::error::Error for AppServiceError {}
 
 pub struct AppService {
     state: DurableState,
+    runtime: DurableScanRuntime,
 }
 
 impl AppService {
@@ -31,11 +36,16 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state cannot be opened.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, AppServiceError> {
-        let state =
-            DurableState::open(path).map_err(|error| AppServiceError::State(error.to_string()))?;
-        Ok(Self { state })
+    /// Returns [`AppServiceError`] when the durable state or durable runtime cannot be opened.
+    pub fn open(
+        state_path: impl Into<PathBuf>,
+        runtime_path: impl Into<PathBuf>,
+    ) -> Result<Self, AppServiceError> {
+        let state = DurableState::open(state_path)
+            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        let runtime = DurableScanRuntime::open(runtime_path)
+            .map_err(|error| AppServiceError::State(error.to_string()))?;
+        Ok(Self { state, runtime })
     }
 
     /// Register one managed component through the application boundary.
@@ -158,6 +168,58 @@ impl AppService {
             active_findings: findings,
         })
     }
+
+    /// Create and durably enqueue one canonical scan request for managed ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid, ownership is unmanaged,
+    /// or the durable runtime cannot append the command.
+    pub fn request_scan(
+        &mut self,
+        request: RequestScanCommand,
+    ) -> Result<RequestScanResponse, AppServiceError> {
+        let artifact = ArtifactRef::new(
+            parse_artifact_kind(&request.artifact_kind)?,
+            request.artifact_identity.clone(),
+        );
+        let freshness = parse_freshness(&request.freshness)?;
+        let scan_request = ScanPlanner::new(self.state.ingestion().inventory())
+            .plan(&request.component_key, artifact, freshness)
+            .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+        let enqueue = self
+            .runtime
+            .enqueue(scan_request)
+            .map_err(|error| AppServiceError::State(error.to_string()))?;
+
+        Ok(RequestScanResponse {
+            command_id: enqueue.command_id.into(),
+            status: ScanCommandStatus::Pending.as_str().to_owned(),
+            component_key: request.component_key,
+            artifact_kind: request.artifact_kind,
+            artifact_identity: request.artifact_identity,
+            freshness: request.freshness,
+        })
+    }
+
+    /// Query the durable status of one scan command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
+    pub fn scan_command_status(
+        &self,
+        command_id: &str,
+    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
+        let status = self.runtime.command_status(command_id).ok_or_else(|| {
+            AppServiceError::NotFound(format!("unknown scan command: {command_id}"))
+        })?;
+
+        Ok(ScanCommandStatusResponse {
+            command_id: command_id.to_owned(),
+            status: status.as_str().to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +304,30 @@ pub struct ActiveFindingItem {
     pub package_name: String,
     pub package_version: String,
     pub severity: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestScanCommand {
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestScanResponse {
+    pub command_id: String,
+    pub status: String,
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScanCommandStatusResponse {
+    pub command_id: String,
+    pub status: String,
 }
 
 fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, AppServiceError> {

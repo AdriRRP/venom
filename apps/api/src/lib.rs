@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
     ComponentRegistrationRequest, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterComponentResponse,
+    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, ScanCommandStatusResponse,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,9 +25,13 @@ impl ApiState {
     ///
     /// # Errors
     ///
-    /// Returns an error string when the underlying durable state cannot be opened.
-    pub fn open(state_path: impl Into<PathBuf>) -> Result<Self, String> {
-        let service = AppService::open(state_path).map_err(|error| error.to_string())?;
+    /// Returns an error string when the underlying durable state or runtime cannot be opened.
+    pub fn open(
+        state_path: impl Into<PathBuf>,
+        runtime_path: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        let service =
+            AppService::open(state_path, runtime_path).map_err(|error| error.to_string())?;
         Ok(Self {
             service: Arc::new(Mutex::new(service)),
         })
@@ -39,6 +43,8 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/components", post(register_component))
         .route("/components/{component_key}/artifacts", post(bind_artifact))
+        .route("/scan-requests", post(request_scan))
+        .route("/scan-commands/{command_id}", get(scan_command_status))
         .route("/provider-reports", post(record_provider_report))
         .route("/findings/active", get(list_active_findings))
         .with_state(state)
@@ -84,6 +90,32 @@ async fn record_provider_report(
         .lock()
         .expect("api service mutex should not be poisoned")
         .record_provider_report(request)
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn request_scan(
+    State(state): State<ApiState>,
+    Json(request): Json<RequestScanCommand>,
+) -> Result<Json<RequestScanResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .expect("api service mutex should not be poisoned")
+        .request_scan(request)
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn scan_command_status(
+    State(state): State<ApiState>,
+    Path(command_id): Path<String>,
+) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .expect("api service mutex should not be poisoned")
+        .scan_command_status(&command_id)
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -148,6 +180,10 @@ impl From<service::AppServiceError> for ApiError {
     fn from(value: service::AppServiceError) -> Self {
         match value {
             service::AppServiceError::InvalidRequest(message) => Self::bad_request(message),
+            service::AppServiceError::NotFound(message) => Self {
+                status: StatusCode::NOT_FOUND,
+                message,
+            },
             service::AppServiceError::State(message) => Self::internal(message),
         }
     }
@@ -178,20 +214,25 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
 
-    fn temp_path(name: &str) -> std::path::PathBuf {
+    fn temp_path(name: &str, suffix: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("current time should be after unix epoch")
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("venom-api-{name}-{nanos}-{counter}.jsonl"))
+        std::env::temp_dir().join(format!("venom-api-{name}-{suffix}-{nanos}-{counter}.jsonl"))
     }
 
     #[tokio::test]
     async fn api_registers_binds_reports_and_queries_active_findings() {
-        let router =
-            build_router(ApiState::open(temp_path("integration")).expect("api state should open"));
+        let router = build_router(
+            ApiState::open(
+                temp_path("integration", "state"),
+                temp_path("integration", "runtime"),
+            )
+            .expect("api state should open"),
+        );
 
         let response = router
             .clone()
@@ -269,6 +310,94 @@ mod tests {
             )
             .await
             .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_enqueues_scan_requests_and_exposes_pending_status() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("scan-request", "state"),
+                temp_path("scan-request", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components/component:payments-api/artifacts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bind request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/scan-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "freshness": "deterministic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("scan request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        let command_id = payload["command_id"]
+            .as_str()
+            .expect("command id should be present")
+            .to_owned();
+        assert_eq!(payload["status"], "pending");
+
+        let response = router
+            .oneshot(
+                Request::get(format!("/scan-commands/{command_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("status request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
     }
 }
