@@ -29,7 +29,8 @@ Remove unused SQLx backend surface so the default dependency graph matches the P
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W22-S01` | done | disable unused SQLx default backends and regenerate the lockfile so audit only covers the runtime we actually ship | `cargo test --workspace --all-targets --all-features`, `./scripts/check-audit.sh`, `./scripts/check-wave.sh --wave W22-dependency-surface-hardening` |
+| `W22-S01` | done | disable unused SQLx default backends and simplify Postgres row mapping so audit tracks a smaller real runtime surface | `cargo test --workspace --all-targets --all-features`, `./scripts/check-audit.sh` |
+| `W22-S02` | done | reset the active wave pointer after closing the security hardening wave | `./scripts/check-wave.sh --wave W22-dependency-surface-hardening` |
 
 ## Language impact
 
