@@ -45,9 +45,20 @@ When the domain model changes in a meaningful way, `docs/ubiquitous-language.md`
 
 Default implementation choices for hot paths must favor low allocation, bounded copying, predictable latency, and compact data movement over convenience abstractions that materially erode performance.
 
+Apply these defaults unless measurement proves otherwise:
+
+- prefer compact owned forms such as enums, `Box<str>`, and small value objects over pervasive heap-heavy `String` and generic map payloads
+- prefer immutable identifiers and incremental comparison over rebuilding large in-memory snapshots in hot paths
+- avoid unbounded queues, silent buffering, and per-item task fan-out on durable business paths
+- make allocations, cloning, and serialization in hot paths explicit and reviewable
+
 ### I9. Near nation-grade reliability
 
 Business-critical paths must be designed so that loss, duplication, reordering, restart, backpressure, and partial infrastructure failure are treated as normal design inputs, not exceptional afterthoughts.
+
+### I10. VENOM owns finding lifecycle semantics
+
+Providers may discover vulnerabilities, but the meaning of discovered, repeated, changed, or withdrawn findings must be derived inside VENOM from canonical provider observations rather than delegated to provider-specific delta semantics.
 
 ## Update rule
 

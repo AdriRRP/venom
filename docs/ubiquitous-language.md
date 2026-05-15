@@ -16,9 +16,12 @@ Rules:
 flowchart LR
     Collection -->|groups| Component
     Component -->|runs in| ExecutionContext
+    Component -->|owns| Artifact
     ContextProfile -->|templates| ExecutionContext
     Component -->|has many| Finding
     Finding -->|observes| Vulnerability
+    DurableState -->|rebuilds| ActiveFindingProjection
+    ScanCommand -->|targets| Artifact
     Finding -->|reported by| FindingProvider
 ```
 
@@ -26,15 +29,24 @@ flowchart LR
 
 | Term | Kind | Definition | Avoid |
 |---|---|---|---|
+| Artifact | value object | An immutable scan subject identity, such as an image digest or SBOM digest, that a provider observed. | mutable tags as the primary identity |
+| Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A named grouping of components managed as one scope. | "group", "universe" as the default term |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
 | Context Profile | entity | A reusable template of execution-context information. | "preset" as the canonical domain name |
+| Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |
 | Execution Context | value object | The runtime and business context that changes how a finding should be interpreted. | "environment" when the richer domain meaning is intended |
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |
 | Finding Provider | port | A provider-specific source of findings mapped into VENOM's canonical finding model. | provider schema names as domain terms |
+| Managed Artifact | relationship | An explicit ownership binding between a managed component and an immutable artifact identity. | assuming a report artifact belongs to a component without registration |
+| Provider Runtime Configuration | relationship | The durable binding that tells VENOM which provider implementation one managed component should use when executing scans. | choosing the provider ad hoc in a worker request payload |
+| Provider Scan Report | value object | A complete provider snapshot of findings for one component and one immutable artifact at one observation time. | provider webhooks or scanner payloads as domain terms |
+| Scan Command | command | A durably queued request for one canonical scan that must end in an explicit terminal state such as completed or failed. | hidden background work or implicit retries |
+| Scan Execution | process | The act of executing one canonical scan request through a provider and applying the resulting provider scan report. | direct scanner details as the domain term |
+| Scan Request | value object | A canonical request for a provider scan over one managed component, one owned immutable artifact, and one freshness mode. | ad-hoc scanner invocation details as the domain term |
 | Risk Acceptance | decision | A classification outcome that explicitly accepts a finding's risk for a bounded period or scope. | "ignore" |
-| Scan | process | The act of asking a finding provider for the current findings of a component or scope. | "sync" when scan semantics are intended |
+| Scan | process | The act of asking a finding provider for the current findings of a component or artifact scope. | "sync" when scan semantics are intended |
 | Suppression | decision | A classification outcome that hides a finding from normal operational attention under explicit rationale. | "mute" |
 | Vulnerability | entity | The canonical vulnerability or advisory that may be observed across many findings. | "CVE" as a universal synonym |
 

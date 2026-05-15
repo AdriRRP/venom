@@ -35,3 +35,9 @@ jobs:
 
       - name: Run test gate
         run: ./scripts/check-tests.sh
+
+      - name: Run acceptance gate
+        run: ./scripts/check-acceptance.sh
+
+      - name: Run contract gate
+        run: ./scripts/check-contracts.sh

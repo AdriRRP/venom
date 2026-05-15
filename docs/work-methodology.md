@@ -15,8 +15,10 @@ Deliver VENOM through a workflow that is simple, verifiable, and easy for humans
 7. Run the slice gate.
 8. Commit the slice.
 9. Repeat until the wave is complete.
-10. Run the full wave gate.
-11. Push.
+10. Commit the final slice that closes the wave.
+11. Mark the wave doc `done`.
+12. Run the full wave gate on the clean committed tree.
+13. Push immediately.
 
 ## Definitions
 
@@ -104,6 +106,13 @@ Example:
 
 - `feat(domain): [W02-S03] add duplicate registration rule`
 
+## Persistence discipline
+
+- a slice is not complete until it is committed
+- a wave is not complete until the wave gate passed on a clean committed tree and the commit set has been pushed
+- a green local test run on an uncommitted dirty worktree does not count as a completed wave
+- the default wave gate must fail if the worktree is dirty or if the wave doc is not marked `done`
+
 ## Non-negotiable rules
 
 1. Every change must be small, testable, and reversible.
@@ -130,11 +139,13 @@ Real production-shaped infrastructure such as PostgreSQL and the message broker,
 Purpose:
 
 - catch startup, networking, broker, migration, readiness, and multi-process faults early
+- fail explicitly if another compose-backed rehearsal is already running in the same repo
 
 Owned under:
 
 - `infra/**`
 - `scripts/rehearse-infra.sh`
+- `scripts/infra-smoke.sh`
 
 ### L3. Acceptance BDD
 
@@ -237,6 +248,7 @@ Rules:
 - may read the wave doc for convenience, but explicit CLI inputs remain canonical
 - must fail explicitly if executable specs or contract assets appear before their gate runner exists
 - must include infra rehearsal in the default full wave path
+- must fail if the worktree is dirty or the wave doc is not `done`
 
 ### Heavy gate
 
@@ -272,7 +284,13 @@ Enforcement:
 Advisory or scheduled checks:
 
 - `unused-deps`
+- `dependency-freshness`
 - future stress, resilience, and infra rehearsal workflows
+
+Default expectation:
+
+- advisory checks should run on `schedule` or `workflow_dispatch` by default
+- do not attach an advisory-only gate to normal PR flow unless it has explicitly graduated into the required path
 
 Rule:
 

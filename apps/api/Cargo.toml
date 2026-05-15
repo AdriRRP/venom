@@ -5,4 +5,13 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-venom-vulnerability-management = { path = "../../crates/venom-vulnerability-management" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+venom-domain = { path = "../../crates/venom-domain" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+serde_json = "1"
+tower = { version = "0.5", features = ["util"] }

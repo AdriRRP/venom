@@ -10,6 +10,8 @@
 # Local tool output
 /.nextest
 /.cargo
+/.cargo-home
+/.cargo-home-check
 
 # Python
 __pycache__/

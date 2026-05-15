@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    profiles: ["db", "full"]
+    environment:
+      POSTGRES_DB: venom
+      POSTGRES_USER: venom
+      POSTGRES_PASSWORD: venom
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U venom -d venom"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s

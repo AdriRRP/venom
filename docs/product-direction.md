@@ -12,10 +12,12 @@ The platform target is:
 ## Product outcomes
 
 - know which components and collections are under management
-- ingest findings from multiple providers or local fixtures
+- ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings
+- derive discovery and withdrawal semantics inside VENOM rather than trusting provider delta semantics
 - classify findings using execution context and governance decisions
 - expose durable operational views that survive restarts and infrastructure faults
+- queue scan execution durably and expose explicit terminal command state
 - keep hot paths, memory use, and infrastructure chatter aggressively lean
 
 ## Capability map
@@ -23,7 +25,9 @@ The platform target is:
 | Capability | Why it exists | Typical canonical feature shape |
 |---|---|---|
 | Inventory | know what is under management | `register-component.feature` |
-| Finding ingestion | import concrete observations | `report-finding.feature` |
+| Scan orchestration | express canonical scan requests over managed ownership | `request-scan.feature` |
+| Finding ingestion | import concrete provider observations over immutable artifacts | `report-finding.feature` |
+| Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
 | Contextual risk | change meaning by runtime context | `classify-finding.feature` |
 | Governance | accept, suppress, withdraw, explain | `accept-risk.feature` |
 | Operations | answer what is active, changed, pending | `view-active-findings.feature` |

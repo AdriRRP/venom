@@ -33,6 +33,7 @@ find_compose_file() {
 }
 
 profile="full"
+lock_dir=".tmp/infra-rehearsal.lock"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -62,7 +63,13 @@ esac
 compose_file="$(find_compose_file || true)"
 
 if [[ -z "$compose_file" ]]; then
-  echo "SKIP: no infra compose file is wired yet"
+  if [[ -x "scripts/infra-smoke.sh" ]]; then
+    VENOM_INFRA_PROFILE="$profile" ./scripts/infra-smoke.sh
+    echo "RESULT: PASS"
+    exit 0
+  fi
+
+  echo "SKIP: no infra compose file or infra smoke runner is wired yet"
   echo "RESULT: PASS"
   exit 0
 fi
@@ -86,10 +93,16 @@ esac
 
 cleanup() {
   docker compose "${compose_args[@]}" down -v >/dev/null 2>&1 || true
+  rmdir "$lock_dir" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-docker compose "${compose_args[@]}" up -d
+mkdir -p .tmp
+if ! mkdir "$lock_dir" >/dev/null 2>&1; then
+  fail "another infra rehearsal is already running in this repo"
+fi
+
+docker compose "${compose_args[@]}" up -d --wait
 
 VENOM_INFRA_COMPOSE_FILE="$compose_file" \
 VENOM_INFRA_PROFILE="$profile" \

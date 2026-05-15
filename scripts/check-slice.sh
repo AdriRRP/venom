@@ -39,7 +39,7 @@ infra_profile_from_wave() {
 
   [[ -f "$doc" ]] || fail "missing wave doc: $doc"
 
-  profile="$(sed -n 's/^Infra profile: `\\(.*\\)`$/\\1/p' "$doc" | head -n 1)"
+  profile="$(sed -n 's/^Infra profile: `\(.*\)`$/\1/p' "$doc" | head -n 1)"
   [[ -n "$profile" ]] || profile="none"
   echo "$profile"
 }
@@ -58,7 +58,8 @@ has_contract_specs() {
 
 run_acceptance_lane() {
   if has_acceptance_specs; then
-    fail "acceptance specs exist but no acceptance runner is wired yet"
+    ./scripts/check-acceptance.sh
+    return 0
   fi
 
   echo "SKIP: no acceptance specs"
@@ -74,7 +75,8 @@ run_e2e_lane() {
 
 run_contract_lane() {
   if has_contract_specs; then
-    fail "contract checks exist but no contract runner is wired yet"
+    ./scripts/check-contracts.sh
+    return 0
   fi
 
   echo "SKIP: no contract checks"

@@ -26,10 +26,12 @@ Recommended:
 Do not require at this stage:
 
 - `unused-deps`
+- `dependency-freshness`
 
 Reason:
 
 - it is useful, but still better treated as advisory until it proves stable across real delivery waves
+- the default posture is scheduled or manually triggered, not PR-blocking
 
 ## Review rule
 

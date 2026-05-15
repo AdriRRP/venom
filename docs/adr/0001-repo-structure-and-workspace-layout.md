@@ -22,7 +22,7 @@ Use:
 - a virtual Cargo workspace at the repo root
 - `apps/` for runtime entrypoints
 - `crates/` for Rust libraries
-- one bounded-context crate to start: `crates/venom-vulnerability-management`
+- one bounded-context crate to start: `crates/venom-domain`
 - `features/` for canonical executable specs
 - `tests/contracts/` for port and adapter compatibility checks
 - `scripts/` for deterministic automations
