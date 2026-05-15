@@ -1,4 +1,4 @@
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions, types::Json};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
@@ -530,18 +530,18 @@ impl PostgresBackend {
     }
 
     async fn load_components(&mut self) -> Result<(), String> {
-        let components = sqlx::query_as::<_, ComponentRow>(&format!(
+        let components = sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT component_key, name FROM {} ORDER BY created_at, component_key",
             self.names.components
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres components load failed: {error}"))?;
-        for row in components {
+        for (component_key, name) in components {
             let result = self
                 .ingestion
                 .inventory_mut()
-                .register(ComponentRegistration::new(row.component_key, row.name));
+                .register(ComponentRegistration::new(component_key, name));
             if result.change == RegisterComponentChange::Rejected {
                 return Err("postgres components contain conflicting registration".to_owned());
             }
@@ -551,7 +551,7 @@ impl PostgresBackend {
     }
 
     async fn load_artifact_bindings(&mut self) -> Result<(), String> {
-        let bindings = sqlx::query_as::<_, ArtifactBindingRow>(&format!(
+        let bindings = sqlx::query_as::<_, (String, String, String)>(&format!(
             concat!(
                 "SELECT component_key, artifact_kind, artifact_identity ",
                 "FROM {} ORDER BY created_at, component_key, artifact_kind, artifact_identity"
@@ -561,13 +561,10 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres artifact bindings load failed: {error}"))?;
-        for row in bindings {
+        for (component_key, artifact_kind, artifact_identity) in bindings {
             let result = self.ingestion.inventory_mut().bind_artifact(
-                row.component_key.as_ref(),
-                ArtifactRef::new(
-                    parse_artifact_kind(&row.artifact_kind)?,
-                    row.artifact_identity,
-                ),
+                component_key.as_ref(),
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
             );
             if result.change == BindArtifactChange::Rejected {
                 return Err("postgres artifact bindings contain conflicting ownership".to_owned());
@@ -578,7 +575,8 @@ impl PostgresBackend {
     }
 
     async fn load_provider_reports(&mut self) -> Result<(), String> {
-        let reports = sqlx::query_as::<_, ProviderReportRow>(&format!(
+        let reports = sqlx::query_as::<_, (String, String, String, String, i64, String, Option<String>, Json<Vec<ReportedFinding>>)>(
+            &format!(
             concat!(
                 "SELECT provider_key, component_key, artifact_kind, artifact_identity, ",
                 "observed_at_micros, freshness, knowledge_revision, findings ",
@@ -589,18 +587,25 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres provider reports load failed: {error}"))?;
-        for row in reports {
+        for (
+            provider_key,
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            observed_at_micros,
+            freshness,
+            knowledge_revision,
+            findings,
+        ) in reports
+        {
             let report = ProviderScanReport {
-                provider_key: row.provider_key.into_boxed_str(),
-                component_key: row.component_key.into_boxed_str(),
-                artifact: ArtifactRef::new(
-                    parse_artifact_kind(&row.artifact_kind)?,
-                    row.artifact_identity,
-                ),
-                observed_at: micros_to_system_time(row.observed_at_micros)?,
-                freshness: parse_freshness(&row.freshness)?,
-                knowledge_revision: row.knowledge_revision.map(String::into_boxed_str),
-                findings: row.findings.0,
+                provider_key: provider_key.into_boxed_str(),
+                component_key: component_key.into_boxed_str(),
+                artifact: ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                observed_at: micros_to_system_time(observed_at_micros)?,
+                freshness: parse_freshness(&freshness)?,
+                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
+                findings: findings.0,
             };
             self.ingestion
                 .record_scan_report(&report)
@@ -614,18 +619,18 @@ impl PostgresBackend {
     }
 
     async fn load_provider_runtime_configs(&mut self) -> Result<(), String> {
-        let configs = sqlx::query_as::<_, ProviderRuntimeConfigRow>(&format!(
+        let configs = sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT component_key, provider_key FROM {} ORDER BY component_key",
             self.names.provider_runtime_configs
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres provider runtime configs load failed: {error}"))?;
-        for row in configs {
+        for (component_key, provider_key) in configs {
             let result = self
                 .ingestion
                 .inventory_mut()
-                .configure_provider(&row.component_key, row.provider_key);
+                .configure_provider(&component_key, provider_key);
             if result.change == ConfigureProviderChange::Rejected {
                 return Err(
                     "postgres provider runtime config references unknown component".to_owned(),
@@ -637,7 +642,7 @@ impl PostgresBackend {
     }
 
     async fn load_scan_commands(&mut self) -> Result<(), String> {
-        let commands = sqlx::query_as::<_, ScanCommandRow>(&format!(
+        let commands = sqlx::query_as::<_, (String, String, String, String, String, String)>(&format!(
             concat!(
                 "SELECT command_id, component_key, artifact_kind, artifact_identity, freshness, status ",
                 "FROM {} ORDER BY order_id"
@@ -647,22 +652,19 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres scan commands load failed: {error}"))?;
-        for row in commands {
-            let command_id = row.command_id.into_boxed_str();
+        for (command_id, component_key, artifact_kind, artifact_identity, freshness, status) in commands {
+            let command_id = command_id.into_boxed_str();
             let request = ScanRequest::new(
-                row.component_key,
-                ArtifactRef::new(
-                    parse_artifact_kind(&row.artifact_kind)?,
-                    row.artifact_identity,
-                ),
-                parse_freshness(&row.freshness)?,
+                component_key,
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                parse_freshness(&freshness)?,
             );
             self.order.push(command_id.clone());
             self.commands.insert(
                 command_id,
                 ScanCommandRecord {
                     request,
-                    status: parse_scan_command_status(&row.status)?,
+                    status: parse_scan_command_status(&status)?,
                 },
             );
         }
@@ -699,47 +701,6 @@ impl TableNames {
             schema,
         })
     }
-}
-
-#[derive(Debug, FromRow)]
-struct ComponentRow {
-    component_key: String,
-    name: String,
-}
-
-#[derive(Debug, FromRow)]
-struct ArtifactBindingRow {
-    component_key: String,
-    artifact_kind: String,
-    artifact_identity: String,
-}
-
-#[derive(Debug, FromRow)]
-struct ProviderRuntimeConfigRow {
-    component_key: String,
-    provider_key: String,
-}
-
-#[derive(Debug, FromRow)]
-struct ProviderReportRow {
-    provider_key: String,
-    component_key: String,
-    artifact_kind: String,
-    artifact_identity: String,
-    observed_at_micros: i64,
-    freshness: String,
-    knowledge_revision: Option<String>,
-    findings: Json<Vec<ReportedFinding>>,
-}
-
-#[derive(Debug, FromRow)]
-struct ScanCommandRow {
-    command_id: String,
-    component_key: String,
-    artifact_kind: String,
-    artifact_identity: String,
-    freshness: String,
-    status: String,
 }
 
 fn validate_schema_name(schema: &str) -> Result<Box<str>, String> {
