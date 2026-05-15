@@ -575,8 +575,19 @@ impl PostgresBackend {
     }
 
     async fn load_provider_reports(&mut self) -> Result<(), String> {
-        let reports = sqlx::query_as::<_, (String, String, String, String, i64, String, Option<String>, Json<Vec<ReportedFinding>>)>(
-            &format!(
+        let reports = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                Option<String>,
+                Json<Vec<ReportedFinding>>,
+            ),
+        >(&format!(
             concat!(
                 "SELECT provider_key, component_key, artifact_kind, artifact_identity, ",
                 "observed_at_micros, freshness, knowledge_revision, findings ",
@@ -652,7 +663,9 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres scan commands load failed: {error}"))?;
-        for (command_id, component_key, artifact_kind, artifact_identity, freshness, status) in commands {
+        for (command_id, component_key, artifact_kind, artifact_identity, freshness, status) in
+            commands
+        {
             let command_id = command_id.into_boxed_str();
             let request = ScanRequest::new(
                 component_key,
