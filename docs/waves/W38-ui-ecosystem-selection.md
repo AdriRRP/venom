@@ -1,7 +1,7 @@
 # W38. UI Ecosystem Selection
 
 Wave: `W38-ui-ecosystem-selection`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `none`
@@ -29,7 +29,7 @@ Select the most suitable UI ecosystem for a first VENOM operator console, using 
 |---|---|---|---|
 | `W38-S01` | done | define the UI ecosystem selection wave and target | `./scripts/check-slice.sh --wave W38-ui-ecosystem-selection --slice W38-S01 --path docs/waves/ACTIVE --path docs/waves/W38-ui-ecosystem-selection.md` |
 | `W38-S02` | done | document the ecosystem evaluation, persist the active-wave pointer, and recommend one default path for VENOM | `./scripts/check-slice.sh --wave W38-ui-ecosystem-selection --slice W38-S02 --path docs/waves/ACTIVE --path docs/ui-ecosystem-evaluation.md` |
-| `W38-S03` | planned | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W38-ui-ecosystem-selection` |
+| `W38-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W38-ui-ecosystem-selection` |
 
 ## Language impact
 
