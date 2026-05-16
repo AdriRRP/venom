@@ -1,6 +1,6 @@
 use crate::app::service::{
-    self, ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
-    ComponentRegistrationRequest, ConfigureIntegrationRuntimeRequest,
+    self, ActiveFindingsResponse, AppReadSnapshot, AppService, BindArtifactRequest,
+    BindArtifactResponse, ComponentRegistrationRequest, ConfigureIntegrationRuntimeRequest,
     ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ProviderScanReportRequest, RecordProviderReportResponse,
@@ -16,11 +16,17 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, watch};
 
 #[derive(Clone)]
 pub struct ApiState {
-    service: Arc<RwLock<AppService>>,
+    inner: Arc<ApiStateInner>,
+}
+
+struct ApiStateInner {
+    service: Mutex<AppService>,
+    read_snapshot_tx: watch::Sender<Arc<AppReadSnapshot>>,
+    read_snapshot_rx: watch::Receiver<Arc<AppReadSnapshot>>,
 }
 
 impl ApiState {
@@ -35,9 +41,7 @@ impl ApiState {
     ) -> Result<Self, String> {
         let service =
             AppService::open_local(state_path, runtime_path).map_err(|error| error.to_string())?;
-        Ok(Self {
-            service: Arc::new(RwLock::new(service)),
-        })
+        Ok(Self::new(service))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -49,9 +53,29 @@ impl ApiState {
         let service = AppService::open_postgres(database_url, schema)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(Self {
-            service: Arc::new(RwLock::new(service)),
-        })
+        Ok(Self::new(service))
+    }
+
+    fn new(service: AppService) -> Self {
+        let snapshot = Arc::new(service.read_snapshot());
+        let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
+        Self {
+            inner: Arc::new(ApiStateInner {
+                service: Mutex::new(service),
+                read_snapshot_tx,
+                read_snapshot_rx,
+            }),
+        }
+    }
+
+    fn read_snapshot(&self) -> Arc<AppReadSnapshot> {
+        self.inner.read_snapshot_rx.borrow().clone()
+    }
+
+    fn refresh_snapshot(&self, service: &AppService) {
+        self.inner
+            .read_snapshot_tx
+            .send_replace(Arc::new(service.read_snapshot()));
     }
 }
 
@@ -83,13 +107,12 @@ async fn register_component(
     State(state): State<ApiState>,
     Json(request): Json<ComponentRegistrationRequest>,
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .register_component(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -98,13 +121,12 @@ async fn bind_artifact(
     Path(component_key): Path<String>,
     Json(request): Json<BindArtifactRequest>,
 ) -> Result<Json<BindArtifactResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .bind_artifact(&component_key, request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -113,13 +135,12 @@ async fn configure_provider(
     Path(component_key): Path<String>,
     Json(request): Json<ConfigureProviderRequest>,
 ) -> Result<Json<ConfigureProviderResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .configure_provider(&component_key, request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -127,13 +148,12 @@ async fn configure_integration_runtime(
     State(state): State<ApiState>,
     Json(request): Json<ConfigureIntegrationRuntimeRequest>,
 ) -> Result<Json<ConfigureIntegrationRuntimeResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .configure_integration_runtime(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -141,13 +161,12 @@ async fn record_provider_report(
     State(state): State<ApiState>,
     Json(request): Json<ProviderScanReportRequest>,
 ) -> Result<Json<RecordProviderReportResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .record_provider_report(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -155,13 +174,12 @@ async fn request_scan(
     State(state): State<ApiState>,
     Json(request): Json<RequestScanCommand>,
 ) -> Result<Json<RequestScanResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .request_scan(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -170,9 +188,7 @@ async fn scan_command_status(
     Path(command_id): Path<String>,
 ) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
     let response = state
-        .service
-        .read()
-        .await
+        .read_snapshot()
         .scan_command_status(&command_id)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -182,13 +198,12 @@ async fn run_next_scan(
     State(state): State<ApiState>,
     Json(request): Json<RunNextScanCommand>,
 ) -> Result<Json<RunNextScanResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .run_next_scan(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -196,13 +211,12 @@ async fn drain_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainWorkerCommand>,
 ) -> Result<Json<DrainWorkerResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .run_worker_until_idle(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -210,13 +224,12 @@ async fn drain_integration_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainIntegrationWorkerCommand>,
 ) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
-    let response = state
-        .service
-        .write()
-        .await
+    let mut service = state.inner.service.lock().await;
+    let response = service
         .publish_integration_events_until_idle(request)
         .await
         .map_err(ApiError::from)?;
+    state.refresh_snapshot(&service);
     Ok(Json(response))
 }
 
@@ -225,9 +238,7 @@ async fn list_active_findings(
     Query(query): Query<ActiveFindingsQuery>,
 ) -> Result<Json<ActiveFindingsResponse>, ApiError> {
     let response = state
-        .service
-        .read()
-        .await
+        .read_snapshot()
         .list_active_findings(query.into_request())
         .map_err(ApiError::from)?;
     Ok(Json(response))

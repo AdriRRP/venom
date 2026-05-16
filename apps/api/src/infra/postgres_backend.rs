@@ -2,16 +2,15 @@ use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BindArtifactChange,
-    BindArtifactResult, CompletedScanCommand, ComponentRegistration,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
-    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
-    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, RegisterComponentChange, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest,
-    as_provider_error, validate_provider_scan_report,
+    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CompletedScanCommand,
+    ComponentRegistration, ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
+    ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FailedScanCommand,
+    FindingChangeSet, FindingIngestion, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublicationFailure,
+    IntegrationEventPublisher, IntegrationRuntimeConfig, PendingIntegrationEvent,
+    ProviderScanReport, PublishIntegrationEventsResult, RegisterComponentChange,
+    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
+    ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -252,8 +251,8 @@ impl PostgresBackend {
     }
 
     #[must_use]
-    pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
-        self.read_model.query_active_findings(query)
+    pub fn read_model_snapshot(&self) -> FindingReadModel {
+        self.read_model.clone()
     }
 
     #[must_use]
@@ -334,6 +333,14 @@ impl PostgresBackend {
     #[must_use]
     pub fn command_status(&self, command_id: &str) -> Option<ScanCommandStatus> {
         self.commands.get(command_id).map(|record| record.status)
+    }
+
+    #[must_use]
+    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
+        self.commands
+            .iter()
+            .map(|(command_id, record)| (command_id.clone(), record.status))
+            .collect()
     }
 
     #[must_use]
