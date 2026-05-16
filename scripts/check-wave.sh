@@ -78,6 +78,10 @@ run_contract_lane() {
   echo "SKIP: no contract checks"
 }
 
+repo_has_web_app() {
+  [[ -f apps/web/package.json ]]
+}
+
 run_infra_lane() {
   local profile="$1"
 
@@ -95,6 +99,9 @@ run_full_wave() {
   ./scripts/check-git-discipline.sh --mode wave --wave "$wave"
   ./scripts/check-quality.sh
   ./scripts/check-tests.sh
+  if repo_has_web_app; then
+    ./scripts/check-web.sh --lane build
+  fi
   run_infra_lane "$profile"
   run_acceptance_lane
   run_e2e_lane
@@ -134,6 +141,9 @@ infra_profile="$(infra_profile_from_wave "$wave")"
 case "$lane" in
   unit|integration)
     ./scripts/check-tests.sh
+    if repo_has_web_app; then
+      ./scripts/check-web.sh --lane build
+    fi
     ;;
   infra)
     run_infra_lane "$infra_profile"
