@@ -62,6 +62,7 @@ Rules:
 - keep application wiring here
 - keep domain logic out of here
 - add `apps/web` or `apps/cli` only when they actually exist
+- when an app grows, separate `http/`, `app/`, and `infra/` concerns before adding more endpoints or adapters
 
 ### `crates/`
 
@@ -76,6 +77,12 @@ This is the main correction over legacy:
 
 - DDD boundaries still matter
 - but the repo should not over-crate early
+
+Internal rule:
+
+- group modules by stable capability or boundary once a flat module list starts hiding the shape of the domain
+- prefer a small number of internal directories such as `inventory/`, `findings/`, `scanning/`, and `integration/` over one file per concept in the crate root
+- keep crate roots thin and explicit
 
 ### `docs/`
 
