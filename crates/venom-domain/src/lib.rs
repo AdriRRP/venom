@@ -1,17 +1,17 @@
+pub mod durable_state;
 pub mod findings;
 pub mod integration;
 pub mod inventory;
 pub mod scanning;
-pub mod durable_state;
 
 pub use durable_state::{DurableState, DurableStateError};
 pub use findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
     DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet, FindingIngestion,
-    FindingIngestionError, FindingProvider, FindingProviderContractViolation,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingTracker,
-    MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    ScanRequest, Severity, as_provider_error, validate_provider_scan_report,
+    FindingIngestionError, FindingProvider, FindingProviderContractViolation, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, ScanRequest, Severity,
+    as_provider_error, validate_provider_scan_report,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,
