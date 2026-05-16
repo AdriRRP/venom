@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactResult, ComponentRegistration, DurableScanRuntime,
-    DurableState, EvidenceFreshness, FindingChangeSet, FindingIngestion, FindingIngestionError,
-    FindingProvider, FindingProviderError, FindingProviderErrorKind, PackageCoordinate,
-    ProviderScanReport, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanExecutionResult, ScanPlanner, ScanPlanningError, ScanRequest, execute_scan,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BindArtifactResult,
+    ComponentRegistration, DurableScanRuntime, DurableState, EvidenceFreshness, FindingChangeSet,
+    FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, RegisterComponentResult,
+    ReportedFinding, RunNextScanResult, ScanExecutionResult, ScanPlanner, ScanPlanningError,
+    ScanRequest, Severity, execute_scan,
 };
 
 #[derive(Debug, Default, cucumber::World)]
@@ -35,6 +36,7 @@ struct AcceptanceWorld {
     last_durable_runtime_result: Option<String>,
     last_durable_runtime_error: Option<String>,
     last_durable_error: Option<String>,
+    last_active_findings_page: Option<ActiveFindingsPage>,
 }
 
 #[given("no managed components")]
@@ -57,6 +59,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_durable_runtime_result = None;
     world.last_durable_runtime_error = None;
     world.last_durable_error = None;
+    world.last_active_findings_page = None;
 }
 
 #[given("a new durable state")]
@@ -139,6 +142,37 @@ async fn a_provider_scan_report_with_one_finding(
             package_name,
             package_version,
         )],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
+    expr = "a provider scan report with a critical vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+#[when(
+    expr = "a provider scan report with a critical vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+async fn a_provider_scan_report_with_critical_and_low_findings(
+    world: &mut AcceptanceWorld,
+    critical_vulnerability_id: String,
+    critical_package_name: String,
+    critical_package_version: String,
+    low_vulnerability_id: String,
+    low_package_name: String,
+    low_package_version: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(
+                critical_vulnerability_id,
+                critical_package_name,
+                critical_package_version,
+            )
+            .with_severity(Severity::Critical),
+            build_finding(low_vulnerability_id, low_package_name, low_package_version)
+                .with_severity(Severity::Low),
+        ],
     ));
     world.provider_failure = None;
 }
@@ -458,6 +492,29 @@ async fn venom_reloads_the_durable_state(world: &mut AcceptanceWorld) {
     }
 }
 
+#[when(
+    expr = "VENOM queries active findings for component {string} and artifact {string} with minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_component_and_artifact(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    artifact_identity: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    let query = ActiveFindingsQuery::new(component_key, artifact)
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_active_findings(&query);
+    world.last_active_findings_page = Some(page);
+}
+
 #[then(expr = "the component {string} is under management")]
 async fn the_component_is_under_management(world: &mut AcceptanceWorld, component_key: String) {
     assert!(world.ingestion.inventory().is_managed(&component_key));
@@ -732,6 +789,34 @@ async fn vulnerability_is_active_for_component_and_artifact(
     );
 }
 
+#[then(expr = "the active findings page total is {int}")]
+async fn the_active_findings_page_total_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_active_findings_page(world).total, expected);
+}
+
+#[then(expr = "the active findings page returned count is {int}")]
+async fn the_active_findings_page_returned_count_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_active_findings_page(world).returned, expected);
+}
+
+#[then(expr = "the active findings page limit is {int}")]
+async fn the_active_findings_page_limit_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_active_findings_page(world).limit, expected);
+}
+
+#[then(expr = "the first active finding vulnerability is {string}")]
+async fn the_first_active_finding_vulnerability_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        last_active_findings_page(world)
+            .findings
+            .first()
+            .expect("an active finding must exist before first-finding assertions")
+            .vulnerability_id
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
 fn build_finding(
     vulnerability_id: String,
     package_name: String,
@@ -895,6 +980,25 @@ const fn last_scan_request(world: &AcceptanceWorld) -> &ScanRequest {
         .last_scan_request
         .as_ref()
         .expect("a scan request must be planned before assertions")
+}
+
+const fn last_active_findings_page(world: &AcceptanceWorld) -> &ActiveFindingsPage {
+    world
+        .last_active_findings_page
+        .as_ref()
+        .expect("an active findings query must be performed before assertions")
+}
+
+fn parse_severity(value: &str) -> Severity {
+    match value {
+        "unknown" => Severity::Unknown,
+        "none" => Severity::None,
+        "low" => Severity::Low,
+        "medium" => Severity::Medium,
+        "high" => Severity::High,
+        "critical" => Severity::Critical,
+        _ => panic!("unsupported severity in acceptance step: {value}"),
+    }
 }
 
 #[tokio::main]

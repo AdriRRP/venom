@@ -209,6 +209,10 @@ struct ActiveFindingsQuery {
     component_key: String,
     artifact_kind: String,
     artifact_identity: String,
+    min_severity: Option<String>,
+    package_name: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 
 impl ActiveFindingsQuery {
@@ -217,6 +221,10 @@ impl ActiveFindingsQuery {
             component_key: self.component_key,
             artifact_kind: self.artifact_kind,
             artifact_identity: self.artifact_identity,
+            min_severity: self.min_severity,
+            package_name: self.package_name,
+            offset: self.offset,
+            limit: self.limit,
         }
     }
 }
@@ -350,10 +358,56 @@ mod tests {
                 )
                 .body(Body::empty())
                 .expect("request should build"),
+        )
+        .await
+        .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_queries_active_findings_with_filter_and_page_metadata() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("active-findings-query", "state"),
+                temp_path("active-findings-query", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report_with_two_findings(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&min_severity=high&limit=1&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
             )
             .await
             .expect("query request should succeed");
         assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["returned"], 1);
+        assert_eq!(payload["limit"], 1);
+        assert_eq!(payload["offset"], 0);
+        assert_eq!(
+            payload["active_findings"][0]["vulnerability_id"],
+            "CVE-2026-0001"
+        );
     }
 
     #[tokio::test]
@@ -366,22 +420,7 @@ mod tests {
             .expect("api state should open"),
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "name": "Payments API"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("register request should succeed");
+        let response = register_payments_component(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
@@ -422,22 +461,7 @@ mod tests {
             .expect("api state should open"),
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "name": "Payments API"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("register request should succeed");
+        let response = register_payments_component(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
@@ -489,22 +513,7 @@ mod tests {
             .expect("api state should open"),
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "name": "Payments API"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("register request should succeed");
+        let response = register_payments_component(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
@@ -545,22 +554,7 @@ mod tests {
                 .expect("postgres api state should open"),
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "name": "Payments API"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("register request should succeed");
+        let response = register_payments_component(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
@@ -641,22 +635,7 @@ mod tests {
                 .expect("postgres api state should open"),
         );
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "component_key": "component:payments-api",
-                            "name": "Payments API"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("register request should succeed");
+        let response = register_payments_component(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = bind_owned_artifact(router.clone()).await;
@@ -701,6 +680,24 @@ mod tests {
             .expect("bind request should succeed")
     }
 
+    async fn register_payments_component(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "name": "Payments API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register request should succeed")
+    }
+
     async fn configure_fixture_provider(router: axum::Router) -> axum::response::Response {
         router
             .oneshot(
@@ -737,6 +734,44 @@ mod tests {
                                     "package_name": "openssl",
                                     "package_version": "3.0.0",
                                     "severity": "high"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("provider report request should succeed")
+    }
+
+    async fn record_provider_report_with_two_findings(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/provider-reports")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider_key": "fixture-provider",
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "freshness": "deterministic",
+                            "knowledge_revision": "fixture-db:2026-05-16",
+                            "findings": [
+                                {
+                                    "vulnerability_id": "CVE-2026-0001",
+                                    "package_name": "openssl",
+                                    "package_version": "3.0.0",
+                                    "severity": "critical"
+                                },
+                                {
+                                    "vulnerability_id": "CVE-2026-0002",
+                                    "package_name": "busybox",
+                                    "package_version": "1.36.0",
+                                    "severity": "low"
                                 }
                             ]
                         })

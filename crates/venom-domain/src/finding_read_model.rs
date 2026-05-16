@@ -1,5 +1,8 @@
-use crate::{ArtifactRef, ProviderScanReport, ReportedFinding};
+use crate::{ArtifactRef, ProviderScanReport, ReportedFinding, Severity};
 use std::collections::BTreeMap;
+
+pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
+pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
 
 /// Rebuildable operator-facing view of currently active findings.
 ///
@@ -9,6 +12,63 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default)]
 pub struct FindingReadModel {
     active: BTreeMap<TrackedArtifactKey, Vec<ReportedFinding>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveFindingsQuery {
+    pub component_key: Box<str>,
+    pub artifact: ArtifactRef,
+    pub min_severity: Option<Severity>,
+    pub package_name: Option<Box<str>>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl ActiveFindingsQuery {
+    #[must_use]
+    pub fn new(component_key: impl Into<Box<str>>, artifact: ArtifactRef) -> Self {
+        Self {
+            component_key: component_key.into(),
+            artifact,
+            min_severity: None,
+            package_name: None,
+            offset: 0,
+            limit: DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_min_severity(mut self, min_severity: Severity) -> Self {
+        self.min_severity = Some(min_severity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_package_name(mut self, package_name: impl Into<Box<str>>) -> Self {
+        self.package_name = Some(package_name.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveFindingsPage {
+    pub total: usize,
+    pub returned: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub findings: Vec<ReportedFinding>,
 }
 
 impl FindingReadModel {
@@ -67,6 +127,44 @@ impl FindingReadModel {
             .cloned()
             .unwrap_or_default()
     }
+
+    #[must_use]
+    pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
+        let offset = query.offset;
+        let limit = normalize_page_limit(query.limit);
+        let mut findings = self.active_findings(query.component_key.as_ref(), &query.artifact);
+        findings.sort_unstable_by(operator_finding_sort_key);
+
+        let filtered = findings
+            .into_iter()
+            .filter(|finding| {
+                query
+                    .min_severity
+                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+            })
+            .filter(|finding| {
+                query
+                    .package_name
+                    .as_deref()
+                    .is_none_or(|package_name| finding.package.name.as_ref() == package_name)
+            })
+            .collect::<Vec<_>>();
+
+        let total = filtered.len();
+        let page = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+
+        ActiveFindingsPage {
+            total,
+            returned: page.len(),
+            offset,
+            limit,
+            findings: page,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,6 +193,36 @@ fn finding_sort_key(left: &ReportedFinding, right: &ReportedFinding) -> std::cmp
     finding_dedup_key(left).cmp(&finding_dedup_key(right))
 }
 
+fn operator_finding_sort_key(
+    left: &ReportedFinding,
+    right: &ReportedFinding,
+) -> std::cmp::Ordering {
+    severity_rank(right.severity)
+        .cmp(&severity_rank(left.severity))
+        .then_with(|| finding_dedup_key(left).cmp(&finding_dedup_key(right)))
+}
+
+const fn severity_rank(value: Severity) -> u8 {
+    match value {
+        Severity::Unknown => 0,
+        Severity::None => 1,
+        Severity::Low => 2,
+        Severity::Medium => 3,
+        Severity::High => 4,
+        Severity::Critical => 5,
+    }
+}
+
+const fn normalize_page_limit(limit: usize) -> usize {
+    if limit == 0 {
+        DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT
+    } else if limit > MAX_ACTIVE_FINDINGS_PAGE_LIMIT {
+        MAX_ACTIVE_FINDINGS_PAGE_LIMIT
+    } else {
+        limit
+    }
+}
+
 fn finding_dedup_key(finding: &ReportedFinding) -> FindingDedupKey<'_> {
     FindingDedupKey {
         vulnerability_id: finding.vulnerability_id.as_ref(),
@@ -114,10 +242,13 @@ struct FindingDedupKey<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::FindingReadModel;
+    use super::{
+        ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
+        MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
+    };
     use crate::{
         ArtifactKind, ArtifactRef, EvidenceFreshness, PackageCoordinate, ProviderScanReport,
-        ReportedFinding,
+        ReportedFinding, Severity,
     };
     use std::time::SystemTime;
 
@@ -179,5 +310,49 @@ mod tests {
             &artifact(),
             "CVE-2026-0001"
         ));
+    }
+
+    #[test]
+    fn query_filters_by_min_severity_and_pages_stably() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("busybox", "1.36.0"))
+                .with_severity(Severity::Low),
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::Critical),
+            ReportedFinding::new("CVE-2026-0003", PackageCoordinate::new("glibc", "2.40"))
+                .with_severity(Severity::High),
+        ]));
+
+        let query = ActiveFindingsQuery::new("component:payments-api", artifact())
+            .with_min_severity(Severity::High)
+            .with_offset(0)
+            .with_limit(1);
+        let page = read_model.query_active_findings(&query);
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.returned, 1);
+        assert_eq!(page.limit, 1);
+        assert_eq!(page.findings[0].vulnerability_id.as_ref(), "CVE-2026-0001");
+    }
+
+    #[test]
+    fn query_normalizes_zero_and_large_page_limits() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![ReportedFinding::new(
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        )]));
+
+        let default_page = read_model.query_active_findings(
+            &ActiveFindingsQuery::new("component:payments-api", artifact()).with_limit(0),
+        );
+        assert_eq!(default_page.limit, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT);
+
+        let capped_page = read_model.query_active_findings(
+            &ActiveFindingsQuery::new("component:payments-api", artifact())
+                .with_limit(MAX_ACTIVE_FINDINGS_PAGE_LIMIT + 100),
+        );
+        assert_eq!(capped_page.limit, MAX_ACTIVE_FINDINGS_PAGE_LIMIT);
     }
 }
