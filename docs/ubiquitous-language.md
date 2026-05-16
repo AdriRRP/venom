@@ -40,6 +40,7 @@ flowchart LR
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |
 | Finding Provider | port | A provider-specific source of findings mapped into VENOM's canonical finding model. | provider schema names as domain terms |
 | Integration Event | value object | A canonical external event that VENOM makes available after a durable domain change becomes publishable outside the core. | broker payload shape as the domain term |
+| Integration Runtime Configuration | value object | The durable system-level configuration that tells VENOM which integration publisher implementation it should use, and with which minimal delivery parameters. | choosing the integration publisher ad hoc per drain request |
 | Managed Artifact | relationship | An explicit ownership binding between a managed component and an immutable artifact identity. | assuming a report artifact belongs to a component without registration |
 | Outbox Record | durable record | One durably stored integration event that is pending or already published, coordinated with the business write that created it. | publishing directly from transient in-memory state |
 | Publication Attempt | process | One bounded attempt to publish pending outbox records and persist the outcome explicitly. | hidden background retries with no durable trace |
