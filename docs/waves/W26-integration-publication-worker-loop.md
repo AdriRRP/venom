@@ -1,7 +1,7 @@
 # W26. Integration Publication Worker Loop
 
 Wave: `W26-integration-publication-worker-loop`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
