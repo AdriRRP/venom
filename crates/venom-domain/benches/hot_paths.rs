@@ -12,45 +12,53 @@ const ARTIFACT_IDENTITY: &str = "registry.example/payments@sha256:111";
 const FINDING_COUNTS: &[usize] = &[50, 200, 500];
 
 fn hot_path_benchmarks(criterion: &mut Criterion) {
-    let mut ingestion_group = criterion.benchmark_group("finding_ingestion");
-    for count in FINDING_COUNTS {
-        let report = provider_scan_report(*count);
-        ingestion_group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            count,
-            |bencher, _| {
-                bencher.iter_batched(
-                    seeded_ingestion,
-                    |mut ingestion| {
-                        let change_set = ingestion
-                            .record_scan_report(black_box(&report))
-                            .expect("seeded ingestion should accept the benchmark report");
-                        black_box(change_set);
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+    {
+        let mut ingestion_group = criterion.benchmark_group("finding_ingestion");
+        for count in FINDING_COUNTS {
+            let report = provider_scan_report(*count);
+            ingestion_group.bench_with_input(
+                BenchmarkId::from_parameter(count),
+                count,
+                |bencher, _| {
+                    bencher.iter_batched(
+                        seeded_ingestion,
+                        |mut ingestion| {
+                            let change_set = ingestion
+                                .record_scan_report(black_box(&report))
+                                .expect("seeded ingestion should accept the benchmark report");
+                            black_box(change_set);
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
+        }
+        ingestion_group.finish();
     }
-    ingestion_group.finish();
 
-    let mut query_group = criterion.benchmark_group("active_findings_query");
-    for count in FINDING_COUNTS {
-        let report = provider_scan_report(*count);
-        let mut model = FindingReadModel::new();
-        model.record_scan_report(&report);
-        let query = ActiveFindingsQuery::new(COMPONENT_KEY, artifact_ref())
-            .with_min_severity(Severity::Medium)
-            .with_offset(0)
-            .with_limit(50);
-        query_group.bench_with_input(BenchmarkId::from_parameter(count), count, |bencher, _| {
-            bencher.iter(|| {
-                let page = model.query_active_findings(black_box(&query));
-                black_box(page);
-            });
-        });
+    {
+        let mut query_group = criterion.benchmark_group("active_findings_query");
+        for count in FINDING_COUNTS {
+            let report = provider_scan_report(*count);
+            let mut model = FindingReadModel::new();
+            model.record_scan_report(&report);
+            let query = ActiveFindingsQuery::new(COMPONENT_KEY, artifact_ref())
+                .with_min_severity(Severity::Medium)
+                .with_offset(0)
+                .with_limit(50);
+            query_group.bench_with_input(
+                BenchmarkId::from_parameter(count),
+                count,
+                |bencher, _| {
+                    bencher.iter(|| {
+                        let page = model.query_active_findings(black_box(&query));
+                        black_box(page);
+                    });
+                },
+            );
+        }
+        query_group.finish();
     }
-    query_group.finish();
 }
 
 fn seeded_ingestion() -> FindingIngestion {
