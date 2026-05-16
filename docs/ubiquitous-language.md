@@ -39,7 +39,10 @@ flowchart LR
 | Execution Context | value object | The runtime and business context that changes how a finding should be interpreted. | "environment" when the richer domain meaning is intended |
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |
 | Finding Provider | port | A provider-specific source of findings mapped into VENOM's canonical finding model. | provider schema names as domain terms |
+| Integration Event | value object | A canonical external event that VENOM makes available after a durable domain change becomes publishable outside the core. | broker payload shape as the domain term |
 | Managed Artifact | relationship | An explicit ownership binding between a managed component and an immutable artifact identity. | assuming a report artifact belongs to a component without registration |
+| Outbox Record | durable record | One durably stored integration event that is pending or already published, coordinated with the business write that created it. | publishing directly from transient in-memory state |
+| Publication Attempt | process | One bounded attempt to publish pending outbox records and persist the outcome explicitly. | hidden background retries with no durable trace |
 | Provider Runtime Configuration | relationship | The durable binding that tells VENOM which provider implementation one managed component should use when executing scans. | choosing the provider ad hoc in a worker request payload |
 | Provider Scan Report | value object | A complete provider snapshot of findings for one component and one immutable artifact at one observation time. | provider webhooks or scanner payloads as domain terms |
 | Scan Command | command | A durably queued request for one canonical scan that must end in an explicit terminal state such as completed or failed. | hidden background work or implicit retries |

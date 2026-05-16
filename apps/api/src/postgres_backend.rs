@@ -6,9 +6,10 @@ use venom_domain::{
     BindArtifactResult, CompletedScanCommand, ComponentRegistration, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
     FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, ProviderScanReport, RegisterComponentChange, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest,
-    as_provider_error, validate_provider_scan_report,
+    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -19,6 +20,7 @@ pub struct PostgresBackend {
     read_model: FindingReadModel,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
+    pending_integration_events: Vec<PendingIntegrationEvent>,
 }
 
 impl PostgresBackend {
@@ -42,6 +44,7 @@ impl PostgresBackend {
             read_model: FindingReadModel::new(),
             commands: BTreeMap::new(),
             order: Vec::new(),
+            pending_integration_events: Vec::new(),
         };
         backend.init_schema().await?;
         backend.rebuild().await?;
@@ -151,6 +154,20 @@ impl PostgresBackend {
             .record_scan_report(report)
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
         candidate_read_model.record_scan_report(report);
+        let pending_integration_event = PendingIntegrationEvent::finding_changes_observed(
+            report.component_key.clone(),
+            report.artifact.clone(),
+            report.provider_key.clone(),
+            report.freshness,
+            report.observed_at,
+            change_set.clone(),
+        );
+
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("postgres transaction begin failed: {error}"))?;
 
         sqlx::query(&format!(
             concat!(
@@ -168,12 +185,34 @@ impl PostgresBackend {
         .bind(freshness_name(report.freshness))
         .bind(report.knowledge_revision.as_deref())
         .bind(Json(report.findings.clone()))
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
 
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(event_id, event_kind, payload, publication_status) VALUES ($1, $2, $3, $4)"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(pending_integration_event.event_id.as_ref())
+        .bind(pending_integration_event.event.kind_name())
+        .bind(Json(pending_integration_event.clone()))
+        .bind("pending")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("postgres transaction commit failed: {error}"))?;
+
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.pending_integration_events
+            .push(pending_integration_event);
         Ok(change_set)
     }
 
@@ -266,6 +305,93 @@ impl PostgresBackend {
         self.commands.get(command_id).map(|record| record.status)
     }
 
+    #[must_use]
+    pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
+        &self.pending_integration_events
+    }
+
+    /// Publish a bounded batch of pending integration events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when publication outcome persistence fails.
+    pub async fn publish_pending_integration_events(
+        &mut self,
+        max_events: usize,
+        publisher: &(impl IntegrationEventPublisher + Sync),
+    ) -> Result<PublishIntegrationEventsResult, String> {
+        let mut result = PublishIntegrationEventsResult {
+            attempted: 0,
+            published: 0,
+            pending_remaining: self.pending_integration_events.len(),
+            last_failure: None,
+        };
+        if max_events == 0 {
+            return Ok(result);
+        }
+
+        let batch = self
+            .pending_integration_events
+            .iter()
+            .take(max_events)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for event in batch {
+            result.attempted += 1;
+            let attempted_at_micros = system_time_to_micros(SystemTime::now())?;
+            match publisher.publish(&event).await {
+                Ok(()) => {
+                    sqlx::query(&format!(
+                        concat!(
+                            "UPDATE {} ",
+                            "SET publication_status = 'published', last_error = NULL, ",
+                            "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
+                            "WHERE event_id = $1"
+                        ),
+                        self.names.integration_outbox
+                    ))
+                    .bind(event.event_id.as_ref())
+                    .bind(attempted_at_micros)
+                    .bind(attempted_at_micros)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
+                    self.remove_pending_integration_event(event.event_id.as_ref());
+                    result.published += 1;
+                }
+                Err(error) => {
+                    sqlx::query(&format!(
+                        concat!(
+                            "UPDATE {} ",
+                            "SET publication_status = 'pending', last_error = $2, ",
+                            "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
+                            "WHERE event_id = $1"
+                        ),
+                        self.names.integration_outbox
+                    ))
+                    .bind(event.event_id.as_ref())
+                    .bind(error.message.as_ref())
+                    .bind(attempted_at_micros)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|sql_error| {
+                        format!("postgres integration outbox failure update failed: {sql_error}")
+                    })?;
+                    result.last_failure = Some(IntegrationEventPublicationFailure {
+                        event_id: event.event_id,
+                        retryable: error.retryable,
+                        message: error.message,
+                    });
+                    break;
+                }
+            }
+        }
+
+        result.pending_remaining = self.pending_integration_events.len();
+        Ok(result)
+    }
+
     /// Execute the oldest pending durable scan command through one provider.
     ///
     /// # Errors
@@ -323,6 +449,15 @@ impl PostgresBackend {
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
         candidate_read_model.record_scan_report(&report);
         let findings_reported = report.findings.len();
+        let pending_integration_event = PendingIntegrationEvent::scan_command_completed(
+            command_id.as_ref(),
+            request.component_key.clone(),
+            request.artifact.clone(),
+            report.provider_key.clone(),
+            request.freshness,
+            findings_reported,
+            change_set.clone(),
+        );
 
         let mut transaction = self
             .pool
@@ -352,6 +487,21 @@ impl PostgresBackend {
 
         sqlx::query(&format!(
             concat!(
+                "INSERT INTO {} ",
+                "(event_id, event_kind, payload, publication_status) VALUES ($1, $2, $3, $4)"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(pending_integration_event.event_id.as_ref())
+        .bind(pending_integration_event.event.kind_name())
+        .bind(Json(pending_integration_event.clone()))
+        .bind("pending")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
+
+        sqlx::query(&format!(
+            concat!(
                 "UPDATE {} ",
                 "SET status = $2, updated_at = NOW() ",
                 "WHERE command_id = $1"
@@ -371,6 +521,8 @@ impl PostgresBackend {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.pending_integration_events
+            .push(pending_integration_event);
         let Some(command) = self.commands.get_mut(command_id.as_ref()) else {
             return Err("completed scan command missing from postgres runtime".to_owned());
         };
@@ -428,6 +580,17 @@ impl PostgresBackend {
         .await
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
+        self.create_components_table().await?;
+        self.create_artifact_bindings_table().await?;
+        self.create_provider_runtime_configs_table().await?;
+        self.create_provider_reports_table().await?;
+        self.create_scan_commands_table().await?;
+        self.create_integration_outbox_table().await?;
+
+        Ok(())
+    }
+
+    async fn create_components_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
@@ -441,7 +604,10 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres components table create failed: {error}"))?;
+        Ok(())
+    }
 
+    async fn create_artifact_bindings_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
@@ -457,7 +623,10 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres artifact bindings table create failed: {error}"))?;
+        Ok(())
+    }
 
+    async fn create_provider_runtime_configs_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
@@ -473,7 +642,10 @@ impl PostgresBackend {
         .map_err(|error| {
             format!("postgres provider runtime configs table create failed: {error}")
         })?;
+        Ok(())
+    }
 
+    async fn create_provider_reports_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
@@ -493,7 +665,10 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres provider reports table create failed: {error}"))?;
+        Ok(())
+    }
 
+    async fn create_scan_commands_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
@@ -516,7 +691,30 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres scan commands table create failed: {error}"))?;
+        Ok(())
+    }
 
+    async fn create_integration_outbox_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "order_id BIGSERIAL PRIMARY KEY, ",
+                "event_id TEXT NOT NULL UNIQUE, ",
+                "event_kind TEXT NOT NULL, ",
+                "payload JSONB NOT NULL, ",
+                "publication_status TEXT NOT NULL, ",
+                "attempt_count BIGINT NOT NULL DEFAULT 0, ",
+                "last_error TEXT NULL, ",
+                "last_attempted_at_micros BIGINT NULL, ",
+                "published_at_micros BIGINT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.integration_outbox
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres integration outbox table create failed: {error}"))?;
         Ok(())
     }
 
@@ -525,12 +723,14 @@ impl PostgresBackend {
         self.read_model = FindingReadModel::new();
         self.commands.clear();
         self.order.clear();
+        self.pending_integration_events.clear();
 
         self.load_components().await?;
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
         self.load_provider_reports().await?;
         self.load_scan_commands().await?;
+        self.load_pending_integration_events().await?;
 
         Ok(())
     }
@@ -690,6 +890,31 @@ impl PostgresBackend {
 
         Ok(())
     }
+
+    async fn load_pending_integration_events(&mut self) -> Result<(), String> {
+        let events = sqlx::query_as::<_, (Json<PendingIntegrationEvent>,)>(&format!(
+            concat!(
+                "SELECT payload FROM {} ",
+                "WHERE publication_status = 'pending' ORDER BY order_id"
+            ),
+            self.names.integration_outbox
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres integration outbox load failed: {error}"))?;
+        self.pending_integration_events = events.into_iter().map(|(payload,)| payload.0).collect();
+        Ok(())
+    }
+
+    fn remove_pending_integration_event(&mut self, event_id: &str) {
+        if let Some(index) = self
+            .pending_integration_events
+            .iter()
+            .position(|event| event.event_id.as_ref() == event_id)
+        {
+            self.pending_integration_events.remove(index);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -706,6 +931,7 @@ struct TableNames {
     provider_runtime_configs: Box<str>,
     provider_reports: Box<str>,
     scan_commands: Box<str>,
+    integration_outbox: Box<str>,
 }
 
 impl TableNames {
@@ -717,6 +943,7 @@ impl TableNames {
             provider_runtime_configs: format!("{schema}.provider_runtime_configs").into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
+            integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
             schema,
         })
     }
@@ -810,4 +1037,303 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
     let micros =
         u64::try_from(value).map_err(|_| "observed_at micros must be positive".to_owned())?;
     Ok(UNIX_EPOCH + Duration::from_micros(micros))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PostgresBackend;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use venom_domain::{
+        ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, FindingProvider,
+        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
+        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+        ReportedFinding, RunNextScanResult, ScanCommandStatus,
+    };
+
+    fn postgres_test_url() -> Option<String> {
+        std::env::var("VENOM_TEST_POSTGRES_URL").ok()
+    }
+
+    fn temp_schema(name: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("venom_{name}_{nanos}_{counter}")
+    }
+
+    fn artifact() -> ArtifactRef {
+        ArtifactRef::new(
+            ArtifactKind::ContainerImage,
+            "registry.example/payments@sha256:111",
+        )
+    }
+
+    #[derive(Debug, Clone)]
+    struct FixtureProvider;
+
+    impl FindingProvider for FixtureProvider {
+        fn provider_key(&self) -> &'static str {
+            "fixture-provider"
+        }
+
+        async fn scan<'a>(
+            &'a self,
+            request: &'a venom_domain::ScanRequest,
+        ) -> Result<ProviderScanReport, FindingProviderError> {
+            Ok(ProviderScanReport::new(
+                "fixture-provider",
+                request.component_key.clone(),
+                request.artifact.clone(),
+                SystemTime::UNIX_EPOCH,
+                request.freshness,
+                vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )],
+            )
+            .with_knowledge_revision("fixture-db:2026-05-16"))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct SuccessPublisher;
+
+    impl IntegrationEventPublisher for SuccessPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingPublisher;
+
+    impl IntegrationEventPublisher for FailingPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Err(IntegrationEventPublishError::new(
+                true,
+                "publisher unavailable",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_record_scan_report_appends_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("outbox_report");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+        assert_eq!(backend.pending_integration_events().len(), 1);
+        assert!(matches!(
+            backend.pending_integration_events()[0].event,
+            IntegrationEvent::FindingChangesObserved { .. }
+        ));
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_completed_scan_command_appends_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("outbox_command");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .configure_provider("component:payments-api", "fixture-provider")
+            .await
+            .expect("provider config should persist");
+        let command_id = backend
+            .request_scan(
+                "component:payments-api",
+                artifact(),
+                EvidenceFreshness::Deterministic,
+            )
+            .await
+            .expect("scan request should persist");
+
+        let outcome = backend
+            .run_next(&FixtureProvider)
+            .await
+            .expect("scan command should complete");
+        assert!(matches!(outcome, RunNextScanResult::Completed(_)));
+        assert_eq!(backend.pending_integration_events().len(), 1);
+        assert!(matches!(
+            backend.pending_integration_events()[0].event,
+            IntegrationEvent::ScanCommandCompleted { .. }
+        ));
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(
+            reopened.command_status(command_id.as_ref()),
+            Some(ScanCommandStatus::Completed)
+        );
+        assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_successful_publication_removes_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish_success");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let result = backend
+            .publish_pending_integration_events(1, &SuccessPublisher)
+            .await
+            .expect("publication should persist");
+        assert_eq!(result.published, 1);
+        assert_eq!(backend.pending_integration_events().len(), 0);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_integration_events().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_failed_publication_keeps_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish_failure");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let result = backend
+            .publish_pending_integration_events(1, &FailingPublisher)
+            .await
+            .expect("failed publication outcome should persist");
+        assert_eq!(result.published, 0);
+        assert_eq!(backend.pending_integration_events().len(), 1);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
 }
