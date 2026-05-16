@@ -1,7 +1,7 @@
 # W28. Structural Modularization
 
 Wave: `W28-structural-modularization`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `compact`
 Infra profile: `none`
@@ -33,7 +33,7 @@ Reduce structural entropy in the domain and API code before adding more capabili
 | `W28-S01` | done | define the internal module organization target for domain and API code | `./scripts/check-slice.sh --wave W28-structural-modularization --slice W28-S01 --path docs/waves/ACTIVE --path docs/waves/W28-structural-modularization.md --path docs/repo-structure.md --path docs/adr/0004-internal-module-organization.md` |
 | `W28-S02` | done | regroup domain modules by capability without changing public semantics | `cargo test --workspace --all-targets --all-features` |
 | `W28-S03` | done | regroup API modules by boundary and remove the flat router/service layout | `cargo test --workspace --all-targets --all-features` |
-| `W28-S04` | in_progress | compact docs, close the wave, and run the full wave gate | `./scripts/check-wave.sh --wave W28-structural-modularization` |
+| `W28-S04` | done | compact docs, close the wave, and run the full wave gate | `./scripts/check-wave.sh --wave W28-structural-modularization` |
 
 ## Language impact
 
