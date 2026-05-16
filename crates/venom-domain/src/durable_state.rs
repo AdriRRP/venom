@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::time::{Duration, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -510,7 +511,7 @@ struct StoredProviderScanReport {
     provider_key: Box<str>,
     component_key: Box<str>,
     artifact: ArtifactRef,
-    observed_at: Box<str>,
+    observed_at: StoredObservedAt,
     freshness: EvidenceFreshness,
     knowledge_revision: Option<Box<str>>,
     findings: Vec<StoredReportedFinding>,
@@ -518,14 +519,11 @@ struct StoredProviderScanReport {
 
 impl StoredProviderScanReport {
     fn from_report(report: &ProviderScanReport) -> Result<Self, DurableStateError> {
-        let observed_at = OffsetDateTime::from(report.observed_at)
-            .format(&Rfc3339)
-            .map_err(|error| DurableStateError::Time(error.to_string()))?;
         Ok(Self {
             provider_key: report.provider_key.clone(),
             component_key: report.component_key.clone(),
             artifact: report.artifact.clone(),
-            observed_at: observed_at.into_boxed_str(),
+            observed_at: StoredObservedAt::from_system_time(report.observed_at)?,
             freshness: report.freshness,
             knowledge_revision: report.knowledge_revision.clone(),
             findings: report
@@ -538,9 +536,7 @@ impl StoredProviderScanReport {
     }
 
     fn into_domain(self) -> Result<ProviderScanReport, DurableStateError> {
-        let observed_at = OffsetDateTime::parse(&self.observed_at, &Rfc3339)
-            .map_err(|error| DurableStateError::Time(error.to_string()))?
-            .into();
+        let observed_at = self.observed_at.into_system_time()?;
         let mut report = ProviderScanReport::new(
             self.provider_key,
             self.component_key,
@@ -554,6 +550,38 @@ impl StoredProviderScanReport {
         );
         report.knowledge_revision = self.knowledge_revision;
         Ok(report)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredObservedAt {
+    UnixMillis(i64),
+    LegacyRfc3339(Box<str>),
+}
+
+impl StoredObservedAt {
+    fn from_system_time(value: std::time::SystemTime) -> Result<Self, DurableStateError> {
+        let duration = value
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| DurableStateError::Time(error.to_string()))?;
+        let millis = i64::try_from(duration.as_millis())
+            .map_err(|_| DurableStateError::Time("timestamp out of range".into()))?;
+        Ok(Self::UnixMillis(millis))
+    }
+
+    fn into_system_time(self) -> Result<std::time::SystemTime, DurableStateError> {
+        match self {
+            Self::UnixMillis(millis) => {
+                let millis = u64::try_from(millis).map_err(|_| {
+                    DurableStateError::Time("negative timestamp not supported".into())
+                })?;
+                Ok(UNIX_EPOCH + Duration::from_millis(millis))
+            }
+            Self::LegacyRfc3339(value) => OffsetDateTime::parse(&value, &Rfc3339)
+                .map_err(|error| DurableStateError::Time(error.to_string()))
+                .map(Into::into),
+        }
     }
 }
 
@@ -629,6 +657,7 @@ mod tests {
         IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
         PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
     };
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -696,6 +725,68 @@ mod tests {
                 .inventory()
                 .component_owns_artifact("component:payments-api", &artifact())
         );
+        assert_eq!(
+            rebuilt
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+    }
+
+    #[test]
+    fn new_history_stores_observed_at_as_unix_millis() {
+        let path = temp_path("durable-state-unix-millis");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .record_scan_report(&report(vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )]))
+            .expect("scan report should persist");
+
+        let history = fs::read_to_string(&path).expect("history should be readable");
+
+        assert!(history.contains("\"observed_at\":0"));
+    }
+
+    #[test]
+    fn replay_keeps_legacy_rfc3339_history_compatible() {
+        let path = temp_path("durable-state-legacy-rfc3339");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .record_scan_report(&report(vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )]))
+            .expect("scan report should persist");
+
+        let history = fs::read_to_string(&path).expect("history should be readable");
+        let legacy_history = history.replace(
+            "\"observed_at\":0",
+            "\"observed_at\":\"1970-01-01T00:00:00Z\"",
+        );
+        fs::write(&path, legacy_history).expect("legacy history should be writable");
+
+        let rebuilt = DurableState::open(&path).expect("legacy durable state should replay");
+
         assert_eq!(
             rebuilt
                 .read_model()
