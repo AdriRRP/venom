@@ -128,6 +128,11 @@ Example:
 
 Fast domain and policy tests.
 
+For the UI:
+
+- component and hook tests live here
+- typecheck and lint are part of the same default frontend quality path
+
 ### L1. Integration
 
 Real Postgres, migrations, event store, outbox, projections, and workers when relevant.
@@ -162,6 +167,7 @@ Real app and real wiring for critical flows only.
 Owned under:
 
 - `features/e2e/**`
+- `apps/web/e2e/**` when browser-driven UI flows become necessary
 
 ### Contract checks
 
@@ -202,6 +208,7 @@ Run only what the slice needs:
 - affected unit tests
 - affected integration tests
 - affected BDD when behavior changed
+- affected frontend check and build steps when the slice touches `apps/web/**`
 
 Script interface:
 
@@ -228,6 +235,7 @@ Run the full required set:
 - required infra rehearsal
 - all BDD
 - acceptance or E2E checks with real local infrastructure where relevant
+- frontend quality, tests, and build when the wave touches `apps/web/**`
 
 Selection rule:
 

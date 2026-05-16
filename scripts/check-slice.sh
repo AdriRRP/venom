@@ -82,6 +82,15 @@ run_contract_lane() {
   echo "SKIP: no contract checks"
 }
 
+paths_touch_web() {
+  for path in "${paths[@]}"; do
+    if [[ "$path" == apps/web* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_infra_lane() {
   local profile="$1"
 
@@ -147,6 +156,9 @@ fi
 
 if [[ ${#lanes[@]} -eq 0 ]]; then
   ./scripts/check-tests.sh
+  if paths_touch_web; then
+    ./scripts/check-web.sh --lane build
+  fi
   echo "RESULT: PASS"
   exit 0
 fi
@@ -155,6 +167,9 @@ for lane in "${lanes[@]}"; do
   case "$lane" in
     unit|integration)
       ./scripts/check-tests.sh
+      if paths_touch_web; then
+        ./scripts/check-web.sh --lane build
+      fi
       ;;
     infra)
       run_infra_lane "$infra_profile"
