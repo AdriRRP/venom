@@ -1,4 +1,4 @@
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Json};
+use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
@@ -584,22 +584,25 @@ impl PostgresBackend {
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         events: &[PendingIntegrationEvent],
     ) -> Result<(), String> {
-        for event in events {
-            sqlx::query(&format!(
-                concat!(
-                    "INSERT INTO {} ",
-                    "(event_id, event_kind, payload, publication_status) VALUES ($1, $2, $3, $4)"
-                ),
-                self.names.integration_outbox
-            ))
-            .bind(event.event_id.as_ref())
-            .bind(event.event.kind_name())
-            .bind(Json(event.clone()))
-            .bind("pending")
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+            "INSERT INTO {} (event_id, event_kind, payload, publication_status) ",
+            self.names.integration_outbox
+        ));
+        query_builder.push_values(events.iter(), |mut row, event| {
+            row.push_bind(event.event_id.as_ref())
+                .push_bind(event.event.kind_name())
+                .push_bind(Json(event.clone()))
+                .push_bind("pending");
+        });
+        query_builder
+            .build()
             .execute(&mut **transaction)
             .await
             .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
-        }
         Ok(())
     }
 
