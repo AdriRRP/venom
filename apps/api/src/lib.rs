@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
     ComponentRegistrationRequest, ConfigureProviderRequest, ConfigureProviderResponse,
-    DrainWorkerCommand, DrainWorkerResponse, ProviderScanReportRequest,
-    RecordProviderReportResponse, RegisterComponentResponse, RequestScanCommand,
-    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
+    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
+    DrainWorkerResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
+    RunNextScanResponse, ScanCommandStatusResponse,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,6 +70,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route("/scan-workers/run-next", post(run_next_scan))
         .route("/scan-workers/drain", post(drain_worker))
+        .route("/integration-workers/drain", post(drain_integration_worker))
         .route("/provider-reports", post(record_provider_report))
         .route("/findings/active", get(list_active_findings))
         .with_state(state)
@@ -186,6 +188,20 @@ async fn drain_worker(
         .lock()
         .await
         .run_worker_until_idle(request)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn drain_integration_worker(
+    State(state): State<ApiState>,
+    Json(request): Json<DrainIntegrationWorkerCommand>,
+) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .await
+        .publish_integration_events_until_idle(request)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -543,6 +559,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_drains_pending_integration_events_from_state_and_runtime() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("drain-integration-worker", "state"),
+                temp_path("drain-integration-worker", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_integration_worker_with_success(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "drained");
+        assert_eq!(payload["attempted"], 2);
+        assert_eq!(payload["published"], 2);
+        assert_eq!(payload["pending_remaining"], 0);
+        assert_eq!(payload["last_event_kind"], "scan-command-completed");
+        assert!(payload["last_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn api_keeps_pending_integration_events_on_publication_failure() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("fail-integration-worker", "state"),
+                temp_path("fail-integration-worker", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_integration_worker_with_failure(
+            router.clone(),
+            8,
+            "fixture publish failed",
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "limited");
+        assert_eq!(payload["attempted"], 1);
+        assert_eq!(payload["published"], 0);
+        assert_eq!(payload["pending_remaining"], 2);
+        assert_eq!(payload["last_event_kind"], "finding-changes-observed");
+        assert_eq!(payload["last_error"], "fixture publish failed");
+        assert_eq!(payload["last_retryable"], true);
+    }
+
+    #[tokio::test]
     async fn postgres_backend_reloads_findings_and_scan_status() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -660,6 +765,68 @@ mod tests {
         assert_eq!(payload["outcome"], "drained");
         assert_eq!(payload["completed"], 2);
         assert_eq!(payload["pending_remaining"], 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_integration_publication_worker_is_bounded_and_durable() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_integration_worker_with_success(router.clone(), 1).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "limited");
+        assert_eq!(payload["attempted"], 1);
+        assert_eq!(payload["published"], 1);
+        assert_eq!(payload["pending_remaining"], 1);
+        assert_eq!(payload["last_event_kind"], "finding-changes-observed");
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = drain_integration_worker_with_success(reloaded.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "drained");
+        assert_eq!(payload["attempted"], 1);
+        assert_eq!(payload["published"], 1);
+        assert_eq!(payload["pending_remaining"], 0);
+        assert_eq!(payload["last_event_kind"], "scan-command-completed");
     }
 
     async fn bind_owned_artifact(router: axum::Router) -> axum::response::Response {
@@ -855,5 +1022,49 @@ mod tests {
             )
             .await
             .expect("drain request should succeed")
+    }
+
+    async fn drain_integration_worker_with_success(
+        router: axum::Router,
+        max_events: usize,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/integration-workers/drain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "max_events": max_events
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("integration drain request should succeed")
+    }
+
+    async fn drain_integration_worker_with_failure(
+        router: axum::Router,
+        max_events: usize,
+        error_message: &str,
+        retryable: bool,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/integration-workers/drain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "max_events": max_events,
+                            "error_message": error_message,
+                            "retryable": retryable
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("integration drain request should succeed")
     }
 }

@@ -449,7 +449,15 @@ impl PostgresBackend {
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
         candidate_read_model.record_scan_report(&report);
         let findings_reported = report.findings.len();
-        let pending_integration_event = PendingIntegrationEvent::scan_command_completed(
+        let finding_changes_event = PendingIntegrationEvent::finding_changes_observed(
+            request.component_key.clone(),
+            request.artifact.clone(),
+            report.provider_key.clone(),
+            request.freshness,
+            report.observed_at,
+            change_set.clone(),
+        );
+        let scan_command_completed_event = PendingIntegrationEvent::scan_command_completed(
             command_id.as_ref(),
             request.component_key.clone(),
             request.artifact.clone(),
@@ -465,40 +473,16 @@ impl PostgresBackend {
             .await
             .map_err(|error| format!("postgres transaction begin failed: {error}"))?;
 
-        sqlx::query(&format!(
-            concat!(
-                "INSERT INTO {} ",
-                "(provider_key, component_key, artifact_kind, artifact_identity, observed_at_micros, freshness, knowledge_revision, findings) ",
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
-            ),
-            self.names.provider_reports
-        ))
-        .bind(report.provider_key.as_ref())
-        .bind(report.component_key.as_ref())
-        .bind(artifact_kind_name(report.artifact.kind))
-        .bind(report.artifact.identity.as_ref())
-        .bind(system_time_to_micros(report.observed_at)?)
-        .bind(freshness_name(report.freshness))
-        .bind(report.knowledge_revision.as_deref())
-        .bind(Json(report.findings.clone()))
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
-
-        sqlx::query(&format!(
-            concat!(
-                "INSERT INTO {} ",
-                "(event_id, event_kind, payload, publication_status) VALUES ($1, $2, $3, $4)"
-            ),
-            self.names.integration_outbox
-        ))
-        .bind(pending_integration_event.event_id.as_ref())
-        .bind(pending_integration_event.event.kind_name())
-        .bind(Json(pending_integration_event.clone()))
-        .bind("pending")
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
+        self.insert_provider_report(&mut transaction, &report)
+            .await?;
+        self.insert_pending_integration_events(
+            &mut transaction,
+            &[
+                finding_changes_event.clone(),
+                scan_command_completed_event.clone(),
+            ],
+        )
+        .await?;
 
         sqlx::query(&format!(
             concat!(
@@ -521,8 +505,9 @@ impl PostgresBackend {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.pending_integration_events.push(finding_changes_event);
         self.pending_integration_events
-            .push(pending_integration_event);
+            .push(scan_command_completed_event);
         let Some(command) = self.commands.get_mut(command_id.as_ref()) else {
             return Err("completed scan command missing from postgres runtime".to_owned());
         };
@@ -534,6 +519,57 @@ impl PostgresBackend {
             findings_reported,
             change_set,
         }))
+    }
+
+    async fn insert_provider_report(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        report: &ProviderScanReport,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(provider_key, component_key, artifact_kind, artifact_identity, observed_at_micros, freshness, knowledge_revision, findings) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            ),
+            self.names.provider_reports
+        ))
+        .bind(report.provider_key.as_ref())
+        .bind(report.component_key.as_ref())
+        .bind(artifact_kind_name(report.artifact.kind))
+        .bind(report.artifact.identity.as_ref())
+        .bind(system_time_to_micros(report.observed_at)?)
+        .bind(freshness_name(report.freshness))
+        .bind(report.knowledge_revision.as_deref())
+        .bind(Json(report.findings.clone()))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn insert_pending_integration_events(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        events: &[PendingIntegrationEvent],
+    ) -> Result<(), String> {
+        for event in events {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} ",
+                    "(event_id, event_kind, payload, publication_status) VALUES ($1, $2, $3, $4)"
+                ),
+                self.names.integration_outbox
+            ))
+            .bind(event.event_id.as_ref())
+            .bind(event.event.kind_name())
+            .bind(Json(event.clone()))
+            .bind("pending")
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
+        }
+        Ok(())
     }
 
     async fn fail_scan_command(
@@ -1221,9 +1257,13 @@ mod tests {
             .await
             .expect("scan command should complete");
         assert!(matches!(outcome, RunNextScanResult::Completed(_)));
-        assert_eq!(backend.pending_integration_events().len(), 1);
+        assert_eq!(backend.pending_integration_events().len(), 2);
         assert!(matches!(
             backend.pending_integration_events()[0].event,
+            IntegrationEvent::FindingChangesObserved { .. }
+        ));
+        assert!(matches!(
+            backend.pending_integration_events()[1].event,
             IntegrationEvent::ScanCommandCompleted { .. }
         ));
 
@@ -1234,7 +1274,7 @@ mod tests {
             reopened.command_status(command_id.as_ref()),
             Some(ScanCommandStatus::Completed)
         );
-        assert_eq!(reopened.pending_integration_events().len(), 1);
+        assert_eq!(reopened.pending_integration_events().len(), 2);
     }
 
     #[tokio::test]
