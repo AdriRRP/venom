@@ -1,7 +1,7 @@
 # W39. UI Operator Shell
 
 Wave: `W39-ui-operator-shell`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `script`
 Infra profile: `none`
@@ -39,7 +39,7 @@ Introduce the first VENOM operator console as a thin web app over the existing R
 | `W39-S02` | done | scaffold `apps/web` with deterministic frontend checks and tests | `./scripts/check-slice.sh --wave W39-ui-operator-shell --slice W39-S02 --lane unit --path apps/web --path scripts/check-web.sh --path .github/workflows/tests.yml --path .github/workflows/quality.yml` |
 | `W39-S03` | done | add the first operator shell with API health wiring | `./scripts/check-slice.sh --wave W39-ui-operator-shell --slice W39-S03 --lane unit --path apps/web/src` |
 | `W39-S04` | done | add the first active findings screen over the existing API | `./scripts/check-slice.sh --wave W39-ui-operator-shell --slice W39-S04 --lane unit --path apps/web/src` |
-| `W39-S05` | planned | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W39-ui-operator-shell` |
+| `W39-S05` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W39-ui-operator-shell` |
 
 ## Language impact
 
