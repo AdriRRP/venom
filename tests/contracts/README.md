@@ -12,3 +12,4 @@ Rules:
 - keep fixture reports under `tests/contracts/**` and run them through the canonical contract runner
 - keep one small real fixture corpus per provider so contract checks exercise real payload shape
 - use the infra lane for live scanner execution once the real provider path is wired
+- use this lane for durable integration publication contracts when the business capability is too technical for canonical acceptance BDD

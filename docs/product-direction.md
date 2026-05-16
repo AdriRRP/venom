@@ -18,6 +18,7 @@ The platform target is:
 - classify findings using execution context and governance decisions
 - expose durable operational views that survive restarts and infrastructure faults
 - queue scan execution durably and expose explicit terminal command state
+- publish durable integration events without unsafe dual writes
 - keep hot paths, memory use, and infrastructure chatter aggressively lean
 
 ## Capability map
@@ -28,6 +29,7 @@ The platform target is:
 | Scan orchestration | express canonical scan requests over managed ownership | `request-scan.feature` |
 | Finding ingestion | import concrete provider observations over immutable artifacts | `report-finding.feature` |
 | Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
+| Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |
 | Contextual risk | change meaning by runtime context | `classify-finding.feature` |
 | Governance | accept, suppress, withdraw, explain | `accept-risk.feature` |
 | Operations | answer what is active, changed, pending | `view-active-findings.feature` |
