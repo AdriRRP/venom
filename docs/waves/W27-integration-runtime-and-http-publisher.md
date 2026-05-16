@@ -1,7 +1,7 @@
 # W27. Integration Runtime and HTTP Publisher
 
 Wave: `W27-integration-runtime-and-http-publisher`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -31,9 +31,9 @@ Make integration publication runtime-configurable and durable, then add one real
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W27-S01` | in_progress | define the wave and add the missing domain term for durable integration runtime configuration | `./scripts/check-slice.sh --wave W27-integration-runtime-and-http-publisher --slice W27-S01 --path docs/waves/ACTIVE --path docs/waves/W27-integration-runtime-and-http-publisher.md --path docs/ubiquitous-language.md` |
-| `W27-S02` | in_progress | add durable integration runtime configuration, remove ad hoc publisher selection from the worker path, and add one bounded HTTP publisher adapter with explicit timeout and status-code failure semantics | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W27-integration-runtime-and-http-publisher --slice W27-S02 --lane integration` |
-| `W27-S03` | planned | prove durable integration runtime reload and HTTP publication through Postgres rehearsal and the full wave gate | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W27-integration-runtime-and-http-publisher` |
+| `W27-S01` | done | define the wave and add the missing domain term for durable integration runtime configuration | `./scripts/check-slice.sh --wave W27-integration-runtime-and-http-publisher --slice W27-S01 --path docs/waves/ACTIVE --path docs/waves/W27-integration-runtime-and-http-publisher.md --path docs/ubiquitous-language.md` |
+| `W27-S02` | done | add durable integration runtime configuration, remove ad hoc publisher selection from the worker path, and add one bounded HTTP publisher adapter with explicit timeout and status-code failure semantics | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W27-integration-runtime-and-http-publisher --slice W27-S02 --lane integration` |
+| `W27-S03` | done | prove durable integration runtime reload and the HTTP publication path through Postgres rehearsal and the full wave gate | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W27-integration-runtime-and-http-publisher` |
 
 ## Language impact
 
