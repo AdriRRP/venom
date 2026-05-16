@@ -5,8 +5,9 @@ use std::time::SystemTime;
 use venom_domain::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
     DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
+    FindingProviderErrorKind, IntegrationEventPublishError, IntegrationEventPublisher,
+    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -403,6 +404,71 @@ impl AppService {
         })
     }
 
+    /// Publish pending integration events through one bounded worker loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or publication outcome
+    /// persistence fails.
+    pub async fn publish_integration_events_until_idle(
+        &mut self,
+        request: DrainIntegrationWorkerCommand,
+    ) -> Result<DrainIntegrationWorkerResponse, AppServiceError> {
+        let max_events = request
+            .max_events
+            .ok_or_else(|| AppServiceError::InvalidRequest("max_events is required".to_owned()))?;
+        if max_events == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "max_events must be greater than zero".to_owned(),
+            ));
+        }
+
+        let publisher = ApiIntegrationPublisher::new(request)?;
+        let attempted_events = self
+            .pending_integration_events_snapshot()
+            .into_iter()
+            .take(max_events)
+            .collect::<Vec<_>>();
+
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => {
+                publish_pending_local_integration_events(local, max_events, &publisher)
+                    .await
+                    .map_err(AppServiceError::State)?
+            }
+            AppBackend::Postgres(postgres) => postgres
+                .publish_pending_integration_events(max_events, &publisher)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        let last_attempted = attempted_events.get(result.attempted.saturating_sub(1));
+        let outcome = if result.attempted == 0 {
+            "idle"
+        } else if result.pending_remaining == 0 {
+            "drained"
+        } else {
+            "limited"
+        };
+
+        Ok(DrainIntegrationWorkerResponse {
+            outcome: outcome.to_owned(),
+            attempted: result.attempted,
+            published: result.published,
+            pending_remaining: result.pending_remaining,
+            last_event_id: last_attempted.map(|event| event.event_id.to_string()),
+            last_event_kind: last_attempted.map(|event| event.event.kind_name().to_owned()),
+            last_error: result
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.message.to_string()),
+            last_retryable: result
+                .last_failure
+                .as_ref()
+                .map(|failure| failure.retryable),
+        })
+    }
+
     /// Execute the next queued scan through an injected canonical provider input.
     ///
     /// # Errors
@@ -507,6 +573,19 @@ impl AppService {
                 .inventory()
                 .configured_provider(component_key),
             AppBackend::Postgres(postgres) => postgres.configured_provider(component_key),
+        }
+    }
+
+    fn pending_integration_events_snapshot(&self) -> Vec<PendingIntegrationEvent> {
+        match &self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .pending_integration_events()
+                .iter()
+                .chain(local.runtime.pending_integration_events().iter())
+                .cloned()
+                .collect(),
+            AppBackend::Postgres(postgres) => postgres.pending_integration_events().to_vec(),
         }
     }
 }
@@ -683,6 +762,26 @@ pub struct DrainWorkerResponse {
     pub last_retryable: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DrainIntegrationWorkerCommand {
+    pub max_events: Option<usize>,
+    pub publisher_key: Option<String>,
+    pub error_message: Option<String>,
+    pub retryable: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DrainIntegrationWorkerResponse {
+    pub outcome: String,
+    pub attempted: usize,
+    pub published: usize,
+    pub pending_remaining: usize,
+    pub last_event_id: Option<String>,
+    pub last_event_kind: Option<String>,
+    pub last_error: Option<String>,
+    pub last_retryable: Option<bool>,
+}
+
 fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, AppServiceError> {
     match value {
         "container-image" => Ok(ArtifactKind::ContainerImage),
@@ -835,6 +934,7 @@ impl FindingProvider for ApiExecutionProvider {
 }
 
 const API_WORKER_PROVIDER_KEY: &str = "fixture-provider";
+const API_INTEGRATION_PUBLISHER_KEY: &str = "fixture-publisher";
 
 fn resolve_supported_provider_key(value: &str) -> Result<&'static str, AppServiceError> {
     match value {
@@ -855,5 +955,116 @@ fn parse_error_kind(value: &str) -> Result<FindingProviderErrorKind, AppServiceE
         _ => Err(AppServiceError::InvalidRequest(format!(
             "unsupported provider error kind: {value}"
         ))),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ApiIntegrationPublisher {
+    mode: ApiIntegrationPublisherMode,
+}
+
+#[derive(Debug, Clone)]
+enum ApiIntegrationPublisherMode {
+    Success,
+    Failure(IntegrationEventPublishError),
+}
+
+impl ApiIntegrationPublisher {
+    fn new(request: DrainIntegrationWorkerCommand) -> Result<Self, AppServiceError> {
+        let publisher_key = request
+            .publisher_key
+            .unwrap_or_else(|| API_INTEGRATION_PUBLISHER_KEY.to_owned());
+        resolve_supported_publisher_key(&publisher_key)?;
+
+        Ok(if let Some(message) = request.error_message {
+            Self {
+                mode: ApiIntegrationPublisherMode::Failure(IntegrationEventPublishError::new(
+                    request.retryable.unwrap_or(false),
+                    message,
+                )),
+            }
+        } else {
+            Self {
+                mode: ApiIntegrationPublisherMode::Success,
+            }
+        })
+    }
+}
+
+impl IntegrationEventPublisher for ApiIntegrationPublisher {
+    fn publisher_key(&self) -> &'static str {
+        API_INTEGRATION_PUBLISHER_KEY
+    }
+
+    async fn publish<'a>(
+        &'a self,
+        _event: &'a PendingIntegrationEvent,
+    ) -> Result<(), IntegrationEventPublishError> {
+        match &self.mode {
+            ApiIntegrationPublisherMode::Success => Ok(()),
+            ApiIntegrationPublisherMode::Failure(error) => Err(error.clone()),
+        }
+    }
+}
+
+fn resolve_supported_publisher_key(value: &str) -> Result<&'static str, AppServiceError> {
+    match value {
+        API_INTEGRATION_PUBLISHER_KEY => Ok(API_INTEGRATION_PUBLISHER_KEY),
+        _ => Err(AppServiceError::InvalidRequest(format!(
+            "unsupported publisher key: {value}"
+        ))),
+    }
+}
+
+async fn publish_pending_local_integration_events(
+    local: &mut LocalBackend,
+    max_events: usize,
+    publisher: &(impl IntegrationEventPublisher + Sync),
+) -> Result<PublishIntegrationEventsResult, String> {
+    let mut result = PublishIntegrationEventsResult {
+        attempted: 0,
+        published: 0,
+        pending_remaining: local.state.pending_integration_events().len()
+            + local.runtime.pending_integration_events().len(),
+        last_failure: None,
+    };
+    if max_events == 0 {
+        return Ok(result);
+    }
+
+    let state_result = local
+        .state
+        .publish_pending_integration_events(max_events, publisher)
+        .await
+        .map_err(|error| error.to_string())?;
+    merge_publish_results(&mut result, state_result);
+
+    if result.last_failure.is_some() || result.attempted >= max_events {
+        result.pending_remaining = local.state.pending_integration_events().len()
+            + local.runtime.pending_integration_events().len();
+        return Ok(result);
+    }
+
+    let runtime_budget = max_events - result.attempted;
+    let runtime_result = local
+        .runtime
+        .publish_pending_integration_events(runtime_budget, publisher)
+        .await
+        .map_err(|error| error.to_string())?;
+    merge_publish_results(&mut result, runtime_result);
+    result.pending_remaining = local.state.pending_integration_events().len()
+        + local.runtime.pending_integration_events().len();
+    Ok(result)
+}
+
+fn merge_publish_results(
+    aggregate: &mut PublishIntegrationEventsResult,
+    update: PublishIntegrationEventsResult,
+) {
+    aggregate.attempted += update.attempted;
+    aggregate.published += update.published;
+    aggregate.pending_remaining = update.pending_remaining;
+    if update.last_failure.is_some() {
+        aggregate.last_failure = update.last_failure;
     }
 }
