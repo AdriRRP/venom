@@ -107,12 +107,15 @@ async fn register_component(
     State(state): State<ApiState>,
     Json(request): Json<ComponentRegistrationRequest>,
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .register_component(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .register_component(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -121,12 +124,15 @@ async fn bind_artifact(
     Path(component_key): Path<String>,
     Json(request): Json<BindArtifactRequest>,
 ) -> Result<Json<BindArtifactResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .bind_artifact(&component_key, request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .bind_artifact(&component_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -135,12 +141,15 @@ async fn configure_provider(
     Path(component_key): Path<String>,
     Json(request): Json<ConfigureProviderRequest>,
 ) -> Result<Json<ConfigureProviderResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .configure_provider(&component_key, request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .configure_provider(&component_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -148,12 +157,15 @@ async fn configure_integration_runtime(
     State(state): State<ApiState>,
     Json(request): Json<ConfigureIntegrationRuntimeRequest>,
 ) -> Result<Json<ConfigureIntegrationRuntimeResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .configure_integration_runtime(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .configure_integration_runtime(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -161,12 +173,15 @@ async fn record_provider_report(
     State(state): State<ApiState>,
     Json(request): Json<ProviderScanReportRequest>,
 ) -> Result<Json<RecordProviderReportResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .record_provider_report(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .record_provider_report(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -174,12 +189,15 @@ async fn request_scan(
     State(state): State<ApiState>,
     Json(request): Json<RequestScanCommand>,
 ) -> Result<Json<RequestScanResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .request_scan(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .request_scan(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -198,12 +216,15 @@ async fn run_next_scan(
     State(state): State<ApiState>,
     Json(request): Json<RunNextScanCommand>,
 ) -> Result<Json<RunNextScanResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .run_next_scan(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .run_next_scan(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -211,12 +232,15 @@ async fn drain_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainWorkerCommand>,
 ) -> Result<Json<DrainWorkerResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .run_worker_until_idle(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .run_worker_until_idle(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -224,12 +248,15 @@ async fn drain_integration_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainIntegrationWorkerCommand>,
 ) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
-    let mut service = state.inner.service.lock().await;
-    let response = service
-        .publish_integration_events_until_idle(request)
-        .await
-        .map_err(ApiError::from)?;
-    state.refresh_snapshot(&service);
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .publish_integration_events_until_idle(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        response
+    };
     Ok(Json(response))
 }
 
