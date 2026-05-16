@@ -252,15 +252,6 @@ impl PostgresBackend {
     }
 
     #[must_use]
-    pub fn active_findings(
-        &self,
-        component_key: &str,
-        artifact: &ArtifactRef,
-    ) -> Vec<ReportedFinding> {
-        self.read_model.active_findings(component_key, artifact)
-    }
-
-    #[must_use]
     pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
         self.read_model.query_active_findings(query)
     }
