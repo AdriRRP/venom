@@ -1,7 +1,7 @@
 # W26. Integration Publication Worker Loop
 
 Wave: `W26-integration-publication-worker-loop`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -29,9 +29,9 @@ Connect the durable outbox to the application runtime through one bounded public
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W26-S01` | in_progress | define the app-level publication worker loop boundary and verification scope before changing runtime code | `./scripts/check-slice.sh --wave W26-integration-publication-worker-loop --slice W26-S01 --path docs/waves/ACTIVE --path docs/waves/W26-integration-publication-worker-loop.md` |
-| `W26-S02` | planned | add a bounded integration publication loop to the app service and API over local and Postgres durable backends | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W26-integration-publication-worker-loop --slice W26-S02 --lane integration` |
-| `W26-S03` | planned | prove bounded publication and durable published-state reload through Postgres rehearsal | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W26-integration-publication-worker-loop --lane infra` |
+| `W26-S01` | done | define the app-level publication worker loop boundary and verification scope before changing runtime code | `./scripts/check-slice.sh --wave W26-integration-publication-worker-loop --slice W26-S01 --path docs/waves/ACTIVE --path docs/waves/W26-integration-publication-worker-loop.md` |
+| `W26-S02` | done | add a bounded integration publication loop to the app service and API over local and Postgres durable backends | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W26-integration-publication-worker-loop --slice W26-S02 --lane integration` |
+| `W26-S03` | done | prove bounded publication and durable published-state reload through Postgres rehearsal | `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W26-integration-publication-worker-loop --lane infra` |
 
 ## Language impact
 
