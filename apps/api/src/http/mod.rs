@@ -114,6 +114,7 @@ async fn register_component(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -131,6 +132,7 @@ async fn bind_artifact(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -148,6 +150,7 @@ async fn configure_provider(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -164,6 +167,7 @@ async fn configure_integration_runtime(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -180,6 +184,7 @@ async fn record_provider_report(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -196,6 +201,7 @@ async fn request_scan(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -223,6 +229,7 @@ async fn run_next_scan(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -239,6 +246,7 @@ async fn drain_worker(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
@@ -255,6 +263,7 @@ async fn drain_integration_worker(
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
+        drop(service);
         response
     };
     Ok(Json(response))
