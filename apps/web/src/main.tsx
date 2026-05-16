@@ -1,7 +1,11 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "@tanstack/react-router";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { AppShell } from "./app/app-shell";
+import { router } from "./app/router";
 import "./styles.css";
+
+const queryClient = new QueryClient();
 
 const root = document.getElementById("root");
 
@@ -11,19 +15,8 @@ if (!root) {
 
 ReactDOM.createRoot(root).render(
 	<React.StrictMode>
-		<AppShell statusLabel="Pending wiring">
-			<section className="panel">
-				<div className="panel-header">
-					<div>
-						<p className="eyebrow">Bootstrap</p>
-						<h2>UI Shell Ready</h2>
-					</div>
-				</div>
-				<p className="copy">
-					The first VENOM operator console scaffold is in place and ready for
-					API wiring.
-				</p>
-			</section>
-		</AppShell>
+		<QueryClientProvider client={queryClient}>
+			<RouterProvider router={router} />
+		</QueryClientProvider>
 	</React.StrictMode>,
 );

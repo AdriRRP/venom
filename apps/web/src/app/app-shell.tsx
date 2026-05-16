@@ -1,10 +1,12 @@
 import type { PropsWithChildren } from "react";
 
+export type ApiHealthState = "healthy" | "unhealthy" | "loading";
+
 type AppShellProps = PropsWithChildren<{
-	statusLabel: string;
+	apiHealth: ApiHealthState;
 }>;
 
-export function AppShell({ statusLabel, children }: AppShellProps) {
+export function AppShell({ apiHealth, children }: AppShellProps) {
 	return (
 		<div className="shell">
 			<aside className="sidebar">
@@ -17,8 +19,8 @@ export function AppShell({ statusLabel, children }: AppShellProps) {
 				</div>
 				<dl className="status-card">
 					<div>
-						<dt>Status</dt>
-						<dd>{statusLabel}</dd>
+						<dt>API Health</dt>
+						<dd data-health={apiHealth}>{healthLabel(apiHealth)}</dd>
 					</div>
 					<div>
 						<dt>Scope</dt>
@@ -29,4 +31,15 @@ export function AppShell({ statusLabel, children }: AppShellProps) {
 			<main className="content">{children}</main>
 		</div>
 	);
+}
+
+function healthLabel(value: ApiHealthState): string {
+	switch (value) {
+		case "healthy":
+			return "Healthy";
+		case "unhealthy":
+			return "Unhealthy";
+		case "loading":
+			return "Checking";
+	}
 }
