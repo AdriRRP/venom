@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { OperationsPage } from "./operations";
 
@@ -35,5 +35,34 @@ describe("OperationsPage", () => {
 		expect(
 			screen.getByText(/request canonical scans from the operator console/i),
 		).toBeInTheDocument();
+	});
+
+	it("registers one component through the operator form", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/components") {
+				return new Response(
+					JSON.stringify({
+						change: "registered",
+						managed_components: 1,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(screen.getByRole("button", { name: "Register" }));
+
+		expect(await screen.findByText(/Change: registered/i)).toBeInTheDocument();
 	});
 });
