@@ -13,3 +13,4 @@ Rules:
 - keep network-dependent checks advisory until they prove cheap and stable enough for the default path
 - let `infra-smoke.sh` own standalone real-infra checks when a full compose stack is unnecessary
 - let `check-git-discipline.sh` enforce that completed waves are verified from a clean committed tree
+- let `check-performance-baseline.sh` own local benchmarkable hot-path baselines before larger optimization waves change behavior

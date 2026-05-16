@@ -32,8 +32,8 @@ Establish a repeatable hot-path performance baseline for the current domain core
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W29-S01` | done | define the performance baseline wave, scope, and verification contract | `./scripts/check-slice.sh --wave W29-hot-path-performance-baseline --slice W29-S01 --path docs/waves/ACTIVE --path docs/waves/W29-hot-path-performance-baseline.md` |
-| `W29-S02` | in_progress | add a deterministic hot-path benchmark harness and benchmark script | `./scripts/check-performance-baseline.sh` |
-| `W29-S03` | planned | remove unnecessary cloning from the active findings query hot path and keep benchmark coverage green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
+| `W29-S02` | done | add a deterministic hot-path benchmark harness and benchmark script | `./scripts/check-performance-baseline.sh` |
+| `W29-S03` | in_progress | remove unnecessary cloning from the active findings query hot path and keep benchmark coverage green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
 | `W29-S04` | planned | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W29-hot-path-performance-baseline` |
 
 ## Language impact
