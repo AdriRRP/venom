@@ -29,7 +29,10 @@ pub use finding_provider::{
 pub use finding_provider_contract::{
     FindingProviderContractViolation, as_provider_error, validate_provider_scan_report,
 };
-pub use finding_read_model::FindingReadModel;
+pub use finding_read_model::{
+    ActiveFindingsPage, ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
+    MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
+};
 pub use finding_tracker::{FindingChangeSet, FindingTracker};
 pub use scan_execution::{ScanExecutionError, ScanExecutionResult, execute_scan};
 pub use scan_planning::{ScanPlanner, ScanPlanningError};

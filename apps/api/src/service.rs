@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use venom_domain::{
-    ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
-    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, RunNextScanResult, ScanCommandStatus,
-    ScanPlanner, ScanRequest, Severity,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
+    DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -219,28 +219,32 @@ impl AppService {
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity.clone(),
         );
-        let findings = match &self.backend {
-            AppBackend::Local(local) => local
-                .state
-                .read_model()
-                .active_findings(&request.component_key, &artifact),
-            AppBackend::Postgres(postgres) => {
-                postgres.active_findings(&request.component_key, &artifact)
-            }
-        }
-        .into_iter()
-        .map(|finding| ActiveFindingItem {
-            vulnerability_id: finding.vulnerability_id.into(),
-            package_name: finding.package.name.into(),
-            package_version: finding.package.version.into(),
-            severity: severity_name(finding.severity).to_owned(),
-        })
-        .collect::<Vec<_>>();
+        let query = build_active_findings_query(&request, artifact)?;
+        let page = match &self.backend {
+            AppBackend::Local(local) => local.state.read_model().query_active_findings(&query),
+            AppBackend::Postgres(postgres) => postgres.query_active_findings(&query),
+        };
+        let findings = page
+            .findings
+            .into_iter()
+            .map(|finding| ActiveFindingItem {
+                vulnerability_id: finding.vulnerability_id.into(),
+                package_name: finding.package.name.into(),
+                package_version: finding.package.version.into(),
+                severity: severity_name(finding.severity).to_owned(),
+            })
+            .collect::<Vec<_>>();
 
         Ok(ActiveFindingsResponse {
             component_key: request.component_key,
             artifact_kind: request.artifact_kind,
             artifact_identity: request.artifact_identity,
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            total_active_findings: page.total,
+            returned: page.returned,
+            offset: page.offset,
+            limit: page.limit,
             active_findings: findings,
         })
     }
@@ -584,6 +588,10 @@ pub struct ActiveFindingsRequest {
     pub component_key: String,
     pub artifact_kind: String,
     pub artifact_identity: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -591,6 +599,12 @@ pub struct ActiveFindingsResponse {
     pub component_key: String,
     pub artifact_kind: String,
     pub artifact_identity: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub total_active_findings: usize,
+    pub returned: usize,
+    pub offset: usize,
+    pub limit: usize,
     pub active_findings: Vec<ActiveFindingItem>,
 }
 
@@ -701,6 +715,26 @@ fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
             "unsupported severity: {value}"
         ))),
     }
+}
+
+fn build_active_findings_query(
+    request: &ActiveFindingsRequest,
+    artifact: ArtifactRef,
+) -> Result<ActiveFindingsQuery, AppServiceError> {
+    let mut query = ActiveFindingsQuery::new(request.component_key.clone(), artifact);
+    if let Some(min_severity) = request.min_severity.as_deref() {
+        query = query.with_min_severity(parse_severity(min_severity)?);
+    }
+    if let Some(package_name) = request.package_name.as_deref() {
+        query = query.with_package_name(package_name);
+    }
+    if let Some(offset) = request.offset {
+        query = query.with_offset(offset);
+    }
+    if let Some(limit) = request.limit {
+        query = query.with_limit(limit);
+    }
+    Ok(query)
 }
 
 const fn severity_name(value: Severity) -> &'static str {

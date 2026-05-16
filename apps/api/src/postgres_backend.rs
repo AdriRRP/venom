@@ -2,12 +2,13 @@ use sqlx::{PgPool, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CompletedScanCommand,
-    ComponentRegistration, ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness,
-    FailedScanCommand, FindingChangeSet, FindingIngestion, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, ProviderScanReport, RegisterComponentChange,
-    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
-    ScanRequest, as_provider_error, validate_provider_scan_report,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BindArtifactChange,
+    BindArtifactResult, CompletedScanCommand, ComponentRegistration, ConfigureProviderChange,
+    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
+    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, ProviderScanReport, RegisterComponentChange, RegisterComponentResult,
+    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest,
+    as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -183,6 +184,11 @@ impl PostgresBackend {
         artifact: &ArtifactRef,
     ) -> Vec<ReportedFinding> {
         self.read_model.active_findings(component_key, artifact)
+    }
+
+    #[must_use]
+    pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
+        self.read_model.query_active_findings(query)
     }
 
     #[must_use]
