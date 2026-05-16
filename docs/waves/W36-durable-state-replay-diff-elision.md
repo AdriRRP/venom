@@ -1,7 +1,7 @@
 # W36. Durable State Replay Diff Elision
 
 Wave: `W36-durable-state-replay-diff-elision`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `none`
@@ -31,7 +31,7 @@ Reduce durable state replay cost by restoring tracker state without computing `F
 |---|---|---|---|
 | `W36-S01` | done | define the durable state replay diff elision wave and target | `./scripts/check-slice.sh --wave W36-durable-state-replay-diff-elision --slice W36-S01 --path docs/waves/ACTIVE --path docs/waves/W36-durable-state-replay-diff-elision.md` |
 | `W36-S02` | done | add replay-only ingestion/tracker paths that skip unused diff computation during durable rebuild and share one canonical replay path between tracker and read model | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
-| `W36-S03` | planned | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W36-durable-state-replay-diff-elision` |
+| `W36-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W36-durable-state-replay-diff-elision` |
 
 ## Language impact
 
