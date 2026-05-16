@@ -1,3 +1,4 @@
+pub mod http_integration_publisher;
 pub mod postgres_backend;
 pub mod service;
 
@@ -10,7 +11,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use service::{
     ActiveFindingsResponse, AppService, BindArtifactRequest, BindArtifactResponse,
-    ComponentRegistrationRequest, ConfigureProviderRequest, ConfigureProviderResponse,
+    ComponentRegistrationRequest, ConfigureIntegrationRuntimeRequest,
+    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ProviderScanReportRequest, RecordProviderReportResponse,
     RegisterComponentResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
@@ -66,6 +68,7 @@ pub fn build_router(state: ApiState) -> Router {
             "/components/{component_key}/provider-runtime",
             post(configure_provider),
         )
+        .route("/integration-runtime", post(configure_integration_runtime))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route("/scan-workers/run-next", post(run_next_scan))
@@ -119,6 +122,20 @@ async fn configure_provider(
         .lock()
         .await
         .configure_provider(&component_key, request)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn configure_integration_runtime(
+    State(state): State<ApiState>,
+    Json(request): Json<ConfigureIntegrationRuntimeRequest>,
+) -> Result<Json<ConfigureIntegrationRuntimeResponse>, ApiError> {
+    let response = state
+        .service
+        .lock()
+        .await
+        .configure_integration_runtime(request)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -538,6 +555,9 @@ mod tests {
         let response = configure_fixture_provider(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_integration_runtime(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let response = enqueue_scan_request(router.clone()).await;
@@ -575,6 +595,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_integration_runtime(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = enqueue_scan_request(router.clone()).await;
@@ -618,6 +641,9 @@ mod tests {
         let response = configure_fixture_provider(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_integration_runtime(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -648,6 +674,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_exposes_http_publisher_transport_failure_explicitly() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("http-integration-worker", "state"),
+                temp_path("http-integration-worker", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response =
+            configure_http_integration_runtime(router.clone(), "http://127.0.0.1:9/publish", 3_000)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_integration_worker_with_success(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "limited");
+        assert_eq!(payload["attempted"], 1);
+        assert_eq!(payload["published"], 0);
+        assert_eq!(payload["pending_remaining"], 2);
+        assert_eq!(payload["last_retryable"], true);
+        assert!(payload["last_error"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn api_rejects_fixture_failure_controls_for_http_publisher() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("http-integration-failure", "state"),
+                temp_path("http-integration-failure", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response =
+            configure_http_integration_runtime(router.clone(), "http://127.0.0.1:9/publish", 3_000)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_integration_worker_with_failure(
+            router.clone(),
+            8,
+            "fixture publish failed",
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(
+            payload["error"],
+            "http publisher does not accept fixture failure controls"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_backend_reloads_findings_and_scan_status() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -666,6 +778,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_fixture_integration_runtime(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = enqueue_scan_request(router.clone()).await;
@@ -749,6 +864,9 @@ mod tests {
         let response = configure_fixture_provider(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_integration_runtime(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let response = enqueue_scan_request(router.clone()).await;
@@ -829,6 +947,55 @@ mod tests {
         assert_eq!(payload["last_event_kind"], "scan-command-completed");
     }
 
+    #[tokio::test]
+    async fn postgres_integration_runtime_reloads_and_publishes_over_http() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish_http");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = configure_fixture_provider(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response =
+            configure_http_integration_runtime(router.clone(), "http://127.0.0.1:9/publish", 3_000)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = enqueue_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = drain_worker_with_fixture(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = drain_integration_worker_with_success(reloaded.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "limited");
+        assert_eq!(payload["attempted"], 1);
+        assert_eq!(payload["published"], 0);
+        assert_eq!(payload["pending_remaining"], 2);
+        assert_eq!(payload["last_retryable"], true);
+        assert!(payload["last_error"].as_str().is_some());
+    }
+
     async fn bind_owned_artifact(router: axum::Router) -> axum::response::Response {
         router
             .oneshot(
@@ -880,6 +1047,48 @@ mod tests {
             )
             .await
             .expect("configure provider request should succeed")
+    }
+
+    async fn configure_fixture_integration_runtime(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/integration-runtime")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "publisher_key": "fixture-publisher"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("configure integration runtime request should succeed")
+    }
+
+    async fn configure_http_integration_runtime(
+        router: axum::Router,
+        endpoint_url: &str,
+        timeout_ms: u32,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/integration-runtime")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "publisher_key": "http-publisher",
+                            "endpoint_url": endpoint_url,
+                            "timeout_ms": timeout_ms
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("configure integration runtime request should succeed")
     }
 
     async fn record_provider_report(router: axum::Router) -> axum::response::Response {

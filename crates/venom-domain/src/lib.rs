@@ -7,6 +7,7 @@ pub mod finding_provider_contract;
 pub mod finding_read_model;
 pub mod finding_tracker;
 pub mod integration_events;
+pub mod integration_runtime;
 pub mod scan_execution;
 pub mod scan_planning;
 pub mod syft_grype;
@@ -38,6 +39,9 @@ pub use finding_tracker::{FindingChangeSet, FindingTracker};
 pub use integration_events::{
     IntegrationEvent, IntegrationEventPublicationFailure, IntegrationEventPublishError,
     IntegrationEventPublisher, PendingIntegrationEvent, PublishIntegrationEventsResult,
+};
+pub use integration_runtime::{
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationRuntimeConfig,
 };
 pub use scan_execution::{ScanExecutionError, ScanExecutionResult, execute_scan};
 pub use scan_planning::{ScanPlanner, ScanPlanningError};
