@@ -9,10 +9,10 @@ use std::{
     fs,
     path::Path,
     process::Stdio,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use time::OffsetDateTime;
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
 /// Stable provider key for the Syft + Grype adapter path.
 pub const SYFT_GRYPE_PROVIDER_KEY: &str = "syft-grype";
@@ -22,6 +22,12 @@ pub const OFFICIAL_SYFT_IMAGE: &str = "ghcr.io/anchore/syft:v1.44.0";
 
 /// Official Grype image used by the live Docker-backed runner.
 pub const OFFICIAL_GRYPE_IMAGE: &str = "ghcr.io/anchore/grype:v0.112.0";
+
+/// Default timeout applied to each live provider process.
+pub const DEFAULT_LIVE_COMMAND_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Maximum stderr payload kept in one provider failure message.
+pub const MAX_ERROR_TEXT_BYTES: usize = 2048;
 
 /// Provider backed by committed Syft and Grype fixture outputs.
 ///
@@ -92,6 +98,7 @@ impl FindingProvider for FixtureSyftGrypeProvider {
 pub struct DockerSyftGrypeProvider {
     syft_image: Box<str>,
     grype_image: Box<str>,
+    command_timeout: Duration,
 }
 
 impl DockerSyftGrypeProvider {
@@ -100,12 +107,19 @@ impl DockerSyftGrypeProvider {
         Self {
             syft_image: syft_image.into(),
             grype_image: grype_image.into(),
+            command_timeout: DEFAULT_LIVE_COMMAND_TIMEOUT,
         }
     }
 
     #[must_use]
     pub fn official() -> Self {
         Self::new(OFFICIAL_SYFT_IMAGE, OFFICIAL_GRYPE_IMAGE)
+    }
+
+    #[must_use]
+    pub const fn with_timeout(mut self, command_timeout: Duration) -> Self {
+        self.command_timeout = command_timeout;
+        self
     }
 }
 
@@ -133,12 +147,18 @@ impl FindingProvider for DockerSyftGrypeProvider {
             ));
         }
 
-        let syft_stdout =
-            run_command(docker_syft_command(&self.syft_image, request), None, "syft").await?;
+        let syft_stdout = run_command(
+            docker_syft_command(&self.syft_image, request),
+            None,
+            "syft",
+            self.command_timeout,
+        )
+        .await?;
         let grype_stdout = run_command(
             docker_grype_command(&self.grype_image),
             Some(&syft_stdout),
             "grype",
+            self.command_timeout,
         )
         .await?;
 
@@ -352,8 +372,10 @@ async fn run_command(
     mut command: Command,
     stdin_bytes: Option<&[u8]>,
     tool_name: &'static str,
+    command_timeout: Duration,
 ) -> Result<Vec<u8>, FindingProviderError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.kill_on_drop(true);
     if stdin_bytes.is_some() {
         command.stdin(Stdio::piped());
     }
@@ -384,19 +406,31 @@ async fn run_command(
         drop(stdin);
     }
 
-    let output = child.wait_with_output().await.map_err(|error| {
-        FindingProviderError::new(
-            FindingProviderErrorKind::Unavailable,
-            true,
-            format!("failed while waiting for {tool_name}: {error}"),
-        )
-    })?;
+    let output = match timeout(command_timeout, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|error| {
+            FindingProviderError::new(
+                FindingProviderErrorKind::Unavailable,
+                true,
+                format!("failed while waiting for {tool_name}: {error}"),
+            )
+        })?,
+        Err(_) => {
+            return Err(FindingProviderError::new(
+                FindingProviderErrorKind::Unavailable,
+                true,
+                format!(
+                    "{tool_name} exceeded the live execution timeout of {}s",
+                    command_timeout.as_secs()
+                ),
+            ));
+        }
+    };
 
     if output.status.success() {
         return Ok(output.stdout);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = bounded_error_text(&output.stderr);
     Err(FindingProviderError::new(
         FindingProviderErrorKind::Unavailable,
         true,
@@ -406,6 +440,16 @@ async fn run_command(
             stderr.trim()
         ),
     ))
+}
+
+fn bounded_error_text(bytes: &[u8]) -> String {
+    let limit = bytes.len().min(MAX_ERROR_TEXT_BYTES);
+    let truncated = &bytes[..limit];
+    let mut text = String::from_utf8_lossy(truncated).trim().to_owned();
+    if bytes.len() > MAX_ERROR_TEXT_BYTES {
+        text.push_str("…[truncated]");
+    }
+    text
 }
 
 fn read_text_file(path: &Path, label: &str) -> Result<String, FindingProviderError> {
@@ -652,14 +696,16 @@ struct GrypeArtifact {
 #[cfg(test)]
 mod tests {
     use super::{
-        DockerSyftGrypeProvider, FixtureSyftGrypeProvider, OFFICIAL_GRYPE_IMAGE,
-        OFFICIAL_SYFT_IMAGE, artifact_identity_from_syft_json,
+        DEFAULT_LIVE_COMMAND_TIMEOUT, DockerSyftGrypeProvider, FixtureSyftGrypeProvider,
+        MAX_ERROR_TEXT_BYTES, OFFICIAL_GRYPE_IMAGE, OFFICIAL_SYFT_IMAGE,
+        artifact_identity_from_syft_json, bounded_error_text, run_command,
     };
     use crate::{
         ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider, FindingProviderErrorKind,
         validate_provider_scan_report,
     };
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, process::Stdio, time::Duration};
+    use tokio::process::Command;
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -714,6 +760,7 @@ mod tests {
     fn official_images_are_pinned() {
         assert_eq!(OFFICIAL_SYFT_IMAGE, "ghcr.io/anchore/syft:v1.44.0");
         assert_eq!(OFFICIAL_GRYPE_IMAGE, "ghcr.io/anchore/grype:v0.112.0");
+        assert_eq!(DEFAULT_LIVE_COMMAND_TIMEOUT, Duration::from_mins(1));
     }
 
     #[tokio::test]
@@ -731,5 +778,37 @@ mod tests {
             .expect_err("deterministic live scan must be rejected");
 
         assert_eq!(error.kind, FindingProviderErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn provider_error_text_is_bounded() {
+        let bytes = vec![b'x'; MAX_ERROR_TEXT_BYTES + 128];
+        let text = bounded_error_text(&bytes);
+
+        assert!(text.starts_with('x'));
+        assert!(text.ends_with("…[truncated]"));
+        assert!(text.len() <= MAX_ERROR_TEXT_BYTES + "…[truncated]".len());
+    }
+
+    #[tokio::test]
+    async fn run_command_times_out_explicitly() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let error = run_command(command, None, "timeout-test", Duration::from_millis(10))
+            .await
+            .expect_err("slow command must time out");
+
+        assert_eq!(error.kind, FindingProviderErrorKind::Unavailable);
+        assert!(error.retryable);
+        assert!(
+            error
+                .message
+                .contains("exceeded the live execution timeout")
+        );
     }
 }
