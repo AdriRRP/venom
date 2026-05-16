@@ -229,7 +229,7 @@ fn build_report_from_bundle(
 ) -> Result<ProviderScanReport, FindingProviderError> {
     let syft = bundle.syft_document()?;
     let grype = bundle.grype_report()?;
-    build_report_from_documents(request, syft, grype)
+    build_report_from_documents(request, &syft, &grype)
 }
 
 fn build_report_from_json_bytes(
@@ -239,15 +239,15 @@ fn build_report_from_json_bytes(
 ) -> Result<ProviderScanReport, FindingProviderError> {
     let syft = parse_syft_document_bytes(syft_json)?;
     let grype = parse_grype_report_bytes(grype_json)?;
-    build_report_from_documents(request, syft, grype)
+    build_report_from_documents(request, &syft, &grype)
 }
 
 fn build_report_from_documents(
     request: &ScanRequest,
-    syft: SyftDocument,
-    grype: GrypeReport,
+    syft: &SyftDocument,
+    grype: &GrypeReport,
 ) -> Result<ProviderScanReport, FindingProviderError> {
-    ensure_request_matches_sources(request, &syft, &grype)?;
+    ensure_request_matches_sources(request, syft, grype)?;
 
     let observed_at = grype
         .descriptor
