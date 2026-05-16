@@ -33,8 +33,8 @@ Establish a repeatable hot-path performance baseline for the current domain core
 |---|---|---|---|
 | `W29-S01` | done | define the performance baseline wave, scope, and verification contract | `./scripts/check-slice.sh --wave W29-hot-path-performance-baseline --slice W29-S01 --path docs/waves/ACTIVE --path docs/waves/W29-hot-path-performance-baseline.md` |
 | `W29-S02` | done | add a deterministic hot-path benchmark harness and benchmark script | `./scripts/check-performance-baseline.sh` |
-| `W29-S03` | in_progress | remove unnecessary cloning from the active findings query hot path and keep benchmark coverage green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
-| `W29-S04` | planned | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W29-hot-path-performance-baseline` |
+| `W29-S03` | done | remove unnecessary cloning from the active findings query hot path and keep benchmark coverage green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
+| `W29-S04` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W29-hot-path-performance-baseline` |
 
 ## Language impact
 
@@ -52,3 +52,4 @@ Establish a repeatable hot-path performance baseline for the current domain core
 
 - benchmark numbers are local guidance, not committed golden outputs
 - the first performance wave should optimize only where a benchmark exists in the same wave
+- local criterion runs in this wave showed a clear improvement in `active_findings_query` after removing full-vector cloning before pagination
