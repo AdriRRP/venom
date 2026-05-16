@@ -14,3 +14,4 @@ Rules:
 - let `infra-smoke.sh` own standalone real-infra checks when a full compose stack is unnecessary
 - let `check-git-discipline.sh` enforce that completed waves are verified from a clean committed tree
 - let `check-performance-baseline.sh` own local benchmarkable hot-path baselines before larger optimization waves change behavior
+- let `check-web.sh` own the default frontend quality, test, and build path when `apps/web` exists

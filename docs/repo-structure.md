@@ -63,6 +63,7 @@ Rules:
 - keep domain logic out of here
 - add `apps/web` or `apps/cli` only when they actually exist
 - when an app grows, separate `http/`, `app/`, and `infra/` concerns before adding more endpoints or adapters
+- for `apps/web`, keep the first structure shallow and route-driven, and let repository-level scripts own the default quality and test entrypoints
 
 ### `crates/`
 
