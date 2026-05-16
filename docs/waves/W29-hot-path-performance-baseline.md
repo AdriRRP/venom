@@ -1,7 +1,7 @@
 # W29. Hot-Path Performance Baseline
 
 Wave: `W29-hot-path-performance-baseline`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `script`
 Infra profile: `none`
@@ -34,7 +34,7 @@ Establish a repeatable hot-path performance baseline for the current domain core
 | `W29-S01` | done | define the performance baseline wave, scope, and verification contract | `./scripts/check-slice.sh --wave W29-hot-path-performance-baseline --slice W29-S01 --path docs/waves/ACTIVE --path docs/waves/W29-hot-path-performance-baseline.md` |
 | `W29-S02` | done | add a deterministic hot-path benchmark harness and benchmark script | `./scripts/check-performance-baseline.sh` |
 | `W29-S03` | done | remove unnecessary cloning from the active findings query hot path and keep benchmark coverage green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
-| `W29-S04` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W29-hot-path-performance-baseline` |
+| `W29-S04` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W29-hot-path-performance-baseline` |
 
 ## Language impact
 
