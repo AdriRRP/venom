@@ -906,6 +906,9 @@ mod tests {
         let response = configure_fixture_provider(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_fixture_integration_runtime(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = enqueue_scan_request(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
