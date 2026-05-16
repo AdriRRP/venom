@@ -1,7 +1,7 @@
 # W31. Postgres Round-Trip Reduction
 
 Wave: `W31-postgres-roundtrip-reduction`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -30,7 +30,7 @@ Reduce unnecessary Postgres write round trips in a hot durable business path wit
 |---|---|---|---|
 | `W31-S01` | done | define the Postgres round-trip reduction wave and target | `./scripts/check-slice.sh --wave W31-postgres-roundtrip-reduction --slice W31-S01 --path docs/waves/ACTIVE --path docs/waves/W31-postgres-roundtrip-reduction.md` |
 | `W31-S02` | done | batch integration outbox inserts inside Postgres transactions instead of inserting each event separately | `cargo test --workspace --all-targets --all-features && ./scripts/rehearse-infra.sh --profile db` |
-| `W31-S03` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W31-postgres-roundtrip-reduction` |
+| `W31-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W31-postgres-roundtrip-reduction` |
 
 ## Language impact
 
