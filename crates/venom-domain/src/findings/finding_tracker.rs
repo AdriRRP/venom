@@ -64,6 +64,29 @@ impl FindingTracker {
             active: previous.len(),
         }
     }
+
+    /// Restore one provider snapshot during replay without recomputing change counts.
+    pub fn replay_scan_report(&mut self, report: &ProviderScanReport) {
+        let artifact_key =
+            TrackedArtifactKey::new(report.component_key.clone(), report.artifact.clone());
+        let current = canonicalize_findings(&report.findings);
+        self.snapshots.insert(artifact_key, current);
+    }
+
+    /// Restore one provider snapshot during replay from already canonical findings.
+    pub(crate) fn replay_canonical_findings(
+        &mut self,
+        component_key: Box<str>,
+        artifact: ArtifactRef,
+        canonical_findings: &[ReportedFinding],
+    ) {
+        let artifact_key = TrackedArtifactKey::new(component_key, artifact);
+        let current = canonical_findings
+            .iter()
+            .map(FindingFingerprint::from)
+            .collect::<Vec<_>>();
+        self.snapshots.insert(artifact_key, current);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -211,5 +234,19 @@ mod tests {
         assert_eq!(withdrawn.repeated, 0);
         assert_eq!(withdrawn.withdrawn, 1);
         assert_eq!(withdrawn.active, 0);
+    }
+
+    #[test]
+    fn replay_snapshot_restores_active_state_without_diff_output() {
+        let mut tracker = FindingTracker::new();
+        let report = report(vec![openssl_finding()]);
+
+        tracker.replay_scan_report(&report);
+        let replayed = tracker.record_scan_report(&report);
+
+        assert_eq!(replayed.discovered, 0);
+        assert_eq!(replayed.repeated, 1);
+        assert_eq!(replayed.withdrawn, 0);
+        assert_eq!(replayed.active, 1);
     }
 }

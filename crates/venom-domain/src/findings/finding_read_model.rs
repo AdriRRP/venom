@@ -84,6 +84,17 @@ impl FindingReadModel {
             .insert(key, canonicalize_findings(&report.findings));
     }
 
+    /// Restore one provider snapshot during replay from already canonical findings.
+    pub(crate) fn replay_canonical_scan_report(
+        &mut self,
+        component_key: Box<str>,
+        artifact: ArtifactRef,
+        canonical_findings: Vec<ReportedFinding>,
+    ) {
+        let key = TrackedArtifactKey::new(component_key, artifact);
+        self.active.insert(key, canonical_findings);
+    }
+
     #[must_use]
     pub fn active_finding_count(&self, component_key: &str, artifact: &ArtifactRef) -> usize {
         self.active
@@ -192,6 +203,10 @@ fn canonicalize_findings(findings: &[ReportedFinding]) -> Vec<ReportedFinding> {
     canonical.sort_unstable_by(finding_sort_key);
     canonical.dedup_by(|left, right| finding_dedup_key(left) == finding_dedup_key(right));
     canonical
+}
+
+pub(crate) fn canonicalize_reported_findings(findings: &[ReportedFinding]) -> Vec<ReportedFinding> {
+    canonicalize_findings(findings)
 }
 
 fn finding_sort_key(left: &ReportedFinding, right: &ReportedFinding) -> std::cmp::Ordering {

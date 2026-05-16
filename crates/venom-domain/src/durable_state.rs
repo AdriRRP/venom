@@ -6,6 +6,7 @@ use crate::{
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterComponentChange, RegisterComponentResult, ReportedFinding, Severity,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -344,21 +345,27 @@ impl DurableState {
                 pending_integration_event,
             } => {
                 let report = report.into_domain()?;
+                let canonical_findings = canonicalize_reported_findings(&report.findings);
                 self.ingestion
-                    .record_scan_report(&report)
-                    .map_err(DurableStateError::Ingestion)
+                    .replay_canonical_scan_report(&report, &canonical_findings)
                     .map_err(|error| match error {
-                        DurableStateError::Ingestion(reason) => DurableStateError::CorruptHistory {
-                            line,
-                            reason: format!(
-                                "provider report cannot be replayed: {}",
-                                reason.as_str()
-                            )
-                            .into_boxed_str(),
-                        },
-                        other => other,
+                        FindingIngestionError::UnmanagedComponent
+                        | FindingIngestionError::UnmanagedArtifact => {
+                            DurableStateError::CorruptHistory {
+                                line,
+                                reason: format!(
+                                    "provider report cannot be replayed: {}",
+                                    error.as_str()
+                                )
+                                .into_boxed_str(),
+                            }
+                        }
                     })?;
-                self.read_model.record_scan_report(&report);
+                self.read_model.replay_canonical_scan_report(
+                    report.component_key.clone(),
+                    report.artifact.clone(),
+                    canonical_findings,
+                );
                 if let Some(pending_integration_event) = *pending_integration_event {
                     self.pending_integration_events
                         .push_back(pending_integration_event);
