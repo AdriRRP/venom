@@ -4,7 +4,7 @@ use crate::{
     PublishIntegrationEventsResult, ScanRequest, validate_provider_scan_report,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ pub struct DurableScanRuntime {
     history_path: PathBuf,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
-    pending_integration_events: Vec<PendingIntegrationEvent>,
+    pending_integration_events: VecDeque<PendingIntegrationEvent>,
 }
 
 impl DurableScanRuntime {
@@ -45,7 +45,7 @@ impl DurableScanRuntime {
             history_path,
             commands: BTreeMap::new(),
             order: Vec::new(),
-            pending_integration_events: Vec::new(),
+            pending_integration_events: VecDeque::new(),
         };
         runtime.rebuild_from_history()?;
         Ok(runtime)
@@ -99,7 +99,7 @@ impl DurableScanRuntime {
     }
 
     #[must_use]
-    pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
+    pub fn pending_integration_events(&self) -> &VecDeque<PendingIntegrationEvent> {
         &self.pending_integration_events
     }
 
@@ -286,7 +286,7 @@ impl DurableScanRuntime {
                 };
                 command.status = ScanCommandStatus::Completed;
                 self.pending_integration_events
-                    .push(pending_integration_event);
+                    .push_back(pending_integration_event);
                 Ok(())
             }
             RunNextScanResult::Failed(result) => {
@@ -365,7 +365,7 @@ impl DurableScanRuntime {
             } => {
                 if let Some(pending_integration_event) = *pending_integration_event {
                     self.pending_integration_events
-                        .push(pending_integration_event);
+                        .push_back(pending_integration_event);
                 }
                 self.mark_terminal(line, &command_id, ScanCommandStatus::Completed)
             }
@@ -381,6 +381,15 @@ impl DurableScanRuntime {
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
+        if self
+            .pending_integration_events
+            .front()
+            .is_some_and(|event| event.event_id.as_ref() == event_id)
+        {
+            self.pending_integration_events.pop_front();
+            return;
+        }
+
         if let Some(index) = self
             .pending_integration_events
             .iter()

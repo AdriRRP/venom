@@ -8,6 +8,7 @@ use crate::{
     RegisterComponentChange, RegisterComponentResult, ReportedFinding, Severity,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -25,7 +26,7 @@ pub struct DurableState {
     ingestion: FindingIngestion,
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
-    pending_integration_events: Vec<PendingIntegrationEvent>,
+    pending_integration_events: VecDeque<PendingIntegrationEvent>,
 }
 
 impl DurableState {
@@ -51,7 +52,7 @@ impl DurableState {
             ingestion: FindingIngestion::default(),
             read_model: FindingReadModel::default(),
             integration_runtime_config: None,
-            pending_integration_events: Vec::new(),
+            pending_integration_events: VecDeque::new(),
         };
         state.rebuild_from_history()?;
         Ok(state)
@@ -73,7 +74,7 @@ impl DurableState {
     }
 
     #[must_use]
-    pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
+    pub fn pending_integration_events(&self) -> &VecDeque<PendingIntegrationEvent> {
         &self.pending_integration_events
     }
 
@@ -258,7 +259,7 @@ impl DurableState {
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
         self.pending_integration_events
-            .push(pending_integration_event);
+            .push_back(pending_integration_event);
         Ok(change_set)
     }
 
@@ -364,7 +365,7 @@ impl DurableState {
                 self.read_model.record_scan_report(&report);
                 if let Some(pending_integration_event) = *pending_integration_event {
                     self.pending_integration_events
-                        .push(pending_integration_event);
+                        .push_back(pending_integration_event);
                 }
                 Ok(())
             }
@@ -377,6 +378,15 @@ impl DurableState {
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
+        if self
+            .pending_integration_events
+            .front()
+            .is_some_and(|event| event.event_id.as_ref() == event_id)
+        {
+            self.pending_integration_events.pop_front();
+            return;
+        }
+
         if let Some(index) = self
             .pending_integration_events
             .iter()
