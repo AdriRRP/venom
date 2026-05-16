@@ -1,7 +1,7 @@
 # W35. Durable Replay Baseline
 
 Wave: `W35-durable-replay-baseline`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `script`
 Infra profile: `none`
@@ -32,7 +32,7 @@ Establish a repeatable replay baseline for local durable history rebuild paths, 
 | `W35-S01` | done | define the durable replay baseline wave and target | `./scripts/check-slice.sh --wave W35-durable-replay-baseline --slice W35-S01 --path docs/waves/ACTIVE --path docs/waves/W35-durable-replay-baseline.md` |
 | `W35-S02` | done | add deterministic durable replay benchmarks for local state and runtime rebuild paths | `./scripts/check-performance-baseline.sh` |
 | `W35-S03` | done | remove avoidable publication batch cloning from local durable pending-event paths and keep baseline green | `cargo test --workspace --all-targets --all-features && ./scripts/check-performance-baseline.sh` |
-| `W35-S04` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W35-durable-replay-baseline` |
+| `W35-S04` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W35-durable-replay-baseline` |
 
 ## Language impact
 
