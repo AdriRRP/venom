@@ -1,5 +1,7 @@
-use crate::http_integration_publisher::{HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher};
-use crate::postgres_backend::PostgresBackend;
+use crate::infra::http_integration_publisher::{
+    HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher,
+};
+use crate::infra::postgres_backend::PostgresBackend;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
