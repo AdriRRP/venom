@@ -132,11 +132,14 @@ impl FindingReadModel {
     pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
         let offset = query.offset;
         let limit = normalize_page_limit(query.limit);
-        let mut findings = self.active_findings(query.component_key.as_ref(), &query.artifact);
-        findings.sort_unstable_by(operator_finding_sort_key);
-
-        let filtered = findings
+        let mut filtered = self
+            .active
+            .get(&TrackedArtifactKey::new(
+                query.component_key.clone(),
+                query.artifact.clone(),
+            ))
             .into_iter()
+            .flatten()
             .filter(|finding| {
                 query
                     .min_severity
@@ -149,12 +152,14 @@ impl FindingReadModel {
                     .is_none_or(|package_name| finding.package.name.as_ref() == package_name)
             })
             .collect::<Vec<_>>();
+        filtered.sort_unstable_by(|left, right| operator_finding_sort_key(left, right));
 
         let total = filtered.len();
         let page = filtered
             .into_iter()
             .skip(offset)
             .take(limit)
+            .cloned()
             .collect::<Vec<_>>();
 
         ActiveFindingsPage {
