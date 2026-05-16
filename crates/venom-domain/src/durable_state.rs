@@ -1,8 +1,9 @@
 use crate::{
     ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration,
     ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FindingChangeSet,
-    FindingIngestion, FindingIngestionError, FindingReadModel, PackageCoordinate,
-    PendingIntegrationEvent, ProviderScanReport, RegisterComponentChange, RegisterComponentResult,
+    FindingIngestion, FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
+    IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, RegisterComponentChange, RegisterComponentResult,
     ReportedFinding, Severity,
 };
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,63 @@ impl DurableState {
     #[must_use]
     pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
         &self.pending_integration_events
+    }
+
+    /// Publish a bounded batch of pending integration events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when publication outcome persistence fails.
+    pub async fn publish_pending_integration_events(
+        &mut self,
+        max_events: usize,
+        publisher: &(impl IntegrationEventPublisher + Sync),
+    ) -> Result<PublishIntegrationEventsResult, DurableStateError> {
+        let mut result = PublishIntegrationEventsResult {
+            attempted: 0,
+            published: 0,
+            pending_remaining: self.pending_integration_events.len(),
+            last_failure: None,
+        };
+        if max_events == 0 {
+            return Ok(result);
+        }
+
+        let batch = self
+            .pending_integration_events
+            .iter()
+            .take(max_events)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for event in batch {
+            result.attempted += 1;
+            match publisher.publish(&event).await {
+                Ok(()) => {
+                    self.append_event(&DurableEvent::IntegrationEventPublished {
+                        event_id: event.event_id.clone(),
+                    })?;
+                    self.remove_pending_integration_event(event.event_id.as_ref());
+                    result.published += 1;
+                }
+                Err(error) => {
+                    self.append_event(&DurableEvent::IntegrationEventPublicationFailed {
+                        event_id: event.event_id.clone(),
+                        retryable: error.retryable,
+                        detail: error.message.clone(),
+                    })?;
+                    result.last_failure = Some(IntegrationEventPublicationFailure {
+                        event_id: event.event_id,
+                        retryable: error.retryable,
+                        message: error.message,
+                    });
+                    break;
+                }
+            }
+        }
+
+        result.pending_remaining = self.pending_integration_events.len();
+        Ok(result)
     }
 
     /// Durably register a managed component.
@@ -276,6 +334,21 @@ impl DurableState {
                 }
                 Ok(())
             }
+            DurableEvent::IntegrationEventPublished { event_id } => {
+                self.remove_pending_integration_event(event_id.as_ref());
+                Ok(())
+            }
+            DurableEvent::IntegrationEventPublicationFailed { .. } => Ok(()),
+        }
+    }
+
+    fn remove_pending_integration_event(&mut self, event_id: &str) {
+        if let Some(index) = self
+            .pending_integration_events
+            .iter()
+            .position(|event| event.event_id.as_ref() == event_id)
+        {
+            self.pending_integration_events.remove(index);
         }
     }
 
@@ -350,6 +423,14 @@ enum DurableEvent {
         report: StoredProviderScanReport,
         #[serde(default)]
         pending_integration_event: Box<Option<PendingIntegrationEvent>>,
+    },
+    IntegrationEventPublished {
+        event_id: Box<str>,
+    },
+    IntegrationEventPublicationFailed {
+        event_id: Box<str>,
+        retryable: bool,
+        detail: Box<str>,
     },
 }
 
@@ -494,7 +575,8 @@ mod tests {
     use super::DurableState;
     use crate::{
         ArtifactKind, ArtifactRef, ComponentRegistration, ConfigureProviderChange,
-        EvidenceFreshness, IntegrationEvent, PackageCoordinate, ProviderScanReport,
+        EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
+        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
         ReportedFinding,
     };
     use std::path::PathBuf;
@@ -659,5 +741,102 @@ mod tests {
             rebuilt.pending_integration_events()[0].event,
             IntegrationEvent::FindingChangesObserved { .. }
         ));
+    }
+
+    #[derive(Debug)]
+    struct SuccessPublisher;
+
+    impl IntegrationEventPublisher for SuccessPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingPublisher;
+
+    impl IntegrationEventPublisher for FailingPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Err(IntegrationEventPublishError::new(
+                true,
+                "publisher unavailable",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_publication_removes_pending_integration_event() {
+        let path = temp_path("durable-state-publish-success");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .record_scan_report(&report(vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )]))
+            .expect("scan report should persist");
+
+        let result = state
+            .publish_pending_integration_events(1, &SuccessPublisher)
+            .await
+            .expect("publication should persist");
+        assert_eq!(result.published, 1);
+        assert_eq!(state.pending_integration_events().len(), 0);
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+        assert_eq!(rebuilt.pending_integration_events().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_publication_keeps_pending_integration_event() {
+        let path = temp_path("durable-state-publish-failure");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .record_scan_report(&report(vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )]))
+            .expect("scan report should persist");
+
+        let result = state
+            .publish_pending_integration_events(1, &FailingPublisher)
+            .await
+            .expect("failed publication outcome should persist");
+        assert_eq!(result.published, 0);
+        assert_eq!(state.pending_integration_events().len(), 1);
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+        assert_eq!(rebuilt.pending_integration_events().len(), 1);
     }
 }

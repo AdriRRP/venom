@@ -35,7 +35,10 @@ pub use finding_read_model::{
     MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
 };
 pub use finding_tracker::{FindingChangeSet, FindingTracker};
-pub use integration_events::{IntegrationEvent, PendingIntegrationEvent};
+pub use integration_events::{
+    IntegrationEvent, IntegrationEventPublicationFailure, IntegrationEventPublishError,
+    IntegrationEventPublisher, PendingIntegrationEvent, PublishIntegrationEventsResult,
+};
 pub use scan_execution::{ScanExecutionError, ScanExecutionResult, execute_scan};
 pub use scan_planning::{ScanPlanner, ScanPlanningError};
 pub use syft_grype::{

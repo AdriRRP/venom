@@ -95,6 +95,51 @@ impl IntegrationEvent {
     }
 }
 
+/// Publisher port for durable VENOM integration events.
+#[allow(async_fn_in_trait)]
+pub trait IntegrationEventPublisher {
+    fn publisher_key(&self) -> &'static str;
+
+    async fn publish<'a>(
+        &'a self,
+        event: &'a PendingIntegrationEvent,
+    ) -> Result<(), IntegrationEventPublishError>;
+}
+
+/// Explicit external publication error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationEventPublishError {
+    pub retryable: bool,
+    pub message: Box<str>,
+}
+
+impl IntegrationEventPublishError {
+    #[must_use]
+    pub fn new(retryable: bool, message: impl Into<Box<str>>) -> Self {
+        Self {
+            retryable,
+            message: message.into(),
+        }
+    }
+}
+
+/// Explicit bounded publication result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishIntegrationEventsResult {
+    pub attempted: usize,
+    pub published: usize,
+    pub pending_remaining: usize,
+    pub last_failure: Option<IntegrationEventPublicationFailure>,
+}
+
+/// Last failure observed while publishing one bounded batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationEventPublicationFailure {
+    pub event_id: Box<str>,
+    pub retryable: bool,
+    pub message: Box<str>,
+}
+
 #[must_use]
 /// Build one fresh durable integration-event identity.
 ///

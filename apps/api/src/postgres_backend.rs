@@ -6,9 +6,10 @@ use venom_domain::{
     BindArtifactResult, CompletedScanCommand, ComponentRegistration, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
     FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, PendingIntegrationEvent, ProviderScanReport, RegisterComponentChange,
-    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
-    ScanRequest, as_provider_error, validate_provider_scan_report,
+    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -307,6 +308,88 @@ impl PostgresBackend {
     #[must_use]
     pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
         &self.pending_integration_events
+    }
+
+    /// Publish a bounded batch of pending integration events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when publication outcome persistence fails.
+    pub async fn publish_pending_integration_events(
+        &mut self,
+        max_events: usize,
+        publisher: &(impl IntegrationEventPublisher + Sync),
+    ) -> Result<PublishIntegrationEventsResult, String> {
+        let mut result = PublishIntegrationEventsResult {
+            attempted: 0,
+            published: 0,
+            pending_remaining: self.pending_integration_events.len(),
+            last_failure: None,
+        };
+        if max_events == 0 {
+            return Ok(result);
+        }
+
+        let batch = self
+            .pending_integration_events
+            .iter()
+            .take(max_events)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for event in batch {
+            result.attempted += 1;
+            let attempted_at_micros = system_time_to_micros(SystemTime::now())?;
+            match publisher.publish(&event).await {
+                Ok(()) => {
+                    sqlx::query(&format!(
+                        concat!(
+                            "UPDATE {} ",
+                            "SET publication_status = 'published', last_error = NULL, ",
+                            "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
+                            "WHERE event_id = $1"
+                        ),
+                        self.names.integration_outbox
+                    ))
+                    .bind(event.event_id.as_ref())
+                    .bind(attempted_at_micros)
+                    .bind(attempted_at_micros)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
+                    self.remove_pending_integration_event(event.event_id.as_ref());
+                    result.published += 1;
+                }
+                Err(error) => {
+                    sqlx::query(&format!(
+                        concat!(
+                            "UPDATE {} ",
+                            "SET publication_status = 'pending', last_error = $2, ",
+                            "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
+                            "WHERE event_id = $1"
+                        ),
+                        self.names.integration_outbox
+                    ))
+                    .bind(event.event_id.as_ref())
+                    .bind(error.message.as_ref())
+                    .bind(attempted_at_micros)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|sql_error| {
+                        format!("postgres integration outbox failure update failed: {sql_error}")
+                    })?;
+                    result.last_failure = Some(IntegrationEventPublicationFailure {
+                        event_id: event.event_id,
+                        retryable: error.retryable,
+                        message: error.message,
+                    });
+                    break;
+                }
+            }
+        }
+
+        result.pending_remaining = self.pending_integration_events.len();
+        Ok(result)
     }
 
     /// Execute the oldest pending durable scan command through one provider.
@@ -620,6 +703,10 @@ impl PostgresBackend {
                 "event_kind TEXT NOT NULL, ",
                 "payload JSONB NOT NULL, ",
                 "publication_status TEXT NOT NULL, ",
+                "attempt_count BIGINT NOT NULL DEFAULT 0, ",
+                "last_error TEXT NULL, ",
+                "last_attempted_at_micros BIGINT NULL, ",
+                "published_at_micros BIGINT NULL, ",
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
@@ -818,6 +905,16 @@ impl PostgresBackend {
         self.pending_integration_events = events.into_iter().map(|(payload,)| payload.0).collect();
         Ok(())
     }
+
+    fn remove_pending_integration_event(&mut self, event_id: &str) {
+        if let Some(index) = self
+            .pending_integration_events
+            .iter()
+            .position(|event| event.event_id.as_ref() == event_id)
+        {
+            self.pending_integration_events.remove(index);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -949,7 +1046,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
         ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, FindingProvider,
-        FindingProviderError, IntegrationEvent, PackageCoordinate, ProviderScanReport,
+        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
+        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
         ReportedFinding, RunNextScanResult, ScanCommandStatus,
     };
 
@@ -998,6 +1096,41 @@ mod tests {
                 )],
             )
             .with_knowledge_revision("fixture-db:2026-05-16"))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct SuccessPublisher;
+
+    impl IntegrationEventPublisher for SuccessPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingPublisher;
+
+    impl IntegrationEventPublisher for FailingPublisher {
+        fn publisher_key(&self) -> &'static str {
+            "fixture-publisher"
+        }
+
+        async fn publish<'a>(
+            &'a self,
+            _event: &'a PendingIntegrationEvent,
+        ) -> Result<(), IntegrationEventPublishError> {
+            Err(IntegrationEventPublishError::new(
+                true,
+                "publisher unavailable",
+            ))
         }
     }
 
@@ -1101,6 +1234,106 @@ mod tests {
             reopened.command_status(command_id.as_ref()),
             Some(ScanCommandStatus::Completed)
         );
+        assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_successful_publication_removes_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish_success");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let result = backend
+            .publish_pending_integration_events(1, &SuccessPublisher)
+            .await
+            .expect("publication should persist");
+        assert_eq!(result.published, 1);
+        assert_eq!(backend.pending_integration_events().len(), 0);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_integration_events().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_failed_publication_keeps_pending_integration_event() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publish_failure");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let result = backend
+            .publish_pending_integration_events(1, &FailingPublisher)
+            .await
+            .expect("failed publication outcome should persist");
+        assert_eq!(result.published, 0);
+        assert_eq!(backend.pending_integration_events().len(), 1);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
     }
 }

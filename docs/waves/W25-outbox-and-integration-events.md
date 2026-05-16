@@ -1,7 +1,7 @@
 # W25. Outbox and Integration Events
 
 Wave: `W25-outbox-and-integration-events`
-Status: `in_progress`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -37,8 +37,8 @@ Introduce a durable outbox and a bounded integration-event publication path earl
 |---|---|---|---|
 | `W25-S01` | done | define the durable outbox boundary, external event contract, wave slices, and performance/reliability constraints before implementation starts | `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S01 --path docs/waves/ACTIVE --path docs/waves/W25-outbox-and-integration-events.md --path docs/adr/0003-durable-outbox-and-integration-events.md --path docs/product-direction.md --path docs/ubiquitous-language.md --path tests/contracts/README.md --path tests/contracts/integration-events/README.md` |
 | `W25-S02` | done | append pending canonical integration events durably together with provider-report and scan-command business writes | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S02 --lane integration` |
-| `W25-S03` | planned | publish pending integration events in stable bounded batches and persist explicit publication outcome | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S03 --lane contract`, `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S03 --lane integration` |
-| `W25-S04` | planned | prove restart, replay, and duplicate-publication behavior through Postgres rehearsal and contract checks | `./scripts/check-contracts.sh`, `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W25-outbox-and-integration-events --lane infra` |
+| `W25-S03` | done | publish pending integration events in stable bounded batches and persist explicit publication outcome | `cargo test --workspace --all-targets --all-features`, `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S03 --lane contract`, `./scripts/check-slice.sh --wave W25-outbox-and-integration-events --slice W25-S03 --lane integration` |
+| `W25-S04` | done | prove restart, replay, and duplicate-publication behavior through Postgres rehearsal and contract checks | `./scripts/check-contracts.sh`, `./scripts/rehearse-infra.sh --profile db`, `./scripts/check-wave.sh --wave W25-outbox-and-integration-events --lane infra` |
 
 ## Language impact
 

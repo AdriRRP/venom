@@ -6,7 +6,7 @@ The first implementation must satisfy these observable rules:
 
 1. one durable business change that should be externally visible creates exactly one canonical pending outbox record in the same durable write path
 2. pending outbox records survive process restart and durable-state reload
-3. publication order is stable by durable event identity
+3. publication order is stable by durable outbox order, and event identity stays stable for downstream idempotency
 4. successful publication marks the outbox record published explicitly
 5. failed publication leaves the outbox record unpublished and retryable
 6. external delivery semantics are at-least-once, so event identity must be stable and idempotent
