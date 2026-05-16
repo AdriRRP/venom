@@ -1,3 +1,4 @@
+use crate::http_integration_publisher::{HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher};
 use crate::postgres_backend::PostgresBackend;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -6,8 +7,9 @@ use venom_domain::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
     DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, IntegrationEventPublishError, IntegrationEventPublisher,
-    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
-    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
+    IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, ReportedFinding, RunNextScanResult, ScanCommandStatus,
+    ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -160,6 +162,33 @@ impl AppService {
             change: result.change.as_str().to_owned(),
             provider_key: result.provider_key.map(Into::into),
         })
+    }
+
+    /// Configure the system integration publication runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or the durable write fails.
+    pub async fn configure_integration_runtime(
+        &mut self,
+        request: ConfigureIntegrationRuntimeRequest,
+    ) -> Result<ConfigureIntegrationRuntimeResponse, AppServiceError> {
+        let config = parse_integration_runtime_config(request)?;
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .configure_integration_runtime(config)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .configure_integration_runtime(config)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(ConfigureIntegrationRuntimeResponse::from(
+            result.change.as_str(),
+            &result.config,
+        ))
     }
 
     /// Record one canonical provider report through the application boundary.
@@ -423,7 +452,10 @@ impl AppService {
             ));
         }
 
-        let publisher = ApiIntegrationPublisher::new(request)?;
+        let config = self.integration_runtime_config().cloned().ok_or_else(|| {
+            AppServiceError::State("missing integration runtime configuration".to_owned())
+        })?;
+        let publisher = ApiIntegrationPublisher::new(&config, request)?;
         let attempted_events = self
             .pending_integration_events_snapshot()
             .into_iter()
@@ -588,6 +620,13 @@ impl AppService {
             AppBackend::Postgres(postgres) => postgres.pending_integration_events().to_vec(),
         }
     }
+
+    const fn integration_runtime_config(&self) -> Option<&IntegrationRuntimeConfig> {
+        match &self.backend {
+            AppBackend::Local(local) => local.state.integration_runtime_config(),
+            AppBackend::Postgres(postgres) => postgres.integration_runtime_config(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,6 +662,32 @@ pub struct ConfigureProviderRequest {
 pub struct ConfigureProviderResponse {
     pub change: String,
     pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureIntegrationRuntimeRequest {
+    pub publisher_key: String,
+    pub endpoint_url: Option<String>,
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigureIntegrationRuntimeResponse {
+    pub change: String,
+    pub publisher_key: String,
+    pub endpoint_url: Option<String>,
+    pub timeout_ms: Option<u32>,
+}
+
+impl ConfigureIntegrationRuntimeResponse {
+    fn from(change: &str, config: &IntegrationRuntimeConfig) -> Self {
+        Self {
+            change: change.to_owned(),
+            publisher_key: config.publisher_key().to_owned(),
+            endpoint_url: config.endpoint_url().map(ToOwned::to_owned),
+            timeout_ms: config.timeout_ms(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -765,7 +830,6 @@ pub struct DrainWorkerResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DrainIntegrationWorkerCommand {
     pub max_events: Option<usize>,
-    pub publisher_key: Option<String>,
     pub error_message: Option<String>,
     pub retryable: Option<bool>,
 }
@@ -812,6 +876,39 @@ fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
         "critical" => Ok(Severity::Critical),
         _ => Err(AppServiceError::InvalidRequest(format!(
             "unsupported severity: {value}"
+        ))),
+    }
+}
+
+fn parse_integration_runtime_config(
+    request: ConfigureIntegrationRuntimeRequest,
+) -> Result<IntegrationRuntimeConfig, AppServiceError> {
+    match request.publisher_key.as_str() {
+        API_INTEGRATION_PUBLISHER_KEY => {
+            if request.endpoint_url.is_some() || request.timeout_ms.is_some() {
+                return Err(AppServiceError::InvalidRequest(
+                    "fixture publisher does not accept endpoint_url or timeout_ms".to_owned(),
+                ));
+            }
+            Ok(IntegrationRuntimeConfig::Fixture)
+        }
+        HTTP_INTEGRATION_PUBLISHER_KEY => {
+            let endpoint_url = request.endpoint_url.ok_or_else(|| {
+                AppServiceError::InvalidRequest("http publisher requires endpoint_url".to_owned())
+            })?;
+            let timeout_ms = request.timeout_ms.unwrap_or(3_000);
+            if timeout_ms == 0 {
+                return Err(AppServiceError::InvalidRequest(
+                    "http publisher timeout_ms must be greater than zero".to_owned(),
+                ));
+            }
+            Ok(IntegrationRuntimeConfig::Http {
+                endpoint_url: endpoint_url.into_boxed_str(),
+                timeout_ms,
+            })
+        }
+        value => Err(AppServiceError::InvalidRequest(format!(
+            "unsupported publisher key: {value}"
         ))),
     }
 }
@@ -967,25 +1064,46 @@ struct ApiIntegrationPublisher {
 enum ApiIntegrationPublisherMode {
     Success,
     Failure(IntegrationEventPublishError),
+    Http(HttpIntegrationPublisher),
 }
 
 impl ApiIntegrationPublisher {
-    fn new(request: DrainIntegrationWorkerCommand) -> Result<Self, AppServiceError> {
-        let publisher_key = request
-            .publisher_key
-            .unwrap_or_else(|| API_INTEGRATION_PUBLISHER_KEY.to_owned());
-        resolve_supported_publisher_key(&publisher_key)?;
-
-        Ok(if let Some(message) = request.error_message {
-            Self {
-                mode: ApiIntegrationPublisherMode::Failure(IntegrationEventPublishError::new(
-                    request.retryable.unwrap_or(false),
-                    message,
-                )),
+    fn new(
+        config: &IntegrationRuntimeConfig,
+        request: DrainIntegrationWorkerCommand,
+    ) -> Result<Self, AppServiceError> {
+        Ok(match config {
+            IntegrationRuntimeConfig::Fixture => {
+                if let Some(message) = request.error_message {
+                    Self {
+                        mode: ApiIntegrationPublisherMode::Failure(
+                            IntegrationEventPublishError::new(
+                                request.retryable.unwrap_or(false),
+                                message,
+                            ),
+                        ),
+                    }
+                } else {
+                    Self {
+                        mode: ApiIntegrationPublisherMode::Success,
+                    }
+                }
             }
-        } else {
-            Self {
-                mode: ApiIntegrationPublisherMode::Success,
+            IntegrationRuntimeConfig::Http {
+                endpoint_url,
+                timeout_ms,
+            } => {
+                if request.error_message.is_some() || request.retryable.is_some() {
+                    return Err(AppServiceError::InvalidRequest(
+                        "http publisher does not accept fixture failure controls".to_owned(),
+                    ));
+                }
+                Self {
+                    mode: ApiIntegrationPublisherMode::Http(
+                        HttpIntegrationPublisher::new(endpoint_url.clone(), *timeout_ms)
+                            .map_err(AppServiceError::State)?,
+                    ),
+                }
             }
         })
     }
@@ -993,26 +1111,23 @@ impl ApiIntegrationPublisher {
 
 impl IntegrationEventPublisher for ApiIntegrationPublisher {
     fn publisher_key(&self) -> &'static str {
-        API_INTEGRATION_PUBLISHER_KEY
+        match &self.mode {
+            ApiIntegrationPublisherMode::Success | ApiIntegrationPublisherMode::Failure(_) => {
+                API_INTEGRATION_PUBLISHER_KEY
+            }
+            ApiIntegrationPublisherMode::Http(publisher) => publisher.publisher_key(),
+        }
     }
 
     async fn publish<'a>(
         &'a self,
-        _event: &'a PendingIntegrationEvent,
+        event: &'a PendingIntegrationEvent,
     ) -> Result<(), IntegrationEventPublishError> {
         match &self.mode {
             ApiIntegrationPublisherMode::Success => Ok(()),
             ApiIntegrationPublisherMode::Failure(error) => Err(error.clone()),
+            ApiIntegrationPublisherMode::Http(publisher) => publisher.publish(event).await,
         }
-    }
-}
-
-fn resolve_supported_publisher_key(value: &str) -> Result<&'static str, AppServiceError> {
-    match value {
-        API_INTEGRATION_PUBLISHER_KEY => Ok(API_INTEGRATION_PUBLISHER_KEY),
-        _ => Err(AppServiceError::InvalidRequest(format!(
-            "unsupported publisher key: {value}"
-        ))),
     }
 }
 

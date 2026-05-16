@@ -3,13 +3,15 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BindArtifactChange,
-    BindArtifactResult, CompletedScanCommand, ComponentRegistration, ConfigureProviderChange,
+    BindArtifactResult, CompletedScanCommand, ComponentRegistration,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
     FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
-    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
-    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
+    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, RegisterComponentChange, RegisterComponentResult,
+    ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest,
+    as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -18,6 +20,7 @@ pub struct PostgresBackend {
     names: TableNames,
     ingestion: FindingIngestion,
     read_model: FindingReadModel,
+    integration_runtime_config: Option<IntegrationRuntimeConfig>,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
@@ -42,6 +45,7 @@ impl PostgresBackend {
             names,
             ingestion: FindingIngestion::new(),
             read_model: FindingReadModel::new(),
+            integration_runtime_config: None,
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: Vec::new(),
@@ -137,6 +141,37 @@ impl PostgresBackend {
             self.ingestion = candidate;
         }
         Ok(result)
+    }
+
+    /// Durably configure the system integration publication runtime in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn configure_integration_runtime(
+        &mut self,
+        config: IntegrationRuntimeConfig,
+    ) -> Result<ConfigureIntegrationRuntimeResult, String> {
+        let change = if self.integration_runtime_config.as_ref() == Some(&config) {
+            ConfigureIntegrationRuntimeChange::Unchanged
+        } else {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (id, publisher_key, endpoint_url, timeout_ms) VALUES (1, $1, $2, $3) ",
+                    "ON CONFLICT (id) DO UPDATE SET publisher_key = EXCLUDED.publisher_key, endpoint_url = EXCLUDED.endpoint_url, timeout_ms = EXCLUDED.timeout_ms, updated_at = NOW()"
+                ),
+                self.names.integration_runtime_config
+            ))
+            .bind(config.publisher_key())
+            .bind(config.endpoint_url())
+            .bind(config.timeout_ms().map(i64::from))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres integration runtime config upsert failed: {error}"))?;
+            self.integration_runtime_config = Some(config.clone());
+            ConfigureIntegrationRuntimeChange::Configured
+        };
+        Ok(ConfigureIntegrationRuntimeResult { change, config })
     }
 
     /// Durably record one canonical provider report in Postgres.
@@ -253,6 +288,11 @@ impl PostgresBackend {
         self.ingestion
             .inventory()
             .configured_provider(component_key)
+    }
+
+    #[must_use]
+    pub const fn integration_runtime_config(&self) -> Option<&IntegrationRuntimeConfig> {
+        self.integration_runtime_config.as_ref()
     }
 
     /// Durably enqueue one canonical scan request in Postgres.
@@ -619,6 +659,7 @@ impl PostgresBackend {
         self.create_components_table().await?;
         self.create_artifact_bindings_table().await?;
         self.create_provider_runtime_configs_table().await?;
+        self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
@@ -677,6 +718,27 @@ impl PostgresBackend {
         .await
         .map_err(|error| {
             format!("postgres provider runtime configs table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
+    async fn create_integration_runtime_config_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "id SMALLINT PRIMARY KEY, ",
+                "publisher_key TEXT NOT NULL, ",
+                "endpoint_url TEXT NULL, ",
+                "timeout_ms BIGINT NULL, ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.integration_runtime_config
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres integration runtime config table create failed: {error}")
         })?;
         Ok(())
     }
@@ -757,6 +819,7 @@ impl PostgresBackend {
     async fn rebuild(&mut self) -> Result<(), String> {
         self.ingestion = FindingIngestion::new();
         self.read_model = FindingReadModel::new();
+        self.integration_runtime_config = None;
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
@@ -764,6 +827,7 @@ impl PostgresBackend {
         self.load_components().await?;
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
+        self.load_integration_runtime_config().await?;
         self.load_provider_reports().await?;
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
@@ -894,6 +958,27 @@ impl PostgresBackend {
         Ok(())
     }
 
+    async fn load_integration_runtime_config(&mut self) -> Result<(), String> {
+        let config = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(&format!(
+            concat!(
+                "SELECT publisher_key, endpoint_url, timeout_ms ",
+                "FROM {} WHERE id = 1"
+            ),
+            self.names.integration_runtime_config
+        ))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("postgres integration runtime config load failed: {error}"))?;
+
+        self.integration_runtime_config = match config {
+            None => None,
+            Some((publisher_key, endpoint_url, timeout_ms)) => Some(
+                parse_integration_runtime_config_row(&publisher_key, endpoint_url, timeout_ms)?,
+            ),
+        };
+        Ok(())
+    }
+
     async fn load_scan_commands(&mut self) -> Result<(), String> {
         let commands = sqlx::query_as::<_, (String, String, String, String, String, String)>(&format!(
             concat!(
@@ -965,6 +1050,7 @@ struct TableNames {
     components: Box<str>,
     artifact_bindings: Box<str>,
     provider_runtime_configs: Box<str>,
+    integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
@@ -977,6 +1063,8 @@ impl TableNames {
             components: format!("{schema}.components").into_boxed_str(),
             artifact_bindings: format!("{schema}.artifact_bindings").into_boxed_str(),
             provider_runtime_configs: format!("{schema}.provider_runtime_configs").into_boxed_str(),
+            integration_runtime_config: format!("{schema}.integration_runtime_config")
+                .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
@@ -1024,6 +1112,29 @@ fn parse_freshness(value: &str) -> Result<EvidenceFreshness, String> {
         "deterministic" => Ok(EvidenceFreshness::Deterministic),
         "live" => Ok(EvidenceFreshness::Live),
         other => Err(format!("unsupported freshness: {other}")),
+    }
+}
+
+fn parse_integration_runtime_config_row(
+    publisher_key: &str,
+    endpoint_url: Option<String>,
+    timeout_ms: Option<i64>,
+) -> Result<IntegrationRuntimeConfig, String> {
+    match publisher_key {
+        "fixture-publisher" => Ok(IntegrationRuntimeConfig::Fixture),
+        "http-publisher" => {
+            let endpoint_url = endpoint_url
+                .ok_or_else(|| "postgres http publisher config missing endpoint_url".to_owned())?;
+            let timeout_ms = timeout_ms
+                .ok_or_else(|| "postgres http publisher config missing timeout_ms".to_owned())?;
+            let timeout_ms = u32::try_from(timeout_ms)
+                .map_err(|_| "postgres http publisher timeout_ms is invalid".to_owned())?;
+            Ok(IntegrationRuntimeConfig::Http {
+                endpoint_url: endpoint_url.into_boxed_str(),
+                timeout_ms,
+            })
+        }
+        _ => Err("postgres integration runtime config has unsupported publisher".to_owned()),
     }
 }
 

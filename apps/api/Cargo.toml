@@ -6,9 +6,10 @@ publish.workspace = true
 
 [dependencies]
 axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 venom-domain = { path = "../../crates/venom-domain" }
 
 [dev-dependencies]

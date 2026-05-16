@@ -1,10 +1,11 @@
 use crate::{
     ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration,
-    ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FindingChangeSet,
-    FindingIngestion, FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
-    IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, RegisterComponentChange, RegisterComponentResult,
-    ReportedFinding, Severity,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, EvidenceFreshness, FindingChangeSet, FindingIngestion,
+    FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
+    IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
+    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    RegisterComponentChange, RegisterComponentResult, ReportedFinding, Severity,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -23,6 +24,7 @@ pub struct DurableState {
     history_path: PathBuf,
     ingestion: FindingIngestion,
     read_model: FindingReadModel,
+    integration_runtime_config: Option<IntegrationRuntimeConfig>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
 }
 
@@ -48,6 +50,7 @@ impl DurableState {
             history_path,
             ingestion: FindingIngestion::default(),
             read_model: FindingReadModel::default(),
+            integration_runtime_config: None,
             pending_integration_events: Vec::new(),
         };
         state.rebuild_from_history()?;
@@ -62,6 +65,11 @@ impl DurableState {
     #[must_use]
     pub const fn read_model(&self) -> &FindingReadModel {
         &self.read_model
+    }
+
+    #[must_use]
+    pub const fn integration_runtime_config(&self) -> Option<&IntegrationRuntimeConfig> {
+        self.integration_runtime_config.as_ref()
     }
 
     #[must_use]
@@ -197,6 +205,27 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably configure the integration publication runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn configure_integration_runtime(
+        &mut self,
+        config: IntegrationRuntimeConfig,
+    ) -> Result<ConfigureIntegrationRuntimeResult, DurableStateError> {
+        let change = if self.integration_runtime_config.as_ref() == Some(&config) {
+            ConfigureIntegrationRuntimeChange::Unchanged
+        } else {
+            self.append_event(&DurableEvent::IntegrationRuntimeConfigured {
+                config: config.clone(),
+            })?;
+            self.integration_runtime_config = Some(config.clone());
+            ConfigureIntegrationRuntimeChange::Configured
+        };
+        Ok(ConfigureIntegrationRuntimeResult { change, config })
+    }
+
     /// Durably record one accepted provider snapshot and update the projection.
     ///
     /// # Errors
@@ -238,6 +267,7 @@ impl DurableState {
         let reader = BufReader::new(file);
         self.ingestion = FindingIngestion::default();
         self.read_model = FindingReadModel::default();
+        self.integration_runtime_config = None;
         self.pending_integration_events.clear();
 
         for (line_index, line) in reader.lines().enumerate() {
@@ -307,6 +337,10 @@ impl DurableState {
                         reason: "invalid provider configuration".into(),
                     }),
                 }
+            }
+            DurableEvent::IntegrationRuntimeConfigured { config } => {
+                self.integration_runtime_config = Some(config);
+                Ok(())
             }
             DurableEvent::ProviderScanRecorded {
                 report,
@@ -418,6 +452,9 @@ enum DurableEvent {
     ComponentProviderConfigured {
         component_key: Box<str>,
         provider_key: Box<str>,
+    },
+    IntegrationRuntimeConfigured {
+        config: IntegrationRuntimeConfig,
     },
     ProviderScanRecorded {
         report: StoredProviderScanReport,
@@ -576,8 +613,8 @@ mod tests {
     use crate::{
         ArtifactKind, ArtifactRef, ComponentRegistration, ConfigureProviderChange,
         EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-        ReportedFinding,
+        IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -712,6 +749,31 @@ mod tests {
                 .inventory()
                 .configured_provider("component:payments-api"),
             Some("fixture-provider")
+        );
+    }
+
+    #[test]
+    fn replay_keeps_integration_runtime_configuration() {
+        let path = temp_path("durable-state-integration-runtime");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+
+        let result = state
+            .configure_integration_runtime(IntegrationRuntimeConfig::Http {
+                endpoint_url: "http://127.0.0.1:38080/publish".into(),
+                timeout_ms: 3_000,
+            })
+            .expect("integration runtime config should persist");
+
+        assert_eq!(result.change.as_str(), "configured");
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+
+        assert_eq!(
+            rebuilt.integration_runtime_config(),
+            Some(&IntegrationRuntimeConfig::Http {
+                endpoint_url: "http://127.0.0.1:38080/publish".into(),
+                timeout_ms: 3_000,
+            })
         );
     }
 
