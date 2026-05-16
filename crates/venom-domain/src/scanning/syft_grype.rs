@@ -162,24 +162,7 @@ impl FindingProvider for DockerSyftGrypeProvider {
         )
         .await?;
 
-        let bundle = FixtureBundle::from_strings(
-            String::from_utf8(syft_stdout).map_err(|error| {
-                FindingProviderError::new(
-                    FindingProviderErrorKind::CorruptResponse,
-                    false,
-                    format!("syft output was not valid UTF-8: {error}"),
-                )
-            })?,
-            String::from_utf8(grype_stdout).map_err(|error| {
-                FindingProviderError::new(
-                    FindingProviderErrorKind::CorruptResponse,
-                    false,
-                    format!("grype output was not valid UTF-8: {error}"),
-                )
-            })?,
-        );
-
-        let report = build_report_from_bundle(request, &bundle)?;
+        let report = build_report_from_json_bytes(request, &syft_stdout, &grype_stdout)?;
         validate_provider_scan_report(self.provider_key(), request, &report)
             .map_err(as_provider_error)?;
         Ok(report)
@@ -246,7 +229,25 @@ fn build_report_from_bundle(
 ) -> Result<ProviderScanReport, FindingProviderError> {
     let syft = bundle.syft_document()?;
     let grype = bundle.grype_report()?;
-    ensure_request_matches_sources(request, &syft, &grype)?;
+    build_report_from_documents(request, &syft, &grype)
+}
+
+fn build_report_from_json_bytes(
+    request: &ScanRequest,
+    syft_json: &[u8],
+    grype_json: &[u8],
+) -> Result<ProviderScanReport, FindingProviderError> {
+    let syft = parse_syft_document_bytes(syft_json)?;
+    let grype = parse_grype_report_bytes(grype_json)?;
+    build_report_from_documents(request, &syft, &grype)
+}
+
+fn build_report_from_documents(
+    request: &ScanRequest,
+    syft: &SyftDocument,
+    grype: &GrypeReport,
+) -> Result<ProviderScanReport, FindingProviderError> {
+    ensure_request_matches_sources(request, syft, grype)?;
 
     let observed_at = grype
         .descriptor
@@ -463,7 +464,11 @@ fn read_text_file(path: &Path, label: &str) -> Result<String, FindingProviderErr
 }
 
 fn parse_syft_document(text: &str) -> Result<SyftDocument, FindingProviderError> {
-    serde_json::from_str(text).map_err(|error| {
+    parse_syft_document_bytes(text.as_bytes())
+}
+
+fn parse_syft_document_bytes(bytes: &[u8]) -> Result<SyftDocument, FindingProviderError> {
+    serde_json::from_slice(bytes).map_err(|error| {
         FindingProviderError::new(
             FindingProviderErrorKind::CorruptResponse,
             false,
@@ -473,7 +478,11 @@ fn parse_syft_document(text: &str) -> Result<SyftDocument, FindingProviderError>
 }
 
 fn parse_grype_report(text: &str) -> Result<GrypeReport, FindingProviderError> {
-    serde_json::from_str(text).map_err(|error| {
+    parse_grype_report_bytes(text.as_bytes())
+}
+
+fn parse_grype_report_bytes(bytes: &[u8]) -> Result<GrypeReport, FindingProviderError> {
+    serde_json::from_slice(bytes).map_err(|error| {
         FindingProviderError::new(
             FindingProviderErrorKind::CorruptResponse,
             false,

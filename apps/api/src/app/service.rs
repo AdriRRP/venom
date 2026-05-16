@@ -3,15 +3,16 @@ use crate::infra::http_integration_publisher::{
 };
 use crate::infra::postgres_backend::PostgresBackend;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use venom_domain::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
     DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, IntegrationEventPublishError, IntegrationEventPublisher,
-    IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, ReportedFinding, RunNextScanResult, ScanCommandStatus,
-    ScanPlanner, ScanRequest, Severity,
+    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
+    IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
+    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult, ReportedFinding,
+    RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -32,6 +33,77 @@ impl core::fmt::Display for AppServiceError {
 }
 
 impl std::error::Error for AppServiceError {}
+
+#[derive(Debug, Clone)]
+pub struct AppReadSnapshot {
+    read_model: FindingReadModel,
+    command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+}
+
+impl AppReadSnapshot {
+    /// Query the currently active findings for one managed component and artifact.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request contains an unsupported artifact kind.
+    pub fn list_active_findings(
+        &self,
+        request: ActiveFindingsRequest,
+    ) -> Result<ActiveFindingsResponse, AppServiceError> {
+        let artifact = ArtifactRef::new(
+            parse_artifact_kind(&request.artifact_kind)?,
+            request.artifact_identity.clone(),
+        );
+        let query = build_active_findings_query(&request, artifact)?;
+        let page = self.read_model.query_active_findings(&query);
+        let findings = page
+            .findings
+            .into_iter()
+            .map(|finding| ActiveFindingItem {
+                vulnerability_id: finding.vulnerability_id.into(),
+                package_name: finding.package.name.into(),
+                package_version: finding.package.version.into(),
+                severity: severity_name(finding.severity).to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ActiveFindingsResponse {
+            component_key: request.component_key,
+            artifact_kind: request.artifact_kind,
+            artifact_identity: request.artifact_identity,
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            total_active_findings: page.total,
+            returned: page.returned,
+            offset: page.offset,
+            limit: page.limit,
+            active_findings: findings,
+        })
+    }
+
+    /// Query the durable status of one scan command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
+    pub fn scan_command_status(
+        &self,
+        command_id: &str,
+    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
+        let status = self
+            .command_statuses
+            .get(command_id)
+            .copied()
+            .ok_or_else(|| {
+                AppServiceError::NotFound(format!("unknown scan command: {command_id}"))
+            })?;
+
+        Ok(ScanCommandStatusResponse {
+            command_id: command_id.to_owned(),
+            status: status.as_str().to_owned(),
+        })
+    }
+}
 
 pub struct AppService {
     backend: AppBackend,
@@ -78,6 +150,20 @@ impl AppService {
         Ok(Self {
             backend: AppBackend::Postgres(backend),
         })
+    }
+
+    #[must_use]
+    pub fn read_snapshot(&self) -> AppReadSnapshot {
+        match &self.backend {
+            AppBackend::Local(local) => AppReadSnapshot {
+                read_model: local.state.read_model().clone(),
+                command_statuses: local.runtime.command_statuses_snapshot(),
+            },
+            AppBackend::Postgres(postgres) => AppReadSnapshot {
+                read_model: postgres.read_model_snapshot(),
+                command_statuses: postgres.command_statuses_snapshot(),
+            },
+        }
     }
 
     /// Register one managed component through the application boundary.
@@ -238,49 +324,6 @@ impl AppService {
         })
     }
 
-    /// Query the currently active findings for one managed component and artifact.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppServiceError`] when the request contains an unsupported artifact kind.
-    pub fn list_active_findings(
-        &self,
-        request: ActiveFindingsRequest,
-    ) -> Result<ActiveFindingsResponse, AppServiceError> {
-        let artifact = ArtifactRef::new(
-            parse_artifact_kind(&request.artifact_kind)?,
-            request.artifact_identity.clone(),
-        );
-        let query = build_active_findings_query(&request, artifact)?;
-        let page = match &self.backend {
-            AppBackend::Local(local) => local.state.read_model().query_active_findings(&query),
-            AppBackend::Postgres(postgres) => postgres.query_active_findings(&query),
-        };
-        let findings = page
-            .findings
-            .into_iter()
-            .map(|finding| ActiveFindingItem {
-                vulnerability_id: finding.vulnerability_id.into(),
-                package_name: finding.package.name.into(),
-                package_version: finding.package.version.into(),
-                severity: severity_name(finding.severity).to_owned(),
-            })
-            .collect::<Vec<_>>();
-
-        Ok(ActiveFindingsResponse {
-            component_key: request.component_key,
-            artifact_kind: request.artifact_kind,
-            artifact_identity: request.artifact_identity,
-            min_severity: request.min_severity,
-            package_name: request.package_name,
-            total_active_findings: page.total,
-            returned: page.returned,
-            offset: page.offset,
-            limit: page.limit,
-            active_findings: findings,
-        })
-    }
-
     /// Create and durably enqueue one canonical scan request for managed ownership.
     ///
     /// # Errors
@@ -320,27 +363,6 @@ impl AppService {
             artifact_kind: request.artifact_kind,
             artifact_identity: request.artifact_identity,
             freshness: request.freshness,
-        })
-    }
-
-    /// Query the durable status of one scan command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
-    pub fn scan_command_status(
-        &self,
-        command_id: &str,
-    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
-        let status = match &self.backend {
-            AppBackend::Local(local) => local.runtime.command_status(command_id),
-            AppBackend::Postgres(postgres) => postgres.command_status(command_id),
-        }
-        .ok_or_else(|| AppServiceError::NotFound(format!("unknown scan command: {command_id}")))?;
-
-        Ok(ScanCommandStatusResponse {
-            command_id: command_id.to_owned(),
-            status: status.as_str().to_owned(),
         })
     }
 

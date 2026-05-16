@@ -30,6 +30,7 @@ flowchart LR
 | Term | Kind | Definition | Avoid |
 |---|---|---|---|
 | Artifact | value object | An immutable scan subject identity, such as an image digest or SBOM digest, that a provider observed. | mutable tags as the primary identity |
+| API Read Snapshot | value object | A refreshed read-only snapshot that serves operator-facing API queries without borrowing the mutable write service directly. | read endpoints coupled to the write lock path |
 | Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A named grouping of components managed as one scope. | "group", "universe" as the default term |
