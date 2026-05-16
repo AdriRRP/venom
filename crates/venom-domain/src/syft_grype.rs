@@ -24,7 +24,7 @@ pub const OFFICIAL_SYFT_IMAGE: &str = "ghcr.io/anchore/syft:v1.44.0";
 pub const OFFICIAL_GRYPE_IMAGE: &str = "ghcr.io/anchore/grype:v0.112.0";
 
 /// Default timeout applied to each live provider process.
-pub const DEFAULT_LIVE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_LIVE_COMMAND_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Maximum stderr payload kept in one provider failure message.
 pub const MAX_ERROR_TEXT_BYTES: usize = 2048;
@@ -760,7 +760,7 @@ mod tests {
     fn official_images_are_pinned() {
         assert_eq!(OFFICIAL_SYFT_IMAGE, "ghcr.io/anchore/syft:v1.44.0");
         assert_eq!(OFFICIAL_GRYPE_IMAGE, "ghcr.io/anchore/grype:v0.112.0");
-        assert_eq!(DEFAULT_LIVE_COMMAND_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(DEFAULT_LIVE_COMMAND_TIMEOUT, Duration::from_mins(1));
     }
 
     #[tokio::test]
