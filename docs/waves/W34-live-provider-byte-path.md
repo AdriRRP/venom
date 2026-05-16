@@ -1,7 +1,7 @@
 # W34. Live Provider Byte Path
 
 Wave: `W34-live-provider-byte-path`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `full`
@@ -30,7 +30,7 @@ Reduce live provider execution allocations by parsing Syft and Grype JSON direct
 |---|---|---|---|
 | `W34-S01` | done | define the live provider byte path wave and target | `./scripts/check-slice.sh --wave W34-live-provider-byte-path --slice W34-S01 --path docs/waves/ACTIVE --path docs/waves/W34-live-provider-byte-path.md` |
 | `W34-S02` | done | parse live Syft and Grype output directly from bytes and keep fixture behavior unchanged | `cargo test --workspace --all-targets --all-features && ./scripts/rehearse-infra.sh --profile full` |
-| `W34-S03` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W34-live-provider-byte-path` |
+| `W34-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W34-live-provider-byte-path` |
 
 ## Language impact
 
