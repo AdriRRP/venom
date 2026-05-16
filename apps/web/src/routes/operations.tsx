@@ -1,7 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
-import { bindArtifact, fetchApiHealth, registerComponent } from "../lib/api";
+import {
+	bindArtifact,
+	configureProvider,
+	fetchApiHealth,
+	registerComponent,
+	requestScan,
+} from "../lib/api";
 
 export function OperationsPage() {
 	const [operatorState, setOperatorState] = useState({
@@ -40,6 +46,17 @@ export function OperationsPage() {
 				artifactKind: request.artifactKind,
 				artifactIdentity: request.artifactIdentity,
 			}),
+	});
+
+	const configureProviderMutation = useMutation({
+		mutationFn: (request: { componentKey: string; providerKey: string }) =>
+			configureProvider(request.componentKey, {
+				providerKey: request.providerKey,
+			}),
+	});
+
+	const requestScanMutation = useMutation({
+		mutationFn: requestScan,
 	});
 
 	return (
@@ -186,6 +203,157 @@ export function OperationsPage() {
 							<p>
 								Change: {bindArtifactMutation.data.change}. Bound artifacts:{" "}
 								{bindArtifactMutation.data.bound_artifacts}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scanning</p>
+							<h2>Configure Provider Runtime</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void configureProviderMutation.mutateAsync({
+								componentKey: operatorState.componentKey,
+								providerKey: operatorState.providerKey,
+							});
+						}}
+					>
+						<label>
+							Component key
+							<input
+								name="providerComponentKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										componentKey: event.target.value,
+									}))
+								}
+								value={operatorState.componentKey}
+							/>
+						</label>
+						<label>
+							Provider key
+							<input
+								name="providerKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										providerKey: event.target.value,
+									}))
+								}
+								value={operatorState.providerKey}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Configure Provider
+						</button>
+					</form>
+					{configureProviderMutation.data ? (
+						<div className="result-card">
+							<strong>Last provider configuration</strong>
+							<p>
+								Change: {configureProviderMutation.data.change}. Provider:{" "}
+								{configureProviderMutation.data.provider_key ?? "none"}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scanning</p>
+							<h2>Request Canonical Scan</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void requestScanMutation.mutateAsync({
+								componentKey: operatorState.componentKey,
+								artifactKind: operatorState.artifactKind,
+								artifactIdentity: operatorState.artifactIdentity,
+								freshness: operatorState.freshness,
+							});
+						}}
+					>
+						<label>
+							Component key
+							<input
+								name="scanComponentKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										componentKey: event.target.value,
+									}))
+								}
+								value={operatorState.componentKey}
+							/>
+						</label>
+						<label>
+							Artifact kind
+							<select
+								name="scanArtifactKind"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										artifactKind: event.target.value,
+									}))
+								}
+								value={operatorState.artifactKind}
+							>
+								<option value="container-image">container-image</option>
+								<option value="sbom-document">sbom-document</option>
+							</select>
+						</label>
+						<label>
+							Artifact identity
+							<input
+								name="scanArtifactIdentity"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										artifactIdentity: event.target.value,
+									}))
+								}
+								value={operatorState.artifactIdentity}
+							/>
+						</label>
+						<label>
+							Freshness
+							<select
+								name="freshness"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										freshness: event.target.value,
+									}))
+								}
+								value={operatorState.freshness}
+							>
+								<option value="deterministic">deterministic</option>
+								<option value="live">live</option>
+							</select>
+						</label>
+						<button className="primary-button" type="submit">
+							Request Scan
+						</button>
+					</form>
+					{requestScanMutation.data ? (
+						<div className="result-card">
+							<strong>Last scan request</strong>
+							<p>
+								Command: {requestScanMutation.data.command_id}. Status:{" "}
+								{requestScanMutation.data.status}. Freshness:{" "}
+								{requestScanMutation.data.freshness}.
 							</p>
 						</div>
 					) : null}
