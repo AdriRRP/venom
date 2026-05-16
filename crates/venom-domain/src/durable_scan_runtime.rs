@@ -1,6 +1,6 @@
 use crate::{
-    DurableState, DurableStateError, FindingChangeSet, FindingProvider, ScanRequest,
-    validate_provider_scan_report,
+    DurableState, DurableStateError, FindingChangeSet, FindingProvider, PendingIntegrationEvent,
+    ScanRequest, validate_provider_scan_report,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +19,7 @@ pub struct DurableScanRuntime {
     history_path: PathBuf,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
+    pending_integration_events: Vec<PendingIntegrationEvent>,
 }
 
 impl DurableScanRuntime {
@@ -43,6 +44,7 @@ impl DurableScanRuntime {
             history_path,
             commands: BTreeMap::new(),
             order: Vec::new(),
+            pending_integration_events: Vec::new(),
         };
         runtime.rebuild_from_history()?;
         Ok(runtime)
@@ -85,6 +87,11 @@ impl DurableScanRuntime {
     #[must_use]
     pub fn command_status(&self, command_id: &str) -> Option<ScanCommandStatus> {
         self.commands.get(command_id).map(|record| record.status)
+    }
+
+    #[must_use]
+    pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
+        &self.pending_integration_events
     }
 
     #[must_use]
@@ -182,11 +189,28 @@ impl DurableScanRuntime {
         match outcome {
             RunNextScanResult::Idle => Ok(()),
             RunNextScanResult::Completed(result) => {
+                let command = self
+                    .commands
+                    .get(result.command_id.as_ref())
+                    .ok_or_else(|| DurableScanRuntimeError::CorruptHistory {
+                        line: 0,
+                        reason: "completed scan command missing from in-memory queue".into(),
+                    })?;
+                let pending_integration_event = PendingIntegrationEvent::scan_command_completed(
+                    result.command_id.as_ref(),
+                    command.request.component_key.clone(),
+                    command.request.artifact.clone(),
+                    result.provider_key.clone(),
+                    command.request.freshness,
+                    result.findings_reported,
+                    result.change_set.clone(),
+                );
                 self.append_event(&DurableScanEvent::Completed {
                     command_id: result.command_id.clone(),
                     provider_key: result.provider_key.clone(),
                     findings_reported: result.findings_reported,
                     change_set: result.change_set.clone(),
+                    pending_integration_event: Box::new(Some(pending_integration_event.clone())),
                 })?;
                 let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
                     return Err(DurableScanRuntimeError::CorruptHistory {
@@ -195,6 +219,8 @@ impl DurableScanRuntime {
                     });
                 };
                 command.status = ScanCommandStatus::Completed;
+                self.pending_integration_events
+                    .push(pending_integration_event);
                 Ok(())
             }
             RunNextScanResult::Failed(result) => {
@@ -221,6 +247,7 @@ impl DurableScanRuntime {
         let reader = BufReader::new(file);
         self.commands.clear();
         self.order.clear();
+        self.pending_integration_events.clear();
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(DurableScanRuntimeError::Io)?;
@@ -265,7 +292,15 @@ impl DurableScanRuntime {
                 );
                 Ok(())
             }
-            DurableScanEvent::Completed { command_id, .. } => {
+            DurableScanEvent::Completed {
+                command_id,
+                pending_integration_event,
+                ..
+            } => {
+                if let Some(pending_integration_event) = *pending_integration_event {
+                    self.pending_integration_events
+                        .push(pending_integration_event);
+                }
                 self.mark_terminal(line, &command_id, ScanCommandStatus::Completed)
             }
             DurableScanEvent::Failed { command_id, .. } => {
@@ -414,6 +449,8 @@ enum DurableScanEvent {
         provider_key: Box<str>,
         findings_reported: usize,
         change_set: FindingChangeSet,
+        #[serde(default)]
+        pending_integration_event: Box<Option<PendingIntegrationEvent>>,
     },
     Failed {
         command_id: Box<str>,
@@ -436,8 +473,8 @@ mod tests {
     use super::{DurableScanRuntime, RunNextScanResult, ScanCommandStatus};
     use crate::{
         ArtifactKind, ArtifactRef, ComponentRegistration, DurableState, EvidenceFreshness,
-        FindingProvider, FindingProviderError, FindingProviderErrorKind, PackageCoordinate,
-        ProviderScanReport, ReportedFinding, ScanPlanner, ScanRequest,
+        FindingProvider, FindingProviderError, FindingProviderErrorKind, IntegrationEvent,
+        PackageCoordinate, ProviderScanReport, ReportedFinding, ScanPlanner, ScanRequest,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -588,5 +625,35 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn completed_scan_command_appends_pending_integration_event() {
+        let queue_path = temp_path("durable-runtime-outbox");
+        let (mut state, request) = durable_inventory();
+        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let enqueue = runtime.enqueue(request).expect("enqueue should persist");
+        let provider = FakeProvider::success(vec![ReportedFinding::new(
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        )]);
+
+        let result = runtime
+            .run_next(&mut state, &provider)
+            .await
+            .expect("runtime should record completion");
+        assert!(matches!(result, RunNextScanResult::Completed(_)));
+        assert_eq!(runtime.pending_integration_events().len(), 1);
+        assert!(matches!(
+            runtime.pending_integration_events()[0].event,
+            IntegrationEvent::ScanCommandCompleted { .. }
+        ));
+
+        let rebuilt = DurableScanRuntime::open(&queue_path).expect("runtime should replay");
+        assert_eq!(
+            rebuilt.command_status(enqueue.command_id.as_ref()),
+            Some(ScanCommandStatus::Completed)
+        );
+        assert_eq!(rebuilt.pending_integration_events().len(), 1);
     }
 }

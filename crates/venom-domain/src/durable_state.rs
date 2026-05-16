@@ -2,8 +2,8 @@ use crate::{
     ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration,
     ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FindingChangeSet,
     FindingIngestion, FindingIngestionError, FindingReadModel, PackageCoordinate,
-    ProviderScanReport, RegisterComponentChange, RegisterComponentResult, ReportedFinding,
-    Severity,
+    PendingIntegrationEvent, ProviderScanReport, RegisterComponentChange, RegisterComponentResult,
+    ReportedFinding, Severity,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -22,6 +22,7 @@ pub struct DurableState {
     history_path: PathBuf,
     ingestion: FindingIngestion,
     read_model: FindingReadModel,
+    pending_integration_events: Vec<PendingIntegrationEvent>,
 }
 
 impl DurableState {
@@ -46,6 +47,7 @@ impl DurableState {
             history_path,
             ingestion: FindingIngestion::default(),
             read_model: FindingReadModel::default(),
+            pending_integration_events: Vec::new(),
         };
         state.rebuild_from_history()?;
         Ok(state)
@@ -59,6 +61,11 @@ impl DurableState {
     #[must_use]
     pub const fn read_model(&self) -> &FindingReadModel {
         &self.read_model
+    }
+
+    #[must_use]
+    pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
+        &self.pending_integration_events
     }
 
     /// Durably register a managed component.
@@ -149,11 +156,22 @@ impl DurableState {
             .record_scan_report(report)
             .map_err(DurableStateError::Ingestion)?;
         candidate_read_model.record_scan_report(report);
+        let pending_integration_event = PendingIntegrationEvent::finding_changes_observed(
+            report.component_key.clone(),
+            report.artifact.clone(),
+            report.provider_key.clone(),
+            report.freshness,
+            report.observed_at,
+            change_set.clone(),
+        );
         self.append_event(&DurableEvent::ProviderScanRecorded {
             report: StoredProviderScanReport::from_report(report)?,
+            pending_integration_event: Box::new(Some(pending_integration_event.clone())),
         })?;
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.pending_integration_events
+            .push(pending_integration_event);
         Ok(change_set)
     }
 
@@ -162,6 +180,7 @@ impl DurableState {
         let reader = BufReader::new(file);
         self.ingestion = FindingIngestion::default();
         self.read_model = FindingReadModel::default();
+        self.pending_integration_events.clear();
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(DurableStateError::Io)?;
@@ -231,7 +250,10 @@ impl DurableState {
                     }),
                 }
             }
-            DurableEvent::ProviderScanRecorded { report } => {
+            DurableEvent::ProviderScanRecorded {
+                report,
+                pending_integration_event,
+            } => {
                 let report = report.into_domain()?;
                 self.ingestion
                     .record_scan_report(&report)
@@ -248,6 +270,10 @@ impl DurableState {
                         other => other,
                     })?;
                 self.read_model.record_scan_report(&report);
+                if let Some(pending_integration_event) = *pending_integration_event {
+                    self.pending_integration_events
+                        .push(pending_integration_event);
+                }
                 Ok(())
             }
         }
@@ -322,6 +348,8 @@ enum DurableEvent {
     },
     ProviderScanRecorded {
         report: StoredProviderScanReport,
+        #[serde(default)]
+        pending_integration_event: Box<Option<PendingIntegrationEvent>>,
     },
 }
 
@@ -466,7 +494,8 @@ mod tests {
     use super::DurableState;
     use crate::{
         ArtifactKind, ArtifactRef, ComponentRegistration, ConfigureProviderChange,
-        EvidenceFreshness, PackageCoordinate, ProviderScanReport, ReportedFinding,
+        EvidenceFreshness, IntegrationEvent, PackageCoordinate, ProviderScanReport,
+        ReportedFinding,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -602,5 +631,33 @@ mod tests {
                 .configured_provider("component:payments-api"),
             Some("fixture-provider")
         );
+    }
+
+    #[test]
+    fn replay_keeps_pending_integration_events_for_provider_reports() {
+        let path = temp_path("durable-state-outbox");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .record_scan_report(&report(vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )]))
+            .expect("scan report should persist");
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+        assert_eq!(rebuilt.pending_integration_events().len(), 1);
+        assert!(matches!(
+            rebuilt.pending_integration_events()[0].event,
+            IntegrationEvent::FindingChangesObserved { .. }
+        ));
     }
 }
