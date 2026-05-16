@@ -1,10 +1,13 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::fs;
 use std::hint::black_box;
+use std::path::{Path, PathBuf};
+use std::process;
 use std::time::SystemTime;
 use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness,
-    FindingIngestion, FindingReadModel, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    Severity,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
+    DurableState, EvidenceFreshness, FindingIngestion, FindingReadModel, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, ScanRequest, Severity,
 };
 
 const COMPONENT_KEY: &str = "component:payments-api";
@@ -59,6 +62,45 @@ fn hot_path_benchmarks(criterion: &mut Criterion) {
         }
         query_group.finish();
     }
+
+    {
+        let mut replay_group = criterion.benchmark_group("durable_state_replay");
+        for count in FINDING_COUNTS {
+            let history_path = seed_durable_state_history(*count);
+            replay_group.bench_with_input(
+                BenchmarkId::from_parameter(count),
+                count,
+                |bencher, _| {
+                    bencher.iter(|| {
+                        let state = DurableState::open(black_box(&history_path))
+                            .expect("durable state history should reopen");
+                        black_box(state.pending_integration_events().len());
+                    });
+                },
+            );
+        }
+        replay_group.finish();
+    }
+
+    {
+        let mut runtime_group = criterion.benchmark_group("durable_scan_runtime_replay");
+        for count in FINDING_COUNTS {
+            let history_path = seed_durable_scan_runtime_history(*count);
+            runtime_group.bench_with_input(
+                BenchmarkId::from_parameter(count),
+                count,
+                |bencher, _| {
+                    bencher.iter(|| {
+                        let runtime = DurableScanRuntime::open(black_box(&history_path))
+                            .expect("durable runtime history should reopen");
+                        black_box(runtime.pending_commands());
+                        black_box(runtime.pending_integration_events().len());
+                    });
+                },
+            );
+        }
+        runtime_group.finish();
+    }
 }
 
 fn seeded_ingestion() -> FindingIngestion {
@@ -88,6 +130,26 @@ fn provider_scan_report(findings: usize) -> ProviderScanReport {
     .with_knowledge_revision("fixture-db:2026-05-16")
 }
 
+fn provider_scan_report_event(index: usize) -> ProviderScanReport {
+    ProviderScanReport::new(
+        "fixture-provider",
+        COMPONENT_KEY,
+        artifact_ref(),
+        SystemTime::UNIX_EPOCH,
+        EvidenceFreshness::Deterministic,
+        vec![reported_finding(index)],
+    )
+    .with_knowledge_revision("fixture-db:2026-05-16")
+}
+
+fn scan_request() -> ScanRequest {
+    ScanRequest::new(
+        COMPONENT_KEY,
+        artifact_ref(),
+        EvidenceFreshness::Deterministic,
+    )
+}
+
 fn reported_finding(index: usize) -> ReportedFinding {
     let mut finding = ReportedFinding::new(
         format!("CVE-2026-{index:04}"),
@@ -109,6 +171,58 @@ fn reported_finding(index: usize) -> ReportedFinding {
         _ => Severity::Unknown,
     };
     finding
+}
+
+fn benchmark_fixture_root() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("venom-hot-path-benches-{}", process::id()));
+    fs::create_dir_all(&root).expect("benchmark fixture root should be creatable");
+    root
+}
+
+fn reset_history_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "failed to reset benchmark history at {}: {error}",
+            path.display()
+        ),
+    }
+}
+
+fn seed_durable_state_history(events: usize) -> PathBuf {
+    let path = benchmark_fixture_root().join(format!("durable-state-{events}.jsonl"));
+    reset_history_file(&path);
+
+    let mut state = DurableState::open(&path).expect("durable state should open");
+    state
+        .register_component(ComponentRegistration::new(COMPONENT_KEY, "Payments API"))
+        .expect("component registration should persist");
+    state
+        .bind_artifact(COMPONENT_KEY, artifact_ref())
+        .expect("artifact binding should persist");
+
+    for index in 0..events {
+        state
+            .record_scan_report(&provider_scan_report_event(index))
+            .expect("provider report should persist");
+    }
+
+    path
+}
+
+fn seed_durable_scan_runtime_history(events: usize) -> PathBuf {
+    let path = benchmark_fixture_root().join(format!("durable-scan-runtime-{events}.jsonl"));
+    reset_history_file(&path);
+
+    let mut runtime = DurableScanRuntime::open(&path).expect("durable runtime should open");
+    for _ in 0..events {
+        runtime
+            .enqueue(scan_request())
+            .expect("scan request should persist");
+    }
+
+    path
 }
 
 criterion_group!(
