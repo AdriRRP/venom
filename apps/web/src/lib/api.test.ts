@@ -1,4 +1,11 @@
-import { fetchActiveFindings, fetchApiHealth } from "./api";
+import {
+	bindArtifact,
+	configureProvider,
+	fetchActiveFindings,
+	fetchApiHealth,
+	registerComponent,
+	requestScan,
+} from "./api";
 
 describe("fetchApiHealth", () => {
 	it("maps a successful health response to the healthy state", async () => {
@@ -42,5 +49,46 @@ describe("fetchApiHealth", () => {
 		expect(calls[0]).toContain("component_key=component%3Apayments-api");
 		expect(calls[0]).toContain("artifact_kind=container-image");
 		expect(calls[0]).toContain("min_severity=high");
+	});
+
+	it("serializes register, bind, configure, and request-scan mutations", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			},
+		) as typeof fetch;
+
+		await registerComponent({
+			componentKey: "component:payments-api",
+			name: "Payments API",
+		});
+		await bindArtifact("component:payments-api", {
+			artifactKind: "container-image",
+			artifactIdentity: "registry.example/payments@sha256:111",
+		});
+		await configureProvider("component:payments-api", {
+			providerKey: "fixture-provider",
+		});
+		await requestScan({
+			componentKey: "component:payments-api",
+			artifactKind: "container-image",
+			artifactIdentity: "registry.example/payments@sha256:111",
+			freshness: "deterministic",
+		});
+
+		expect(calls[0]?.input).toBe("/api/components");
+		expect(calls[1]?.input).toContain(
+			"/api/components/component%3Apayments-api/artifacts",
+		);
+		expect(calls[2]?.input).toContain(
+			"/api/components/component%3Apayments-api/provider-runtime",
+		);
+		expect(calls[3]?.input).toBe("/api/scan-requests");
+		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
 	});
 });
