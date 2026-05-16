@@ -123,14 +123,10 @@ impl DurableScanRuntime {
             return Ok(result);
         }
 
-        let batch = self
-            .pending_integration_events
-            .iter()
-            .take(max_events)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for event in batch {
+        while result.attempted < max_events {
+            let Some(event) = self.pending_integration_events.front().cloned() else {
+                break;
+            };
             result.attempted += 1;
             match publisher.publish(&event).await {
                 Ok(()) => {
