@@ -54,6 +54,48 @@ impl FindingIngestion {
         &mut self,
         report: &ProviderScanReport,
     ) -> Result<FindingChangeSet, FindingIngestionError> {
+        self.ensure_managed_report(report)?;
+
+        Ok(self.tracker.record_scan_report(report))
+    }
+
+    /// Restore one provider report during replay without recomputing lifecycle diffs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same managed-ownership failures as [`Self::record_scan_report`].
+    pub fn replay_scan_report(
+        &mut self,
+        report: &ProviderScanReport,
+    ) -> Result<(), FindingIngestionError> {
+        self.ensure_managed_report(report)?;
+        self.tracker.replay_scan_report(report);
+        Ok(())
+    }
+
+    /// Restore one provider report during replay from already canonical findings.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same managed-ownership failures as [`Self::record_scan_report`].
+    pub(crate) fn replay_canonical_scan_report(
+        &mut self,
+        report: &ProviderScanReport,
+        canonical_findings: &[crate::ReportedFinding],
+    ) -> Result<(), FindingIngestionError> {
+        self.ensure_managed_report(report)?;
+        self.tracker.replay_canonical_findings(
+            report.component_key.clone(),
+            report.artifact.clone(),
+            canonical_findings,
+        );
+        Ok(())
+    }
+
+    fn ensure_managed_report(
+        &self,
+        report: &ProviderScanReport,
+    ) -> Result<(), FindingIngestionError> {
         if !self.inventory.is_managed(report.component_key.as_ref()) {
             return Err(FindingIngestionError::UnmanagedComponent);
         }
@@ -63,8 +105,7 @@ impl FindingIngestion {
         {
             return Err(FindingIngestionError::UnmanagedArtifact);
         }
-
-        Ok(self.tracker.record_scan_report(report))
+        Ok(())
     }
 }
 
@@ -141,5 +182,34 @@ mod tests {
         let result = ingestion.record_scan_report(&report());
 
         assert_eq!(result, Err(FindingIngestionError::UnmanagedArtifact));
+    }
+
+    #[test]
+    fn replayed_reports_restore_tracker_state_without_new_discovery() {
+        let mut ingestion = FindingIngestion::new();
+        let _ = ingestion
+            .inventory_mut()
+            .register(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ));
+        let _ = ingestion.inventory_mut().bind_artifact(
+            "component:payments-api",
+            ArtifactRef::new(
+                ArtifactKind::ContainerImage,
+                "registry.example/payments@sha256:111",
+            ),
+        );
+
+        ingestion
+            .replay_scan_report(&report())
+            .expect("replay should restore tracker state");
+        let replayed = ingestion
+            .record_scan_report(&report())
+            .expect("same report after replay should be repeated");
+
+        assert_eq!(replayed.discovered, 0);
+        assert_eq!(replayed.repeated, 1);
+        assert_eq!(replayed.withdrawn, 0);
     }
 }
