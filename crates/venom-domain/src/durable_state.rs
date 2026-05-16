@@ -74,7 +74,7 @@ impl DurableState {
     }
 
     #[must_use]
-    pub fn pending_integration_events(&self) -> &VecDeque<PendingIntegrationEvent> {
+    pub const fn pending_integration_events(&self) -> &VecDeque<PendingIntegrationEvent> {
         &self.pending_integration_events
     }
 
