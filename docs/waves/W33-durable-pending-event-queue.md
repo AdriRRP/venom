@@ -1,7 +1,7 @@
 # W33. Durable Pending Event Queue
 
 Wave: `W33-durable-pending-event-queue`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `none`
@@ -30,7 +30,7 @@ Reduce local durable replay and publication cost by storing pending integration 
 |---|---|---|---|
 | `W33-S01` | done | define the durable pending event queue wave and target | `./scripts/check-slice.sh --wave W33-durable-pending-event-queue --slice W33-S01 --path docs/waves/ACTIVE --path docs/waves/W33-durable-pending-event-queue.md` |
 | `W33-S02` | done | replace local pending integration event vectors with FIFO queues and explicit front-removal semantics | `cargo test --workspace --all-targets --all-features` |
-| `W33-S03` | in_progress | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W33-durable-pending-event-queue` |
+| `W33-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W33-durable-pending-event-queue` |
 
 ## Language impact
 
