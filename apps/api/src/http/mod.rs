@@ -16,11 +16,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct ApiState {
-    service: Arc<Mutex<AppService>>,
+    service: Arc<RwLock<AppService>>,
 }
 
 impl ApiState {
@@ -36,7 +36,7 @@ impl ApiState {
         let service =
             AppService::open_local(state_path, runtime_path).map_err(|error| error.to_string())?;
         Ok(Self {
-            service: Arc::new(Mutex::new(service)),
+            service: Arc::new(RwLock::new(service)),
         })
     }
 
@@ -50,7 +50,7 @@ impl ApiState {
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            service: Arc::new(Mutex::new(service)),
+            service: Arc::new(RwLock::new(service)),
         })
     }
 }
@@ -85,7 +85,7 @@ async fn register_component(
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .register_component(request)
         .await
@@ -100,7 +100,7 @@ async fn bind_artifact(
 ) -> Result<Json<BindArtifactResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .bind_artifact(&component_key, request)
         .await
@@ -115,7 +115,7 @@ async fn configure_provider(
 ) -> Result<Json<ConfigureProviderResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .configure_provider(&component_key, request)
         .await
@@ -129,7 +129,7 @@ async fn configure_integration_runtime(
 ) -> Result<Json<ConfigureIntegrationRuntimeResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .configure_integration_runtime(request)
         .await
@@ -143,7 +143,7 @@ async fn record_provider_report(
 ) -> Result<Json<RecordProviderReportResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .record_provider_report(request)
         .await
@@ -157,7 +157,7 @@ async fn request_scan(
 ) -> Result<Json<RequestScanResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .request_scan(request)
         .await
@@ -171,7 +171,7 @@ async fn scan_command_status(
 ) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .read()
         .await
         .scan_command_status(&command_id)
         .map_err(ApiError::from)?;
@@ -184,7 +184,7 @@ async fn run_next_scan(
 ) -> Result<Json<RunNextScanResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .run_next_scan(request)
         .await
@@ -198,7 +198,7 @@ async fn drain_worker(
 ) -> Result<Json<DrainWorkerResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .run_worker_until_idle(request)
         .await
@@ -212,7 +212,7 @@ async fn drain_integration_worker(
 ) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .write()
         .await
         .publish_integration_events_until_idle(request)
         .await
@@ -226,7 +226,7 @@ async fn list_active_findings(
 ) -> Result<Json<ActiveFindingsResponse>, ApiError> {
     let response = state
         .service
-        .lock()
+        .read()
         .await
         .list_active_findings(query.into_request())
         .map_err(ApiError::from)?;
