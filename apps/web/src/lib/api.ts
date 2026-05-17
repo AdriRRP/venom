@@ -111,6 +111,18 @@ export type RequestScanResponse = {
 	freshness: string;
 };
 
+export type RequestCollectionScanPayload = {
+	collectionKey: string;
+	freshness: string;
+};
+
+export type RequestCollectionScanResponse = {
+	collection_key: string;
+	freshness: string;
+	enqueued: number;
+	command_ids: string[];
+};
+
 export type ScanCommandStatusResponse = {
 	command_id: string;
 	status: string;
@@ -258,6 +270,27 @@ export async function addCollectionComponent(
 		);
 	}
 	return (await response.json()) as CollectionMembershipResponse;
+}
+
+export async function requestCollectionScan(
+	request: RequestCollectionScanPayload,
+): Promise<RequestCollectionScanResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/scan-requests`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				freshness: request.freshness,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection scan request failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RequestCollectionScanResponse;
 }
 
 export async function bindArtifact(

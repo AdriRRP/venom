@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("operator flow registers, scans, and queries one active finding", async ({
+test("operator flow registers, targets one collection, scans, and queries one active finding", async ({
 	page,
 }) => {
 	await page.goto("/operations");
@@ -21,8 +21,8 @@ test("operator flow registers, scans, and queries one active finding", async ({
 	await page.getByRole("button", { name: "Configure Provider" }).click();
 	await expect(page.getByText(/Provider: fixture-provider\./i)).toBeVisible();
 
-	await page.getByRole("button", { name: "Request Scan" }).click();
-	await expect(page.getByText(/Command: scan-command-/i)).toBeVisible();
+	await page.getByRole("button", { name: "Request Collection Scan" }).click();
+	await expect(page.getByText(/First command: scan-command-/i)).toBeVisible();
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();

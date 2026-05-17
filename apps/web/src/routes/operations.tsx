@@ -12,6 +12,7 @@ import {
 	fetchScanCommandStatus,
 	registerCollection,
 	registerComponent,
+	requestCollectionScan,
 	requestScan,
 } from "../lib/api";
 
@@ -106,6 +107,16 @@ export function OperationsPage() {
 			setOperatorState((current) => ({
 				...current,
 				commandId: data.command_id,
+			}));
+		},
+	});
+
+	const requestCollectionScanMutation = useMutation({
+		mutationFn: requestCollectionScan,
+		onSuccess: (data) => {
+			setOperatorState((current) => ({
+				...current,
+				commandId: data.command_ids[0] ?? current.commandId,
 			}));
 		},
 	});
@@ -578,6 +589,69 @@ export function OperationsPage() {
 								Command: {requestScanMutation.data.command_id}. Status:{" "}
 								{requestScanMutation.data.status}. Freshness:{" "}
 								{requestScanMutation.data.freshness}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scanning</p>
+							<h2>Request Collection Scan</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void requestCollectionScanMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								freshness: operatorState.freshness,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input
+								name="scanCollectionKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionKey}
+							/>
+						</label>
+						<label>
+							Freshness
+							<select
+								name="collectionFreshness"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										freshness: event.target.value,
+									}))
+								}
+								value={operatorState.freshness}
+							>
+								<option value="deterministic">deterministic</option>
+								<option value="live">live</option>
+							</select>
+						</label>
+						<button className="primary-button" type="submit">
+							Request Collection Scan
+						</button>
+					</form>
+					{requestCollectionScanMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection scan request</strong>
+							<p>
+								Collection: {requestCollectionScanMutation.data.collection_key}.
+								Enqueued: {requestCollectionScanMutation.data.enqueued}. First
+								command:{" "}
+								{requestCollectionScanMutation.data.command_ids[0] ?? "none"}.
 							</p>
 						</div>
 					) : null}

@@ -163,6 +163,41 @@ describe("OperationsPage", () => {
 		expect(await screen.findByText(/Command: cmd-1/i)).toBeInTheDocument();
 	});
 
+	it("requests one canonical collection scan from the operator flow", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections/release%3A2026.05/scan-requests") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						freshness: "deterministic",
+						enqueued: 1,
+						command_ids: ["cmd-2"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Request Collection Scan" }),
+		);
+
+		expect(
+			await screen.findByText(/Collection: release:2026.05\. Enqueued: 1\./i),
+		).toBeInTheDocument();
+	});
+
 	it("refreshes one command status and runs the fixture worker", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);
