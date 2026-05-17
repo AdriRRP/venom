@@ -17,30 +17,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// command, durably record its terminal status, and let higher layers decide
 /// about retries or parallelism later.
 #[derive(Debug, Clone)]
-pub struct DurableScanRuntime {
+pub struct ScanCommandQueue {
     history_path: PathBuf,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
 }
 
-impl DurableScanRuntime {
+impl ScanCommandQueue {
     /// Open or create one local durable scan queue and rebuild it from history.
     ///
     /// # Errors
     ///
-    /// Returns [`DurableScanRuntimeError`] when the queue history cannot be
+    /// Returns [`ScanCommandQueueError`] when the queue history cannot be
     /// read, parsed, or replayed safely.
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self, DurableScanRuntimeError> {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, ScanCommandQueueError> {
         let history_path = path.into();
         if let Some(parent) = history_path.parent() {
-            std::fs::create_dir_all(parent).map_err(DurableScanRuntimeError::Io)?;
+            std::fs::create_dir_all(parent).map_err(ScanCommandQueueError::Io)?;
         }
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(&history_path)
-            .map_err(DurableScanRuntimeError::Io)?;
+            .map_err(ScanCommandQueueError::Io)?;
 
         let mut runtime = Self {
             history_path,
@@ -56,12 +56,12 @@ impl DurableScanRuntime {
     ///
     /// # Errors
     ///
-    /// Returns [`DurableScanRuntimeError`] when the queue cannot durably append
+    /// Returns [`ScanCommandQueueError`] when the queue cannot durably append
     /// the new command event.
     pub fn enqueue(
         &mut self,
         request: ScanRequest,
-    ) -> Result<EnqueueScanResult, DurableScanRuntimeError> {
+    ) -> Result<EnqueueScanResult, ScanCommandQueueError> {
         let command_id = next_command_id();
         self.append_event(&DurableScanEvent::Enqueued {
             command_id: command_id.clone(),
@@ -108,12 +108,12 @@ impl DurableScanRuntime {
     ///
     /// # Errors
     ///
-    /// Returns [`DurableScanRuntimeError`] when publication outcome persistence fails.
+    /// Returns [`ScanCommandQueueError`] when publication outcome persistence fails.
     pub async fn publish_pending_integration_events(
         &mut self,
         max_events: usize,
         publisher: &(impl IntegrationEventPublisher + Sync),
-    ) -> Result<PublishIntegrationEventsResult, DurableScanRuntimeError> {
+    ) -> Result<PublishIntegrationEventsResult, ScanCommandQueueError> {
         let mut result = PublishIntegrationEventsResult {
             attempted: 0,
             published: 0,
@@ -171,14 +171,14 @@ impl DurableScanRuntime {
     ///
     /// # Errors
     ///
-    /// Returns [`DurableScanRuntimeError`] when durable queue metadata cannot
+    /// Returns [`ScanCommandQueueError`] when durable queue metadata cannot
     /// be written or replayed safely. Provider and ingestion failures are not
     /// hidden: they are durably recorded and returned as a failed run result.
     pub async fn run_next(
         &mut self,
         state: &mut DurableState,
         provider: &(impl FindingProvider + Sync),
-    ) -> Result<RunNextScanResult, DurableScanRuntimeError> {
+    ) -> Result<RunNextScanResult, ScanCommandQueueError> {
         let Some(command_id) = self
             .order
             .iter()
@@ -195,7 +195,7 @@ impl DurableScanRuntime {
             .get(command_id.as_ref())
             .map(|record| record.request.clone())
         else {
-            return Err(DurableScanRuntimeError::CorruptHistory {
+            return Err(ScanCommandQueueError::CorruptHistory {
                 line: 0,
                 reason: "pending scan command missing from in-memory queue".into(),
             });
@@ -229,7 +229,7 @@ impl DurableScanRuntime {
                                     .into(),
                             })
                         }
-                        Err(error) => return Err(DurableScanRuntimeError::State(error)),
+                        Err(error) => return Err(ScanCommandQueueError::State(error)),
                     }
                 }
             }
@@ -245,17 +245,14 @@ impl DurableScanRuntime {
         Ok(outcome)
     }
 
-    fn record_outcome(
-        &mut self,
-        outcome: &RunNextScanResult,
-    ) -> Result<(), DurableScanRuntimeError> {
+    fn record_outcome(&mut self, outcome: &RunNextScanResult) -> Result<(), ScanCommandQueueError> {
         match outcome {
             RunNextScanResult::Idle => Ok(()),
             RunNextScanResult::Completed(result) => {
                 let command = self
                     .commands
                     .get(result.command_id.as_ref())
-                    .ok_or_else(|| DurableScanRuntimeError::CorruptHistory {
+                    .ok_or_else(|| ScanCommandQueueError::CorruptHistory {
                         line: 0,
                         reason: "completed scan command missing from in-memory queue".into(),
                     })?;
@@ -276,7 +273,7 @@ impl DurableScanRuntime {
                     pending_integration_event: Box::new(Some(pending_integration_event.clone())),
                 })?;
                 let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
-                    return Err(DurableScanRuntimeError::CorruptHistory {
+                    return Err(ScanCommandQueueError::CorruptHistory {
                         line: 0,
                         reason: "completed scan command missing from in-memory queue".into(),
                     });
@@ -294,7 +291,7 @@ impl DurableScanRuntime {
                     detail: result.detail.clone(),
                 })?;
                 let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
-                    return Err(DurableScanRuntimeError::CorruptHistory {
+                    return Err(ScanCommandQueueError::CorruptHistory {
                         line: 0,
                         reason: "failed scan command missing from in-memory queue".into(),
                     });
@@ -305,20 +302,20 @@ impl DurableScanRuntime {
         }
     }
 
-    fn rebuild_from_history(&mut self) -> Result<(), DurableScanRuntimeError> {
-        let file = File::open(&self.history_path).map_err(DurableScanRuntimeError::Io)?;
+    fn rebuild_from_history(&mut self) -> Result<(), ScanCommandQueueError> {
+        let file = File::open(&self.history_path).map_err(ScanCommandQueueError::Io)?;
         let reader = BufReader::new(file);
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
 
         for (line_index, line) in reader.lines().enumerate() {
-            let line = line.map_err(DurableScanRuntimeError::Io)?;
+            let line = line.map_err(ScanCommandQueueError::Io)?;
             if line.trim().is_empty() {
                 continue;
             }
             let event = serde_json::from_str::<DurableScanEvent>(&line).map_err(|error| {
-                DurableScanRuntimeError::CorruptHistory {
+                ScanCommandQueueError::CorruptHistory {
                     line: line_index + 1,
                     reason: error.to_string().into_boxed_str(),
                 }
@@ -333,14 +330,14 @@ impl DurableScanRuntime {
         &mut self,
         event: DurableScanEvent,
         line: usize,
-    ) -> Result<(), DurableScanRuntimeError> {
+    ) -> Result<(), ScanCommandQueueError> {
         match event {
             DurableScanEvent::Enqueued {
                 command_id,
                 request,
             } => {
                 if self.commands.contains_key(command_id.as_ref()) {
-                    return Err(DurableScanRuntimeError::CorruptHistory {
+                    return Err(ScanCommandQueueError::CorruptHistory {
                         line,
                         reason: "duplicate scan command id".into(),
                     });
@@ -401,15 +398,15 @@ impl DurableScanRuntime {
         line: usize,
         command_id: &str,
         status: ScanCommandStatus,
-    ) -> Result<(), DurableScanRuntimeError> {
+    ) -> Result<(), ScanCommandQueueError> {
         let Some(record) = self.commands.get_mut(command_id) else {
-            return Err(DurableScanRuntimeError::CorruptHistory {
+            return Err(ScanCommandQueueError::CorruptHistory {
                 line,
                 reason: "terminal event without prior enqueue".into(),
             });
         };
         if record.status != ScanCommandStatus::Pending {
-            return Err(DurableScanRuntimeError::CorruptHistory {
+            return Err(ScanCommandQueueError::CorruptHistory {
                 line,
                 reason: "duplicate terminal state for scan command".into(),
             });
@@ -418,15 +415,15 @@ impl DurableScanRuntime {
         Ok(())
     }
 
-    fn append_event(&self, event: &DurableScanEvent) -> Result<(), DurableScanRuntimeError> {
+    fn append_event(&self, event: &DurableScanEvent) -> Result<(), ScanCommandQueueError> {
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.history_path)
-            .map_err(DurableScanRuntimeError::Io)?;
-        serde_json::to_writer(&mut file, event).map_err(DurableScanRuntimeError::Serialize)?;
-        file.write_all(b"\n").map_err(DurableScanRuntimeError::Io)?;
-        file.flush().map_err(DurableScanRuntimeError::Io)?;
-        file.sync_all().map_err(DurableScanRuntimeError::Io)?;
+            .map_err(ScanCommandQueueError::Io)?;
+        serde_json::to_writer(&mut file, event).map_err(ScanCommandQueueError::Serialize)?;
+        file.write_all(b"\n").map_err(ScanCommandQueueError::Io)?;
+        file.flush().map_err(ScanCommandQueueError::Io)?;
+        file.sync_all().map_err(ScanCommandQueueError::Io)?;
         Ok(())
     }
 }
@@ -490,14 +487,14 @@ pub struct FailedScanCommand {
 
 /// Canonical failure returned by the durable scan runtime.
 #[derive(Debug)]
-pub enum DurableScanRuntimeError {
+pub enum ScanCommandQueueError {
     Io(io::Error),
     Serialize(serde_json::Error),
     CorruptHistory { line: usize, reason: Box<str> },
     State(DurableStateError),
 }
 
-impl DurableScanRuntimeError {
+impl ScanCommandQueueError {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -509,7 +506,7 @@ impl DurableScanRuntimeError {
     }
 }
 
-impl core::fmt::Display for DurableScanRuntimeError {
+impl core::fmt::Display for ScanCommandQueueError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "io error: {error}"),
@@ -522,7 +519,7 @@ impl core::fmt::Display for DurableScanRuntimeError {
     }
 }
 
-impl std::error::Error for DurableScanRuntimeError {}
+impl std::error::Error for ScanCommandQueueError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -565,7 +562,7 @@ fn next_command_id() -> Box<str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableScanRuntime, RunNextScanResult, ScanCommandStatus};
+    use super::{RunNextScanResult, ScanCommandQueue, ScanCommandStatus};
     use crate::{
         ArtifactKind, ArtifactRef, ComponentRegistration, DurableState, EvidenceFreshness,
         FindingProvider, FindingProviderError, FindingProviderErrorKind, IntegrationEvent,
@@ -668,7 +665,7 @@ mod tests {
     async fn completed_scan_command_updates_state_and_status() {
         let queue_path = temp_path("durable-runtime-queue");
         let (mut state, request) = durable_inventory();
-        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
         let enqueue = runtime.enqueue(request).expect("enqueue should persist");
         let provider = FakeProvider::success(vec![ReportedFinding::new(
             "CVE-2026-0001",
@@ -697,7 +694,7 @@ mod tests {
     async fn failed_scan_command_is_terminal_and_explicit() {
         let queue_path = temp_path("durable-runtime-failure");
         let (mut state, request) = durable_inventory();
-        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
         let enqueue = runtime.enqueue(request).expect("enqueue should persist");
         let provider = FakeProvider::failure(FindingProviderError::new(
             FindingProviderErrorKind::Unavailable,
@@ -727,7 +724,7 @@ mod tests {
     async fn completed_scan_command_appends_pending_integration_event() {
         let queue_path = temp_path("durable-runtime-outbox");
         let (mut state, request) = durable_inventory();
-        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
         let enqueue = runtime.enqueue(request).expect("enqueue should persist");
         let provider = FakeProvider::success(vec![ReportedFinding::new(
             "CVE-2026-0001",
@@ -745,7 +742,7 @@ mod tests {
             IntegrationEvent::ScanCommandCompleted { .. }
         ));
 
-        let rebuilt = DurableScanRuntime::open(&queue_path).expect("runtime should replay");
+        let rebuilt = ScanCommandQueue::open(&queue_path).expect("runtime should replay");
         assert_eq!(
             rebuilt.command_status(enqueue.command_id.as_ref()),
             Some(ScanCommandStatus::Completed)
@@ -792,7 +789,7 @@ mod tests {
     async fn successful_publication_removes_pending_runtime_integration_event() {
         let queue_path = temp_path("durable-runtime-publish-success");
         let (mut state, request) = durable_inventory();
-        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
         let _ = runtime.enqueue(request).expect("enqueue should persist");
         let provider = FakeProvider::success(vec![ReportedFinding::new(
             "CVE-2026-0001",
@@ -810,7 +807,7 @@ mod tests {
         assert_eq!(result.published, 1);
         assert_eq!(runtime.pending_integration_events().len(), 0);
 
-        let rebuilt = DurableScanRuntime::open(&queue_path).expect("runtime should replay");
+        let rebuilt = ScanCommandQueue::open(&queue_path).expect("runtime should replay");
         assert_eq!(rebuilt.pending_integration_events().len(), 0);
     }
 
@@ -818,7 +815,7 @@ mod tests {
     async fn failed_publication_keeps_pending_runtime_integration_event() {
         let queue_path = temp_path("durable-runtime-publish-failure");
         let (mut state, request) = durable_inventory();
-        let mut runtime = DurableScanRuntime::open(&queue_path).expect("runtime should open");
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
         let _ = runtime.enqueue(request).expect("enqueue should persist");
         let provider = FakeProvider::success(vec![ReportedFinding::new(
             "CVE-2026-0001",
@@ -836,7 +833,7 @@ mod tests {
         assert_eq!(result.published, 0);
         assert_eq!(runtime.pending_integration_events().len(), 1);
 
-        let rebuilt = DurableScanRuntime::open(&queue_path).expect("runtime should replay");
+        let rebuilt = ScanCommandQueue::open(&queue_path).expect("runtime should replay");
         assert_eq!(rebuilt.pending_integration_events().len(), 1);
     }
 }

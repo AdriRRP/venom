@@ -6,8 +6,8 @@ pub mod syft_grype;
 
 pub use collection_scan_scheduler::{CollectionScanScheduler, DueCollectionScan};
 pub use durable_scan_runtime::{
-    CompletedScanCommand, DurableScanRuntime, DurableScanRuntimeError, EnqueueScanResult,
-    FailedScanCommand, RunNextScanResult, ScanCommandStatus,
+    CompletedScanCommand, EnqueueScanResult, FailedScanCommand, RunNextScanResult,
+    ScanCommandQueue, ScanCommandQueueError, ScanCommandStatus,
 };
 pub use scan_execution::{ScanExecutionError, ScanExecutionResult, execute_scan};
 pub use scan_planning::{

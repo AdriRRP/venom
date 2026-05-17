@@ -13,9 +13,9 @@ use venom_domain::scanning::syft_grype::{
     FixtureSyftGrypeProvider, artifact_identity_from_syft_json,
 };
 use venom_domain::{
-    ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
-    EvidenceFreshness, FindingProvider, IntegrationEventPublishError, IntegrationEventPublisher,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, ScanPlanner, ScanRequest,
+    ArtifactKind, ArtifactRef, ComponentRegistration, DurableState, EvidenceFreshness,
+    FindingProvider, IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, ScanCommandQueue, ScanPlanner, ScanRequest,
 };
 
 #[tokio::main]
@@ -102,7 +102,7 @@ async fn run_outbox_contracts() {
     let rebuilt_state = DurableState::open(&state_path).expect("durable state should replay");
     assert_eq!(rebuilt_state.pending_integration_events().len(), 0);
 
-    let mut runtime = DurableScanRuntime::open(&runtime_path).expect("runtime should open");
+    let mut runtime = ScanCommandQueue::open(&runtime_path).expect("runtime should open");
     let request = ScanPlanner::new(state.ingestion().inventory())
         .plan(
             "component:payments-api",
@@ -121,7 +121,7 @@ async fn run_outbox_contracts() {
         .await
         .expect("failed publication outcome must persist explicitly");
     assert_eq!(failed_publish.published, 0);
-    let rebuilt_runtime = DurableScanRuntime::open(&runtime_path).expect("runtime should replay");
+    let rebuilt_runtime = ScanCommandQueue::open(&runtime_path).expect("runtime should replay");
     assert_eq!(rebuilt_runtime.pending_integration_events().len(), 1);
 }
 

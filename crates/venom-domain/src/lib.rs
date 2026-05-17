@@ -28,9 +28,9 @@ pub use inventory::{
 };
 pub use scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,
-    CompletedScanCommand, DueCollectionScan, DurableScanRuntime, DurableScanRuntimeError,
-    EnqueueScanResult, FailedScanCommand, RunNextScanResult, ScanCommandStatus, ScanExecutionError,
-    ScanExecutionResult, ScanPlanner, ScanPlanningError, execute_scan,
+    CompletedScanCommand, DueCollectionScan, EnqueueScanResult, FailedScanCommand,
+    RunNextScanResult, ScanCommandQueue, ScanCommandQueueError, ScanCommandStatus,
+    ScanExecutionError, ScanExecutionResult, ScanPlanner, ScanPlanningError, execute_scan,
 };
 
 #[must_use]

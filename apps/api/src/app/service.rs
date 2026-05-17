@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration,
-    CollectionScanScheduler, ComponentInventory, ComponentRegistration, DurableScanRuntime,
-    DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
-    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult, ReportedFinding,
-    RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
+    CollectionScanScheduler, ComponentInventory, ComponentRegistration, DurableState,
+    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, IntegrationEventPublishError, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, ReportedFinding, RunNextScanResult, ScanCommandQueue,
+    ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
 };
 
 #[derive(Debug)]
@@ -180,7 +180,7 @@ enum AppBackend {
 
 struct LocalBackend {
     state: DurableState,
-    runtime: DurableScanRuntime,
+    runtime: ScanCommandQueue,
 }
 
 impl AppService {
@@ -195,7 +195,7 @@ impl AppService {
     ) -> Result<Self, AppServiceError> {
         let state = DurableState::open(state_path)
             .map_err(|error| AppServiceError::State(error.to_string()))?;
-        let runtime = DurableScanRuntime::open(runtime_path)
+        let runtime = ScanCommandQueue::open(runtime_path)
             .map_err(|error| AppServiceError::State(error.to_string()))?;
         Ok(Self {
             backend: AppBackend::Local(LocalBackend { state, runtime }),
