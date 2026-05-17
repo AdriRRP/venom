@@ -1,8 +1,10 @@
 import {
 	bindArtifact,
 	configureProvider,
+	drainScanWorker,
 	fetchActiveFindings,
 	fetchApiHealth,
+	fetchScanCommandStatus,
 	registerComponent,
 	requestScan,
 } from "./api";
@@ -90,5 +92,41 @@ describe("fetchApiHealth", () => {
 		);
 		expect(calls[3]?.input).toBe("/api/scan-requests");
 		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
+	});
+
+	it("serializes scan command lookup and worker drain payloads", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			},
+		) as typeof fetch;
+
+		await fetchScanCommandStatus("cmd-1");
+		await drainScanWorker({
+			maxCommands: 1,
+			knowledgeRevision: "fixture-rev-1",
+			findings: [
+				{
+					vulnerabilityId: "CVE-2026-0001",
+					packageName: "openssl",
+					packageVersion: "3.0.0",
+					severity: "high",
+				},
+			],
+		});
+
+		expect(calls[0]?.input).toBe("/api/scan-commands/cmd-1");
+		expect(calls[1]?.input).toBe("/api/scan-workers/drain");
+		expect(calls[1]?.init?.body).toContain(
+			'"knowledge_revision":"fixture-rev-1"',
+		);
+		expect(calls[1]?.init?.body).toContain(
+			'"vulnerability_id":"CVE-2026-0001"',
+		);
 	});
 });
