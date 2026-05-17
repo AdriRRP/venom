@@ -12,6 +12,7 @@ The platform target is:
 ## Product outcomes
 
 - know which components and collections are under management
+- define closed release collections as canonical scan scope
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings
 - derive discovery and withdrawal semantics inside VENOM rather than trusting provider delta semantics
@@ -25,8 +26,8 @@ The platform target is:
 
 | Capability | Why it exists | Typical canonical feature shape |
 |---|---|---|
-| Inventory | know what is under management | `register-component.feature` |
-| Scan orchestration | express canonical scan requests over managed ownership | `request-scan.feature` |
+| Inventory | know what is under management and how release scope is grouped | `register-component.feature`, `manage-collections.feature` |
+| Scan orchestration | express canonical scan requests over managed ownership and closed collections | `request-scan.feature`, `request-collection-scan.feature` |
 | Finding ingestion | import concrete provider observations over immutable artifacts | `report-finding.feature` |
 | Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
 | Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |

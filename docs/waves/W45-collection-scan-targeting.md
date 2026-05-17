@@ -1,7 +1,7 @@
 # W45. Collection Scan Targeting
 
 Wave: `W45-collection-scan-targeting`
-Status: `active`
+Status: `done`
 BDD impact: `create`
 Agentic impact: `none`
 Infra profile: `db`
@@ -43,7 +43,7 @@ Let operators request one canonical scan batch over a closed release collection 
 | `W45-S01` | done | plan canonical scan batches over one closed release collection in the domain | `scripts/check-slice.sh --wave W45-collection-scan-targeting --slice W45-S01 --lane acceptance --path crates/venom-domain/src/inventory --path crates/venom-domain/src/scanning --path features/request-collection-scan.feature` |
 | `W45-S02` | done | expose collection scan targeting through the API and durable backends | `scripts/check-slice.sh --wave W45-collection-scan-targeting --slice W45-S02 --lane integration --path apps/api/src/app --path apps/api/src/http --path apps/api/src/infra/postgres_backend.rs` |
 | `W45-S03` | done | let operators trigger collection scans from the UI | `scripts/check-slice.sh --wave W45-collection-scan-targeting --slice W45-S03 --lane e2e --path apps/web/src --path apps/web/e2e` |
-| `W45-S04` | in_progress | close the wave with full docs and gate alignment | `scripts/check-wave.sh --wave W45-collection-scan-targeting` |
+| `W45-S04` | done | close the wave with full docs and gate alignment | `scripts/check-wave.sh --wave W45-collection-scan-targeting` |
 
 ## Language impact
 
