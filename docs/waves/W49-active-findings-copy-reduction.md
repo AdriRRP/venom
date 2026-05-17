@@ -1,7 +1,7 @@
 # W49. Active Findings Copy Reduction
 
 Wave: `W49-active-findings-copy-reduction`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -33,7 +33,7 @@ Reduce resident memory and copy churn in the active findings read path by storin
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W49-S01` | done | compact active findings storage to a narrower operator projection and keep active query behavior stable | `scripts/check-slice.sh --wave W49-active-findings-copy-reduction --slice W49-S01 --lane unit --path crates/venom-domain/src/findings --path crates/venom-domain/benches/hot_paths.rs` |
-| `W49-S02` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W49-active-findings-copy-reduction` |
+| `W49-S02` | done | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W49-active-findings-copy-reduction` |
 
 ## Language impact
 
