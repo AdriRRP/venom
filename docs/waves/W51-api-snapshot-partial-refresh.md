@@ -1,7 +1,7 @@
 # W51. API Snapshot Partial Refresh
 
 Wave: `W51-api-snapshot-partial-refresh`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -38,7 +38,7 @@ Reduce memory churn in the API layer by refreshing only the changed parts of the
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W51-S01` | done | split API read snapshots into reusable parts and refresh only the changed lanes after each mutation | `scripts/check-slice.sh --wave W51-api-snapshot-partial-refresh --slice W51-S01 --lane integration --path apps/api/src/app/service.rs --path apps/api/src/http/mod.rs` |
-| `W51-S02` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W51-api-snapshot-partial-refresh` |
+| `W51-S02` | done | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W51-api-snapshot-partial-refresh` |
 
 ## Language impact
 
