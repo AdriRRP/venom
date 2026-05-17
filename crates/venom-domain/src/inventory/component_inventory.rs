@@ -114,11 +114,140 @@ pub struct ConfigureProviderResult {
     pub provider_key: Option<Box<str>>,
 }
 
+/// Canonical registration request for one managed collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionRegistration {
+    /// Stable collection identity inside VENOM.
+    pub collection_key: Box<str>,
+    /// Human-readable collection name.
+    pub name: Box<str>,
+}
+
+impl CollectionRegistration {
+    #[must_use]
+    pub fn new(collection_key: impl Into<Box<str>>, name: impl Into<Box<str>>) -> Self {
+        Self {
+            collection_key: collection_key.into(),
+            name: name.into(),
+        }
+    }
+}
+
+/// Observable outcome of one collection creation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterCollectionChange {
+    /// The collection key was new and is now managed.
+    Created,
+    /// The same collection was created again with the same canonical data.
+    Unchanged,
+    /// The collection key already exists with conflicting canonical data.
+    Rejected,
+}
+
+impl RegisterCollectionChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of one collection creation command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterCollectionResult {
+    /// Observable state change caused by the collection creation attempt.
+    pub change: RegisterCollectionChange,
+    /// Total number of managed collections after the operation.
+    pub managed_collections: usize,
+}
+
+/// Observable outcome of adding one managed component to one collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddCollectionComponentChange {
+    /// The component is now part of the collection.
+    Added,
+    /// The exact same membership already existed.
+    Unchanged,
+    /// The collection or component is unknown.
+    Rejected,
+}
+
+impl AddCollectionComponentChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of adding one managed component to one collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddCollectionComponentResult {
+    /// Observable state change caused by the membership attempt.
+    pub change: AddCollectionComponentChange,
+    /// Total number of members currently in the collection after the operation.
+    pub members: usize,
+}
+
+/// Observable outcome of removing one managed component from one collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveCollectionComponentChange {
+    /// The component is no longer part of the collection.
+    Removed,
+    /// The component was already absent from the collection.
+    Unchanged,
+    /// The collection is unknown.
+    Rejected,
+}
+
+impl RemoveCollectionComponentChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of removing one managed component from one collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveCollectionComponentResult {
+    /// Observable state change caused by the membership removal attempt.
+    pub change: RemoveCollectionComponentChange,
+    /// Total number of members currently in the collection after the operation.
+    pub members: usize,
+}
+
+/// Operator-facing snapshot of one managed collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedCollection {
+    /// Stable collection identity inside VENOM.
+    pub collection_key: Box<str>,
+    /// Human-readable collection name.
+    pub name: Box<str>,
+    /// Canonical managed component keys in the collection.
+    pub component_keys: Vec<Box<str>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComponentRecord {
     registration: ComponentRegistration,
     artifacts: BTreeSet<ArtifactRef>,
     provider_key: Option<Box<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectionRecord {
+    registration: CollectionRegistration,
+    component_keys: BTreeSet<Box<str>>,
 }
 
 /// Minimal in-memory inventory of managed components and their immutable artifacts.
@@ -130,6 +259,7 @@ struct ComponentRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ComponentInventory {
     components: BTreeMap<Box<str>, ComponentRecord>,
+    collections: BTreeMap<Box<str>, CollectionRecord>,
 }
 
 impl ComponentInventory {
@@ -224,6 +354,95 @@ impl ComponentInventory {
         }
     }
 
+    /// Register one closed collection under management.
+    #[must_use]
+    pub fn register_collection(
+        &mut self,
+        registration: CollectionRegistration,
+    ) -> RegisterCollectionResult {
+        let change = match self.collections.get(registration.collection_key.as_ref()) {
+            Some(existing) if existing.registration == registration => {
+                RegisterCollectionChange::Unchanged
+            }
+            Some(_) => RegisterCollectionChange::Rejected,
+            None => {
+                let key = registration.collection_key.clone();
+                self.collections.insert(
+                    key,
+                    CollectionRecord {
+                        registration,
+                        component_keys: BTreeSet::new(),
+                    },
+                );
+                RegisterCollectionChange::Created
+            }
+        };
+
+        RegisterCollectionResult {
+            change,
+            managed_collections: self.collections.len(),
+        }
+    }
+
+    /// Add one managed component to one collection.
+    #[must_use]
+    pub fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> AddCollectionComponentResult {
+        if !self.is_managed(component_key) {
+            return AddCollectionComponentResult {
+                change: AddCollectionComponentChange::Rejected,
+                members: self.collection_member_count(collection_key),
+            };
+        }
+
+        let Some(record) = self.collections.get_mut(collection_key) else {
+            return AddCollectionComponentResult {
+                change: AddCollectionComponentChange::Rejected,
+                members: 0,
+            };
+        };
+
+        let change = if record.component_keys.insert(component_key.into()) {
+            AddCollectionComponentChange::Added
+        } else {
+            AddCollectionComponentChange::Unchanged
+        };
+
+        AddCollectionComponentResult {
+            change,
+            members: record.component_keys.len(),
+        }
+    }
+
+    /// Remove one managed component from one collection.
+    #[must_use]
+    pub fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> RemoveCollectionComponentResult {
+        let Some(record) = self.collections.get_mut(collection_key) else {
+            return RemoveCollectionComponentResult {
+                change: RemoveCollectionComponentChange::Rejected,
+                members: 0,
+            };
+        };
+
+        let change = if record.component_keys.remove(component_key) {
+            RemoveCollectionComponentChange::Removed
+        } else {
+            RemoveCollectionComponentChange::Unchanged
+        };
+
+        RemoveCollectionComponentResult {
+            change,
+            members: record.component_keys.len(),
+        }
+    }
+
     #[must_use]
     pub fn is_managed(&self, component_key: &str) -> bool {
         self.components.contains_key(component_key)
@@ -254,13 +473,54 @@ impl ComponentInventory {
             .get(component_key)
             .and_then(|record| record.provider_key.as_deref())
     }
+
+    #[must_use]
+    pub fn is_collection_managed(&self, collection_key: &str) -> bool {
+        self.collections.contains_key(collection_key)
+    }
+
+    #[must_use]
+    pub fn managed_collections(&self) -> usize {
+        self.collections.len()
+    }
+
+    #[must_use]
+    pub fn collection_member_count(&self, collection_key: &str) -> usize {
+        self.collections
+            .get(collection_key)
+            .map_or(0, |record| record.component_keys.len())
+    }
+
+    #[must_use]
+    pub fn collection_members(&self, collection_key: &str) -> Option<Vec<Box<str>>> {
+        self.collections.get(collection_key).map(|record| {
+            record
+                .component_keys
+                .iter()
+                .cloned()
+                .collect::<Vec<Box<str>>>()
+        })
+    }
+
+    #[must_use]
+    pub fn collections(&self) -> Vec<ManagedCollection> {
+        self.collections
+            .values()
+            .map(|record| ManagedCollection {
+                collection_key: record.registration.collection_key.clone(),
+                name: record.registration.name.clone(),
+                component_keys: record.component_keys.iter().cloned().collect(),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BindArtifactChange, ComponentInventory, ComponentRegistration, ConfigureProviderChange,
-        RegisterComponentChange,
+        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration,
+        ComponentInventory, ComponentRegistration, ConfigureProviderChange,
+        RegisterCollectionChange, RegisterComponentChange, RemoveCollectionComponentChange,
     };
     use crate::{ArtifactKind, ArtifactRef};
 
@@ -409,5 +669,94 @@ mod tests {
 
         assert_eq!(result.change, ConfigureProviderChange::Rejected);
         assert!(result.provider_key.is_none());
+    }
+
+    #[test]
+    fn new_collection_is_created() {
+        let mut inventory = ComponentInventory::default();
+
+        let result =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+
+        assert_eq!(result.change, RegisterCollectionChange::Created);
+        assert_eq!(result.managed_collections, 1);
+        assert!(inventory.is_collection_managed("release:2026.05"));
+    }
+
+    #[test]
+    fn same_collection_creation_is_idempotent() {
+        let mut inventory = ComponentInventory::default();
+        let registration = CollectionRegistration::new("release:2026.05", "May");
+
+        let _ = inventory.register_collection(registration.clone());
+        let result = inventory.register_collection(registration);
+
+        assert_eq!(result.change, RegisterCollectionChange::Unchanged);
+        assert_eq!(result.managed_collections, 1);
+    }
+
+    #[test]
+    fn conflicting_collection_creation_is_rejected() {
+        let mut inventory = ComponentInventory::default();
+
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let result =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "June"));
+
+        assert_eq!(result.change, RegisterCollectionChange::Rejected);
+        assert_eq!(result.managed_collections, 1);
+    }
+
+    #[test]
+    fn managed_component_can_join_one_collection() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+
+        let result =
+            inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+
+        assert_eq!(result.change, AddCollectionComponentChange::Added);
+        assert_eq!(result.members, 1);
+        assert_eq!(
+            inventory.collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[test]
+    fn unmanaged_component_cannot_join_one_collection() {
+        let mut inventory = ComponentInventory::default();
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+
+        let result =
+            inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+
+        assert_eq!(result.change, AddCollectionComponentChange::Rejected);
+        assert_eq!(result.members, 0);
+    }
+
+    #[test]
+    fn collection_member_can_be_removed() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+
+        let result =
+            inventory.remove_component_from_collection("release:2026.05", "component:payments-api");
+
+        assert_eq!(result.change, RemoveCollectionComponentChange::Removed);
+        assert_eq!(result.members, 0);
     }
 }

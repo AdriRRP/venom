@@ -1,12 +1,14 @@
 use crate::{
-    ArtifactRef, BindArtifactChange, BindArtifactResult, ComponentRegistration,
+    AddCollectionComponentChange, AddCollectionComponentResult, ArtifactRef, BindArtifactChange,
+    BindArtifactResult, CollectionRegistration, ComponentRegistration,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FindingChangeSet, FindingIngestion,
     FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
-    RegisterComponentChange, RegisterComponentResult, ReportedFinding, Severity,
-    findings::finding_read_model::canonicalize_reported_findings,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
+    ReportedFinding, Severity, findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -204,6 +206,76 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably create one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn register_collection(
+        &mut self,
+        registration: CollectionRegistration,
+    ) -> Result<RegisterCollectionResult, DurableStateError> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .register_collection(registration.clone());
+        if result.change == RegisterCollectionChange::Created {
+            self.append_event(&DurableEvent::CollectionRegistered {
+                registration: StoredCollectionRegistration::from(registration),
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably add one managed component to one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<AddCollectionComponentResult, DurableStateError> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .add_component_to_collection(collection_key, component_key);
+        if result.change == AddCollectionComponentChange::Added {
+            self.append_event(&DurableEvent::CollectionComponentAdded {
+                collection_key: collection_key.into(),
+                component_key: component_key.into(),
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably remove one managed component from one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<RemoveCollectionComponentResult, DurableStateError> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .remove_component_from_collection(collection_key, component_key);
+        if result.change == RemoveCollectionComponentChange::Removed {
+            self.append_event(&DurableEvent::CollectionComponentRemoved {
+                collection_key: collection_key.into(),
+                component_key: component_key.into(),
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably configure the integration publication runtime.
     ///
     /// # Errors
@@ -288,54 +360,13 @@ impl DurableState {
 
     fn apply_event(&mut self, event: DurableEvent, line: usize) -> Result<(), DurableStateError> {
         match event {
-            DurableEvent::ComponentRegistered { registration } => {
-                let result = self
-                    .ingestion
-                    .inventory_mut()
-                    .register(registration.into_domain());
-                match result.change {
-                    RegisterComponentChange::Registered | RegisterComponentChange::Unchanged => {
-                        Ok(())
-                    }
-                    RegisterComponentChange::Rejected => Err(DurableStateError::CorruptHistory {
-                        line,
-                        reason: "conflicting component registration".into(),
-                    }),
-                }
-            }
-            DurableEvent::ArtifactBound {
-                component_key,
-                artifact,
-            } => {
-                let result = self
-                    .ingestion
-                    .inventory_mut()
-                    .bind_artifact(component_key.as_ref(), artifact);
-                match result.change {
-                    BindArtifactChange::Bound | BindArtifactChange::Unchanged => Ok(()),
-                    BindArtifactChange::Rejected => Err(DurableStateError::CorruptHistory {
-                        line,
-                        reason: "invalid artifact binding".into(),
-                    }),
-                }
-            }
-            DurableEvent::ComponentProviderConfigured {
-                component_key,
-                provider_key,
-            } => {
-                let result = self
-                    .ingestion
-                    .inventory_mut()
-                    .configure_provider(component_key.as_ref(), provider_key);
-                match result.change {
-                    ConfigureProviderChange::Configured | ConfigureProviderChange::Unchanged => {
-                        Ok(())
-                    }
-                    ConfigureProviderChange::Rejected => Err(DurableStateError::CorruptHistory {
-                        line,
-                        reason: "invalid provider configuration".into(),
-                    }),
-                }
+            DurableEvent::ComponentRegistered { .. }
+            | DurableEvent::ArtifactBound { .. }
+            | DurableEvent::ComponentProviderConfigured { .. }
+            | DurableEvent::CollectionRegistered { .. }
+            | DurableEvent::CollectionComponentAdded { .. }
+            | DurableEvent::CollectionComponentRemoved { .. } => {
+                self.apply_inventory_event(event, line)
             }
             DurableEvent::IntegrationRuntimeConfigured { config } => {
                 self.integration_runtime_config = Some(config);
@@ -344,41 +375,203 @@ impl DurableState {
             DurableEvent::ProviderScanRecorded {
                 report,
                 pending_integration_event,
-            } => {
-                let report = report.into_domain()?;
-                let canonical_findings = canonicalize_reported_findings(&report.findings);
-                self.ingestion
-                    .replay_canonical_scan_report(&report, &canonical_findings)
-                    .map_err(|error| match error {
-                        FindingIngestionError::UnmanagedComponent
-                        | FindingIngestionError::UnmanagedArtifact => {
-                            DurableStateError::CorruptHistory {
-                                line,
-                                reason: format!(
-                                    "provider report cannot be replayed: {}",
-                                    error.as_str()
-                                )
-                                .into_boxed_str(),
-                            }
-                        }
-                    })?;
-                self.read_model.replay_canonical_scan_report(
-                    report.component_key.clone(),
-                    report.artifact.clone(),
-                    canonical_findings,
-                );
-                if let Some(pending_integration_event) = *pending_integration_event {
-                    self.pending_integration_events
-                        .push_back(pending_integration_event);
-                }
-                Ok(())
-            }
+            } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
             DurableEvent::IntegrationEventPublished { event_id } => {
                 self.remove_pending_integration_event(event_id.as_ref());
                 Ok(())
             }
             DurableEvent::IntegrationEventPublicationFailed { .. } => Ok(()),
         }
+    }
+
+    fn apply_inventory_event(
+        &mut self,
+        event: DurableEvent,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        match event {
+            DurableEvent::ComponentRegistered { registration } => {
+                self.apply_component_registered(registration, line)
+            }
+            DurableEvent::ArtifactBound {
+                component_key,
+                artifact,
+            } => self.apply_artifact_bound(component_key.as_ref(), artifact, line),
+            DurableEvent::ComponentProviderConfigured {
+                component_key,
+                provider_key,
+            } => {
+                self.apply_provider_configured(component_key.as_ref(), provider_key.as_ref(), line)
+            }
+            DurableEvent::CollectionRegistered { registration } => {
+                self.apply_collection_registered(registration, line)
+            }
+            DurableEvent::CollectionComponentAdded {
+                collection_key,
+                component_key,
+            } => self.apply_collection_component_added(
+                collection_key.as_ref(),
+                component_key.as_ref(),
+                line,
+            ),
+            DurableEvent::CollectionComponentRemoved {
+                collection_key,
+                component_key,
+            } => self.apply_collection_component_removed(
+                collection_key.as_ref(),
+                component_key.as_ref(),
+                line,
+            ),
+            DurableEvent::IntegrationRuntimeConfigured { .. }
+            | DurableEvent::ProviderScanRecorded { .. }
+            | DurableEvent::IntegrationEventPublished { .. }
+            | DurableEvent::IntegrationEventPublicationFailed { .. } => {
+                unreachable!("non-inventory durable event routed to inventory replay")
+            }
+        }
+    }
+
+    fn apply_component_registered(
+        &mut self,
+        registration: StoredComponentRegistration,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .register(registration.into_domain());
+        match result.change {
+            RegisterComponentChange::Registered | RegisterComponentChange::Unchanged => Ok(()),
+            RegisterComponentChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "conflicting component registration".into(),
+            }),
+        }
+    }
+
+    fn apply_artifact_bound(
+        &mut self,
+        component_key: &str,
+        artifact: ArtifactRef,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .bind_artifact(component_key, artifact);
+        match result.change {
+            BindArtifactChange::Bound | BindArtifactChange::Unchanged => Ok(()),
+            BindArtifactChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid artifact binding".into(),
+            }),
+        }
+    }
+
+    fn apply_provider_configured(
+        &mut self,
+        component_key: &str,
+        provider_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .configure_provider(component_key, provider_key);
+        match result.change {
+            ConfigureProviderChange::Configured | ConfigureProviderChange::Unchanged => Ok(()),
+            ConfigureProviderChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid provider configuration".into(),
+            }),
+        }
+    }
+
+    fn apply_collection_registered(
+        &mut self,
+        registration: StoredCollectionRegistration,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .register_collection(registration.into_domain());
+        match result.change {
+            RegisterCollectionChange::Created | RegisterCollectionChange::Unchanged => Ok(()),
+            RegisterCollectionChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "conflicting collection registration".into(),
+            }),
+        }
+    }
+
+    fn apply_collection_component_added(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .add_component_to_collection(collection_key, component_key);
+        match result.change {
+            AddCollectionComponentChange::Added | AddCollectionComponentChange::Unchanged => Ok(()),
+            AddCollectionComponentChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid collection membership add".into(),
+            }),
+        }
+    }
+
+    fn apply_collection_component_removed(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .remove_component_from_collection(collection_key, component_key);
+        match result.change {
+            RemoveCollectionComponentChange::Removed
+            | RemoveCollectionComponentChange::Unchanged => Ok(()),
+            RemoveCollectionComponentChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid collection membership removal".into(),
+            }),
+        }
+    }
+
+    fn apply_provider_scan_recorded(
+        &mut self,
+        report: StoredProviderScanReport,
+        pending_integration_event: Option<PendingIntegrationEvent>,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let report = report.into_domain()?;
+        let canonical_findings = canonicalize_reported_findings(&report.findings);
+        self.ingestion
+            .replay_canonical_scan_report(&report, &canonical_findings)
+            .map_err(|error| match error {
+                FindingIngestionError::UnmanagedComponent
+                | FindingIngestionError::UnmanagedArtifact => DurableStateError::CorruptHistory {
+                    line,
+                    reason: format!("provider report cannot be replayed: {}", error.as_str())
+                        .into_boxed_str(),
+                },
+            })?;
+        self.read_model.replay_canonical_scan_report(
+            report.component_key.clone(),
+            report.artifact.clone(),
+            canonical_findings,
+        );
+        if let Some(pending_integration_event) = pending_integration_event {
+            self.pending_integration_events
+                .push_back(pending_integration_event);
+        }
+        Ok(())
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
@@ -459,6 +652,9 @@ enum DurableEvent {
     ComponentRegistered {
         registration: StoredComponentRegistration,
     },
+    CollectionRegistered {
+        registration: StoredCollectionRegistration,
+    },
     ArtifactBound {
         component_key: Box<str>,
         artifact: ArtifactRef,
@@ -466,6 +662,14 @@ enum DurableEvent {
     ComponentProviderConfigured {
         component_key: Box<str>,
         provider_key: Box<str>,
+    },
+    CollectionComponentAdded {
+        collection_key: Box<str>,
+        component_key: Box<str>,
+    },
+    CollectionComponentRemoved {
+        collection_key: Box<str>,
+        component_key: Box<str>,
     },
     IntegrationRuntimeConfigured {
         config: IntegrationRuntimeConfig,
@@ -503,6 +707,27 @@ impl From<ComponentRegistration> for StoredComponentRegistration {
 impl StoredComponentRegistration {
     fn into_domain(self) -> ComponentRegistration {
         ComponentRegistration::new(self.component_key, self.name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredCollectionRegistration {
+    collection_key: Box<str>,
+    name: Box<str>,
+}
+
+impl From<CollectionRegistration> for StoredCollectionRegistration {
+    fn from(value: CollectionRegistration) -> Self {
+        Self {
+            collection_key: value.collection_key,
+            name: value.name,
+        }
+    }
+}
+
+impl StoredCollectionRegistration {
+    fn into_domain(self) -> CollectionRegistration {
+        CollectionRegistration::new(self.collection_key, self.name)
     }
 }
 
@@ -652,8 +877,8 @@ impl StoredPackageCoordinate {
 mod tests {
     use super::DurableState;
     use crate::{
-        ArtifactKind, ArtifactRef, ComponentRegistration, ConfigureProviderChange,
-        EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
+        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
+        ConfigureProviderChange, EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
         IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
         PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
     };
@@ -730,6 +955,43 @@ mod tests {
                 .read_model()
                 .active_finding_count("component:payments-api", &artifact()),
             1
+        );
+    }
+
+    #[test]
+    fn replay_rebuilds_release_collections() {
+        let path = temp_path("durable-state-collections");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .expect("collection should persist");
+        let _ = state
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .expect("collection membership should persist");
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+
+        assert!(
+            rebuilt
+                .ingestion()
+                .inventory()
+                .is_collection_managed("release:2026.05")
+        );
+        assert_eq!(
+            rebuilt
+                .ingestion()
+                .inventory()
+                .collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
         );
     }
 

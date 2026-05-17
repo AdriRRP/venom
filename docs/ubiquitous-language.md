@@ -33,7 +33,7 @@ flowchart LR
 | API Read Snapshot | value object | A refreshed read-only snapshot that serves operator-facing API queries without borrowing the mutable write service directly. | read endpoints coupled to the write lock path |
 | Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
-| Collection | entity | A named grouping of components managed as one scope. | "group", "universe" as the default term |
+| Collection | entity | A closed explicit grouping of managed components operated as one release or platform scope. | "group", "universe" as the default term |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
 | Context Profile | entity | A reusable template of execution-context information. | "preset" as the canonical domain name |
 | Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |

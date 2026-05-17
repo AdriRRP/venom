@@ -19,9 +19,11 @@ pub use integration::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 pub use inventory::{
-    BindArtifactChange, BindArtifactResult, ComponentInventory, ComponentRegistration,
-    ConfigureProviderChange, ConfigureProviderResult, RegisterComponentChange,
-    RegisterComponentResult,
+    AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange,
+    BindArtifactResult, CollectionRegistration, ComponentInventory, ComponentRegistration,
+    ConfigureProviderChange, ConfigureProviderResult, ManagedCollection, RegisterCollectionChange,
+    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
+    RemoveCollectionComponentChange, RemoveCollectionComponentResult,
 };
 pub use scanning::{
     CompletedScanCommand, DockerSyftGrypeProvider, DurableScanRuntime, DurableScanRuntimeError,

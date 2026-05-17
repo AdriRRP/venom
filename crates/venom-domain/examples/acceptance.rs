@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BindArtifactResult,
-    ComponentRegistration, DurableScanRuntime, DurableState, EvidenceFreshness, FindingChangeSet,
-    FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, RegisterComponentResult,
+    ActiveFindingsPage, ActiveFindingsQuery, AddCollectionComponentResult, ArtifactKind,
+    ArtifactRef, BindArtifactResult, CollectionRegistration, ComponentRegistration,
+    DurableScanRuntime, DurableState, EvidenceFreshness, FindingChangeSet, FindingIngestion,
+    FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    PackageCoordinate, ProviderScanReport, RegisterCollectionResult, RegisterComponentResult,
     ReportedFinding, RunNextScanResult, ScanExecutionResult, ScanPlanner, ScanPlanningError,
     ScanRequest, Severity, execute_scan,
 };
@@ -20,6 +21,8 @@ struct AcceptanceWorld {
     pending_report: Option<ProviderScanReport>,
     ingestion: FindingIngestion,
     last_registration: Option<RegisterComponentResult>,
+    last_collection_registration: Option<RegisterCollectionResult>,
+    last_collection_membership: Option<AddCollectionComponentResult>,
     last_artifact_binding: Option<BindArtifactResult>,
     last_scan_request: Option<ScanRequest>,
     last_scan_planning_error: Option<ScanPlanningError>,
@@ -43,6 +46,8 @@ struct AcceptanceWorld {
 async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.ingestion = FindingIngestion::default();
     world.last_registration = None;
+    world.last_collection_registration = None;
+    world.last_collection_membership = None;
     world.last_artifact_binding = None;
     world.last_scan_request = None;
     world.last_scan_planning_error = None;
@@ -88,6 +93,13 @@ async fn a_new_durable_scan_runtime(world: &mut AcceptanceWorld) {
 #[given(expr = "a component {string}")]
 async fn a_component(world: &mut AcceptanceWorld, component_key: String) {
     world.component_key = Some(component_key);
+}
+
+#[given(expr = "a collection {string}")]
+async fn a_collection(world: &mut AcceptanceWorld, collection_key: String) {
+    world.last_collection_registration = Some(world.ingestion.inventory_mut().register_collection(
+        CollectionRegistration::new(collection_key, "Fixture Collection"),
+    ));
 }
 
 #[given(expr = "a managed component {string} named {string}")]
@@ -269,6 +281,22 @@ async fn venom_registers_component(
     );
 }
 
+#[given(expr = "VENOM creates collection {string} named {string}")]
+#[when(expr = "VENOM creates collection {string} named {string}")]
+async fn venom_creates_collection(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    name: String,
+) {
+    world.last_collection_registration = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .register_collection(CollectionRegistration::new(collection_key, name)),
+    );
+}
+
+#[given(expr = "VENOM durably registers component {string} named {string}")]
 #[when(expr = "VENOM durably registers component {string} named {string}")]
 async fn venom_durably_registers_component(
     world: &mut AcceptanceWorld,
@@ -285,6 +313,27 @@ async fn venom_durably_registers_component(
         }
         Err(error) => {
             world.last_registration = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[given(expr = "VENOM durably creates collection {string} named {string}")]
+async fn venom_durably_creates_collection(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    name: String,
+) {
+    let result = world
+        .durable_state_mut()
+        .register_collection(CollectionRegistration::new(collection_key, name));
+    match result {
+        Ok(result) => {
+            world.last_collection_registration = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_collection_registration = None;
             world.last_durable_error = Some(error.as_str().to_owned());
         }
     }
@@ -322,6 +371,42 @@ async fn venom_durably_binds_artifact_to_component(
         }
         Err(error) => {
             world.last_artifact_binding = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[when(expr = "VENOM adds component {string} to collection {string}")]
+async fn venom_adds_component_to_collection(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    collection_key: String,
+) {
+    world.last_collection_membership = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .add_component_to_collection(&collection_key, &component_key),
+    );
+}
+
+#[given(expr = "VENOM durably adds component {string} to collection {string}")]
+#[when(expr = "VENOM durably adds component {string} to collection {string}")]
+async fn venom_durably_adds_component_to_collection(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    collection_key: String,
+) {
+    let result = world
+        .durable_state_mut()
+        .add_component_to_collection(&collection_key, &component_key);
+    match result {
+        Ok(result) => {
+            world.last_collection_membership = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_collection_membership = None;
             world.last_durable_error = Some(error.as_str().to_owned());
         }
     }
@@ -537,9 +622,92 @@ async fn components_are_under_management(world: &mut AcceptanceWorld, expected: 
     assert_eq!(world.ingestion.inventory().managed_components(), expected);
 }
 
+#[then(expr = "managed collections are {int}")]
+async fn managed_collections_are(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(world.ingestion.inventory().managed_collections(), expected);
+}
+
 #[then(expr = "the registration result is {string}")]
 async fn the_registration_result_is(world: &mut AcceptanceWorld, expected: String) {
     assert_eq!(last_registration(world).change.as_str(), expected);
+}
+
+#[then(expr = "the collection result is {string}")]
+async fn the_collection_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_registration
+            .as_ref()
+            .expect("a collection registration must be attempted before assertions")
+            .change
+            .as_str(),
+        expected
+    );
+}
+
+#[then(expr = "the collection membership result is {string}")]
+async fn the_collection_membership_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_membership
+            .as_ref()
+            .expect("a collection membership must be attempted before assertions")
+            .change
+            .as_str(),
+        expected
+    );
+}
+
+#[then(expr = "collection {string} has {int} members")]
+async fn collection_has_members(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .ingestion
+            .inventory()
+            .collection_member_count(&collection_key),
+        expected
+    );
+}
+
+#[then(expr = "collection {string} contains component {string}")]
+async fn collection_contains_component(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    component_key: String,
+) {
+    let members = world
+        .ingestion
+        .inventory()
+        .collection_members(&collection_key)
+        .or_else(|| {
+            world.durable_state.as_ref().and_then(|state| {
+                state
+                    .ingestion()
+                    .inventory()
+                    .collection_members(&collection_key)
+            })
+        })
+        .expect("the collection must exist before membership assertions");
+    assert!(
+        members
+            .iter()
+            .any(|member| member.as_ref() == component_key)
+    );
+}
+
+#[then(expr = "the durable state manages collection {string}")]
+async fn the_durable_state_manages_collection(world: &mut AcceptanceWorld, collection_key: String) {
+    assert!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .is_collection_managed(&collection_key)
+    );
 }
 
 #[then(expr = "the artifact {string} belongs to component {string}")]
@@ -1005,6 +1173,7 @@ fn parse_severity(value: &str) -> Severity {
 async fn main() {
     let base = format!("{}/../../features", env!("CARGO_MANIFEST_DIR"));
     for feature in [
+        "manage-collections.feature",
         "register-component.feature",
         "request-scan.feature",
         "report-finding.feature",
