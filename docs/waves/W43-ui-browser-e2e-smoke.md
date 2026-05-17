@@ -44,6 +44,7 @@ Add the first browser-driven executable smoke flow for the operator console, wir
 | `W43-S01` | done | define and activate the wave | `./scripts/check-slice.sh --wave W43-ui-browser-e2e-smoke --slice W43-S01 --path docs/waves/ACTIVE --path docs/waves/W43-ui-browser-e2e-smoke.md` |
 | `W43-S02` | done | wire a deterministic browser E2E runner and add the canonical operator smoke flow | `./scripts/check-slice.sh --wave W43-ui-browser-e2e-smoke --slice W43-S02 --lane e2e --path apps/web/package.json --path apps/web/package-lock.json --path apps/web/playwright.config.ts --path apps/web/tsconfig.json --path apps/web/vite.config.ts --path apps/web/e2e --path scripts/check-web-e2e.sh --path scripts/check-web.sh --path scripts/check-slice.sh --path scripts/check-wave.sh --path .github/workflows/tests.yml --path docs/work-methodology.md --path scripts/README.md` |
 | `W43-S03` | done | close the wave and run the full wave gate | `./scripts/check-wave.sh --wave W43-ui-browser-e2e-smoke` |
+| `W43-S04` | done | make the browser E2E runner portable across local macOS and Linux CI temp directories | `./scripts/check-wave.sh --wave W43-ui-browser-e2e-smoke` |
 
 ## Language impact
 
