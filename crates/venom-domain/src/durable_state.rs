@@ -716,7 +716,7 @@ impl DurableState {
         self.read_model.replay_canonical_scan_report(
             report.component_key.clone(),
             report.artifact.clone(),
-            canonical_findings,
+            &canonical_findings,
         );
         if let Some(pending_integration_event) = pending_integration_event {
             self.pending_integration_events
