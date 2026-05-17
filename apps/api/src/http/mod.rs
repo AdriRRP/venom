@@ -885,6 +885,31 @@ mod tests {
         assert_eq!(payload["processed_collections"], 1);
         assert_eq!(payload["enqueued_commands"], 1);
         assert_eq!(payload["pending_due_remaining"], 0);
+
+        let response = router
+            .oneshot(
+                Request::get("/collections")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("list collections request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert!(
+            payload["collections"][0]["scan_schedule"]["last_materialized_at_unix_ms"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(
+            payload["collections"][0]["scan_schedule"]["last_enqueued_commands"],
+            1
+        );
     }
 
     #[tokio::test]

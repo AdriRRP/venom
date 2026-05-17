@@ -680,7 +680,7 @@ impl PostgresBackend {
         }
 
         let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
-            "INSERT INTO {} (collection_key, cadence_minutes, freshness, next_due_at_unix_ms) ",
+            "INSERT INTO {} (collection_key, cadence_minutes, freshness, next_due_at_unix_ms, last_materialized_at_unix_ms, last_enqueued_commands) ",
             self.names.collection_scan_schedules
         ));
         query_builder.push_values(
@@ -694,11 +694,21 @@ impl PostgresBackend {
                     .push_bind(
                         i64::try_from(schedule.next_due_at_unix_ms)
                             .expect("next due should fit i64"),
+                    )
+                    .push_bind(schedule.last_materialized_at_unix_ms.map(|value| {
+                        i64::try_from(value).expect("last materialized should fit i64")
+                    }))
+                    .push_bind(
+                        schedule
+                            .last_enqueued_commands
+                            .map(i32::try_from)
+                            .transpose()
+                            .expect("last command count should fit i32"),
                     );
             },
         );
         query_builder.push(
-            " ON CONFLICT (collection_key) DO UPDATE SET cadence_minutes = EXCLUDED.cadence_minutes, freshness = EXCLUDED.freshness, next_due_at_unix_ms = EXCLUDED.next_due_at_unix_ms, updated_at = NOW()",
+            " ON CONFLICT (collection_key) DO UPDATE SET cadence_minutes = EXCLUDED.cadence_minutes, freshness = EXCLUDED.freshness, next_due_at_unix_ms = EXCLUDED.next_due_at_unix_ms, last_materialized_at_unix_ms = EXCLUDED.last_materialized_at_unix_ms, last_enqueued_commands = EXCLUDED.last_enqueued_commands, updated_at = NOW()",
         );
         query_builder
             .build()
@@ -1111,6 +1121,8 @@ impl PostgresBackend {
                 "cadence_minutes INTEGER NOT NULL, ",
                 "freshness TEXT NOT NULL, ",
                 "next_due_at_unix_ms BIGINT NOT NULL, ",
+                "last_materialized_at_unix_ms BIGINT NULL, ",
+                "last_enqueued_commands INTEGER NULL, ",
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
@@ -1120,6 +1132,24 @@ impl PostgresBackend {
         .await
         .map_err(|error| {
             format!("postgres collection scan schedules table create failed: {error}")
+        })?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS last_materialized_at_unix_ms BIGINT NULL",
+            self.names.collection_scan_schedules
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection scan schedules add last_materialized_at failed: {error}")
+        })?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS last_enqueued_commands INTEGER NULL",
+            self.names.collection_scan_schedules
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection scan schedules add last_enqueued_commands failed: {error}")
         })?;
         Ok(())
     }
@@ -1343,9 +1373,9 @@ impl PostgresBackend {
     }
 
     async fn load_collection_scan_schedules(&mut self) -> Result<(), String> {
-        let schedules = sqlx::query_as::<_, (String, i32, String, i64)>(&format!(
+        let schedules = sqlx::query_as::<_, (String, i32, String, i64, Option<i64>, Option<i32>)>(&format!(
             concat!(
-                "SELECT collection_key, cadence_minutes, freshness, next_due_at_unix_ms ",
+                "SELECT collection_key, cadence_minutes, freshness, next_due_at_unix_ms, last_materialized_at_unix_ms, last_enqueued_commands ",
                 "FROM {} ORDER BY collection_key"
             ),
             self.names.collection_scan_schedules
@@ -1353,7 +1383,15 @@ impl PostgresBackend {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collection scan schedules load failed: {error}"))?;
-        for (collection_key, cadence_minutes, freshness, next_due_at_unix_ms) in schedules {
+        for (
+            collection_key,
+            cadence_minutes,
+            freshness,
+            next_due_at_unix_ms,
+            last_materialized_at_unix_ms,
+            last_enqueued_commands,
+        ) in schedules
+        {
             let result = self
                 .ingestion
                 .inventory_mut()
@@ -1369,6 +1407,29 @@ impl PostgresBackend {
                 return Err(
                     "postgres collection scan schedules contain invalid configuration".to_owned(),
                 );
+            }
+            if let Some(materialized_at) = last_materialized_at_unix_ms {
+                let materialized_result = self
+                    .ingestion
+                    .inventory_mut()
+                    .record_collection_scan_materialization(
+                        &collection_key,
+                        u64::try_from(next_due_at_unix_ms).map_err(|_| {
+                            "postgres schedule next due must be positive".to_owned()
+                        })?,
+                        u64::try_from(materialized_at).map_err(|_| {
+                            "postgres schedule materialized time must be positive".to_owned()
+                        })?,
+                        u32::try_from(last_enqueued_commands.unwrap_or_default()).map_err(
+                            |_| "postgres schedule command count must fit u32".to_owned(),
+                        )?,
+                    );
+                if materialized_result.change == ConfigureCollectionScanScheduleChange::Rejected {
+                    return Err(
+                        "postgres collection scan materializations contain invalid state"
+                            .to_owned(),
+                    );
+                }
             }
         }
         Ok(())

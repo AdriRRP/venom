@@ -637,20 +637,17 @@ impl AppService {
                     .collect_due(now_unix_ms, max_collections);
 
                 for due_scan in &due_scans {
-                    let schedule = inventory
-                        .collection_scan_schedule(due_scan.collection_key.as_ref())
-                        .ok_or_else(|| {
-                            AppServiceError::State(
-                                "due collection schedule missing after local scheduling".to_owned(),
-                            )
-                        })?;
                     local
                         .state
-                        .configure_collection_scan_schedule(
+                        .record_collection_scan_materialization(
                             due_scan.collection_key.as_ref(),
-                            schedule.cadence_minutes,
-                            schedule.freshness,
-                            schedule.next_due_at_unix_ms,
+                            due_scan.next_due_at_unix_ms,
+                            now_unix_ms,
+                            u32::try_from(due_scan.requests.len()).map_err(|_| {
+                                AppServiceError::State(
+                                    "collection scheduler command count overflow".to_owned(),
+                                )
+                            })?,
                         )
                         .map_err(|error| AppServiceError::State(error.to_string()))?;
                 }
@@ -1052,6 +1049,8 @@ pub struct CollectionScanScheduleItem {
     pub cadence_minutes: u32,
     pub freshness: &'static str,
     pub next_due_at_unix_ms: u64,
+    pub last_materialized_at_unix_ms: Option<u64>,
+    pub last_enqueued_commands: Option<u32>,
 }
 
 impl From<venom_domain::CollectionScanSchedule> for CollectionScanScheduleItem {
@@ -1060,6 +1059,8 @@ impl From<venom_domain::CollectionScanSchedule> for CollectionScanScheduleItem {
             cadence_minutes: value.cadence_minutes,
             freshness: freshness_name(value.freshness),
             next_due_at_unix_ms: value.next_due_at_unix_ms,
+            last_materialized_at_unix_ms: value.last_materialized_at_unix_ms,
+            last_enqueued_commands: value.last_enqueued_commands,
         }
     }
 }

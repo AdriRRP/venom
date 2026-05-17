@@ -42,8 +42,8 @@ Give operators durable, explicit visibility of the last periodic collection sche
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W48-S01` | done | add durable last-run collection schedule metadata in the domain | `scripts/check-slice.sh --wave W48-collection-schedule-run-visibility --slice W48-S01 --lane acceptance --path crates/venom-domain/src/inventory --path crates/venom-domain/src/scanning --path crates/venom-domain/src/durable_state.rs --path crates/venom-domain/examples/acceptance.rs --path features/view-collection-schedules.feature` |
-| `W48-S02` | in_progress | expose last-run schedule metadata through API and durable Postgres state | `scripts/check-slice.sh --wave W48-collection-schedule-run-visibility --slice W48-S02 --lane integration --path apps/api/src/app --path apps/api/src/http --path apps/api/src/infra/postgres_backend.rs` |
-| `W48-S03` | planned | surface last-run schedule visibility in the UI and browser flow | `scripts/check-slice.sh --wave W48-collection-schedule-run-visibility --slice W48-S03 --lane e2e --path apps/web/src --path apps/web/e2e` |
+| `W48-S02` | done | expose last-run schedule metadata through API and durable Postgres state | `scripts/check-slice.sh --wave W48-collection-schedule-run-visibility --slice W48-S02 --lane integration --path apps/api/src/app --path apps/api/src/http --path apps/api/src/infra/postgres_backend.rs` |
+| `W48-S03` | in_progress | surface last-run schedule visibility in the UI and browser flow | `scripts/check-slice.sh --wave W48-collection-schedule-run-visibility --slice W48-S03 --lane e2e --path apps/web/src --path apps/web/e2e` |
 | `W48-S04` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W48-collection-schedule-run-visibility` |
 
 ## Language impact
