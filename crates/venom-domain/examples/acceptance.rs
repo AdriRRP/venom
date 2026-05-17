@@ -4,16 +4,22 @@ use cucumber::{World as _, given, then, when};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use venom_domain::{
-    ActiveFindingsPage, ActiveFindingsQuery, AddCollectionComponentResult, ArtifactKind,
-    ArtifactRef, BindArtifactResult, CollectionRegistration, CollectionScanBatch,
-    CollectionScanPlanningError, CollectionScanScheduler, ComponentRegistration,
-    ConfigureCollectionScanScheduleResult, DueCollectionScan, DurableState, EvidenceFreshness,
+use venom_domain::durable_state::DurableState;
+use venom_domain::findings::{
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
     FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, ManagedCollectionOperationsSummary,
-    PackageCoordinate, ProviderScanReport, RegisterCollectionResult, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanCommandQueue, ScanExecutionResult, ScanPlanner,
-    ScanPlanningError, ScanRequest, Severity, execute_scan,
+    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
+    ReportedFinding, ScanRequest, Severity,
+};
+use venom_domain::inventory::{
+    AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
+    ComponentRegistration, ConfigureCollectionScanScheduleResult,
+    ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
+};
+use venom_domain::scanning::{
+    CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
+    RunNextScanResult, ScanCommandQueue, ScanExecutionResult, ScanPlanner, ScanPlanningError,
+    execute_scan,
 };
 
 #[derive(Debug, Default, cucumber::World)]

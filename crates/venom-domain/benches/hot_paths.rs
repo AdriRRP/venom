@@ -4,11 +4,14 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::SystemTime;
-use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableState,
-    EvidenceFreshness, FindingIngestion, FindingReadModel, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, ScanCommandQueue, ScanRequest, Severity,
+use venom_domain::durable_state::DurableState;
+use venom_domain::findings::{
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingIngestion,
+    FindingReadModel, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanRequest,
+    Severity,
 };
+use venom_domain::inventory::ComponentRegistration;
+use venom_domain::scanning::ScanCommandQueue;
 
 const COMPONENT_KEY: &str = "component:payments-api";
 const ARTIFACT_IDENTITY: &str = "registry.example/payments@sha256:111";

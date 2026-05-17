@@ -4,14 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration,
-    CollectionScanScheduler, ComponentInventory, ComponentRegistration, DurableState,
-    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, IntegrationEventPublishError, IntegrationEventPublisher,
-    IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, ReportedFinding, RunNextScanResult, ScanCommandQueue,
-    ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
+use venom_domain::durable_state::DurableState;
+use venom_domain::findings::{
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, ScanRequest, Severity,
+};
+use venom_domain::integration::{
+    IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
+    PendingIntegrationEvent, PublishIntegrationEventsResult,
+};
+use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
+use venom_domain::scanning::{
+    CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
 
 #[derive(Debug)]

@@ -8,7 +8,7 @@ Infra profile: `db`
 
 ## Goal
 
-Reduce API-layer copy churn by removing scan command statuses from the shared read snapshot. Command status is only queried by `command_id`, so it should be served directly from `AppService` instead of rebuilding a full status map after each write.
+Reduce API-layer copy churn by removing scan command statuses from the shared read snapshot. Command status is only queried by `command_id`, so it should be served directly from `ApiApplication` instead of rebuilding a full status map after each write.
 
 ## Feature paths
 
@@ -29,7 +29,7 @@ Reduce API-layer copy churn by removing scan command statuses from the shared re
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W52-S01` | done | remove command status snapshots from API read state and serve them directly from `AppService` | `scripts/check-slice.sh --wave W52-command-status-snapshot-elision --slice W52-S01 --lane integration --path apps/api/src/app/service.rs --path apps/api/src/http/mod.rs --path apps/api/src/infra/postgres_backend.rs` |
+| `W52-S01` | done | remove command status snapshots from API read state and serve them directly from `ApiApplication` | `scripts/check-slice.sh --wave W52-command-status-snapshot-elision --slice W52-S01 --lane integration --path apps/api/src/app/service.rs --path apps/api/src/http/mod.rs --path apps/api/src/infra/postgres_backend.rs` |
 | `W52-S02` | done | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W52-command-status-snapshot-elision` |
 
 ## Language impact

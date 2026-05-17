@@ -4,18 +4,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
     as_provider_error, validate_provider_scan_report,
 };
-use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
-    CollectionScanScheduler, CompletedScanCommand, ComponentInventory, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
-    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
-    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, RegisterCollectionChange, RegisterCollectionResult,
-    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanCommandStatus, ScanPlanner, ScanRequest,
+use venom_domain::findings::{
+    ArtifactKind, ArtifactRef, EvidenceFreshness, FindingChangeSet, FindingIngestion,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingReadModel,
+    ProviderScanReport, ReportedFinding, ScanRequest,
+};
+use venom_domain::integration::{
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
+    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
+    PendingIntegrationEvent, PublishIntegrationEventsResult,
+};
+use venom_domain::inventory::{
+    BindArtifactChange, BindArtifactResult, CollectionRegistration, ComponentInventory,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult,
+};
+use venom_domain::scanning::{
+    CollectionScanScheduler, CompletedScanCommand, FailedScanCommand, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner,
 };
 
 #[derive(Debug)]

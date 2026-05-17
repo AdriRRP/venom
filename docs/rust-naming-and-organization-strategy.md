@@ -123,8 +123,8 @@ Rename only when at least one answer is clearly `yes`.
 ### Weak
 
 - several names are role-generic rather than semantically specific:
-  - `AppService`
-  - `PostgresBackend`
+  - `ApiApplication`
+  - `PostgresStore`
   - `DurableState`
   - `ComponentInventory`
 - some public re-exports are broader than the stable mental model really needs
@@ -176,8 +176,8 @@ Goal:
 
 High-value candidates:
 
-- `AppService`
-- `PostgresBackend`
+- `ApiApplication`
+- `PostgresStore`
 - `http_integration_publisher`
 
 Rule:
