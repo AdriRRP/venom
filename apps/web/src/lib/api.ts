@@ -74,6 +74,39 @@ export type RequestScanResponse = {
 	freshness: string;
 };
 
+export type ScanCommandStatusResponse = {
+	command_id: string;
+	status: string;
+};
+
+export type DrainWorkerFindingInput = {
+	vulnerabilityId: string;
+	packageName: string;
+	packageVersion: string;
+	severity: string;
+};
+
+export type DrainWorkerPayload = {
+	maxCommands?: number;
+	knowledgeRevision?: string;
+	findings?: DrainWorkerFindingInput[];
+	errorKind?: string;
+	errorMessage?: string;
+	retryable?: boolean;
+};
+
+export type DrainWorkerResponse = {
+	outcome: string;
+	processed: number;
+	completed: number;
+	failed: number;
+	pending_remaining: number;
+	last_command_id: string | null;
+	last_command_status: string | null;
+	last_error_code: string | null;
+	last_retryable: boolean | null;
+};
+
 export async function fetchApiHealth(): Promise<ApiHealthState> {
 	const response = await fetch("/api/health");
 	return response.ok ? "healthy" : "unhealthy";
@@ -183,4 +216,44 @@ export async function requestScan(
 		throw new Error(`scan request failed with status ${response.status}`);
 	}
 	return (await response.json()) as RequestScanResponse;
+}
+
+export async function fetchScanCommandStatus(
+	commandId: string,
+): Promise<ScanCommandStatusResponse> {
+	const response = await fetch(
+		`/api/scan-commands/${encodeURIComponent(commandId)}`,
+	);
+	if (!response.ok) {
+		throw new Error(
+			`scan command status failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ScanCommandStatusResponse;
+}
+
+export async function drainScanWorker(
+	request: DrainWorkerPayload,
+): Promise<DrainWorkerResponse> {
+	const response = await fetch("/api/scan-workers/drain", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			max_commands: request.maxCommands,
+			knowledge_revision: request.knowledgeRevision,
+			findings: request.findings?.map((finding) => ({
+				vulnerability_id: finding.vulnerabilityId,
+				package_name: finding.packageName,
+				package_version: finding.packageVersion,
+				severity: finding.severity,
+			})),
+			error_kind: request.errorKind,
+			error_message: request.errorMessage,
+			retryable: request.retryable,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(`worker drain failed with status ${response.status}`);
+	}
+	return (await response.json()) as DrainWorkerResponse;
 }

@@ -4,7 +4,9 @@ import { AppShell } from "../app/app-shell";
 import {
 	bindArtifact,
 	configureProvider,
+	drainScanWorker,
 	fetchApiHealth,
+	fetchScanCommandStatus,
 	registerComponent,
 	requestScan,
 } from "../lib/api";
@@ -17,6 +19,12 @@ export function OperationsPage() {
 		artifactIdentity: "registry.example/payments@sha256:111",
 		providerKey: "fixture-provider",
 		freshness: "deterministic",
+		commandId: "",
+		knowledgeRevision: "fixture-rev-1",
+		findingVulnerabilityId: "CVE-2026-0001",
+		findingPackageName: "openssl",
+		findingPackageVersion: "3.0.0",
+		findingSeverity: "high",
 	});
 
 	const healthQuery = useQuery({
@@ -57,6 +65,28 @@ export function OperationsPage() {
 
 	const requestScanMutation = useMutation({
 		mutationFn: requestScan,
+		onSuccess: (data) => {
+			setOperatorState((current) => ({
+				...current,
+				commandId: data.command_id,
+			}));
+		},
+	});
+
+	const scanCommandStatusMutation = useMutation({
+		mutationFn: fetchScanCommandStatus,
+	});
+
+	const drainWorkerMutation = useMutation({
+		mutationFn: drainScanWorker,
+		onSuccess: (data) => {
+			if (data.last_command_id) {
+				setOperatorState((current) => ({
+					...current,
+					commandId: data.last_command_id ?? current.commandId,
+				}));
+			}
+		},
 	});
 
 	return (
@@ -354,6 +384,163 @@ export function OperationsPage() {
 								Command: {requestScanMutation.data.command_id}. Status:{" "}
 								{requestScanMutation.data.status}. Freshness:{" "}
 								{requestScanMutation.data.freshness}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scanning</p>
+							<h2>Command Status</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void scanCommandStatusMutation.mutateAsync(
+								operatorState.commandId,
+							);
+						}}
+					>
+						<label>
+							Command id
+							<input
+								name="commandId"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										commandId: event.target.value,
+									}))
+								}
+								value={operatorState.commandId}
+							/>
+						</label>
+						<button className="secondary-button" type="submit">
+							Refresh Status
+						</button>
+					</form>
+					{scanCommandStatusMutation.data ? (
+						<div className="result-card">
+							<strong>Current command status</strong>
+							<p>
+								Command: {scanCommandStatusMutation.data.command_id}. Status:{" "}
+								{scanCommandStatusMutation.data.status}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Worker</p>
+							<h2>Run Fixture Worker</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void drainWorkerMutation.mutateAsync({
+								maxCommands: 1,
+								knowledgeRevision: operatorState.knowledgeRevision,
+								findings: [
+									{
+										vulnerabilityId: operatorState.findingVulnerabilityId,
+										packageName: operatorState.findingPackageName,
+										packageVersion: operatorState.findingPackageVersion,
+										severity: operatorState.findingSeverity,
+									},
+								],
+							});
+						}}
+					>
+						<label>
+							Knowledge revision
+							<input
+								name="knowledgeRevision"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										knowledgeRevision: event.target.value,
+									}))
+								}
+								value={operatorState.knowledgeRevision}
+							/>
+						</label>
+						<label>
+							Vulnerability id
+							<input
+								name="findingVulnerabilityId"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										findingVulnerabilityId: event.target.value,
+									}))
+								}
+								value={operatorState.findingVulnerabilityId}
+							/>
+						</label>
+						<label>
+							Package name
+							<input
+								name="findingPackageName"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										findingPackageName: event.target.value,
+									}))
+								}
+								value={operatorState.findingPackageName}
+							/>
+						</label>
+						<label>
+							Package version
+							<input
+								name="findingPackageVersion"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										findingPackageVersion: event.target.value,
+									}))
+								}
+								value={operatorState.findingPackageVersion}
+							/>
+						</label>
+						<label>
+							Severity
+							<select
+								name="findingSeverity"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										findingSeverity: event.target.value,
+									}))
+								}
+								value={operatorState.findingSeverity}
+							>
+								<option value="low">low</option>
+								<option value="medium">medium</option>
+								<option value="high">high</option>
+								<option value="critical">critical</option>
+							</select>
+						</label>
+						<button className="primary-button" type="submit">
+							Run Worker
+						</button>
+					</form>
+					{drainWorkerMutation.data ? (
+						<div className="result-card">
+							<strong>Last worker run</strong>
+							<p>
+								Outcome: {drainWorkerMutation.data.outcome}. Processed:{" "}
+								{drainWorkerMutation.data.processed}. Completed:{" "}
+								{drainWorkerMutation.data.completed}. Failed:{" "}
+								{drainWorkerMutation.data.failed}. Pending remaining:{" "}
+								{drainWorkerMutation.data.pending_remaining}.
 							</p>
 						</div>
 					) : null}
