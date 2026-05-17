@@ -6,12 +6,13 @@ pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
 
 /// Rebuildable operator-facing view of currently active findings.
 ///
-/// This read model is intentionally narrow: it stores only the active
-/// canonical findings for each managed `(component, artifact)` pair. The
-/// source of truth remains the durable history that can replay these snapshots.
+/// This read model is intentionally narrow: it stores one compact operator
+/// projection for each active canonical finding, not the full provider-facing
+/// payload. The source of truth remains the durable history that can replay
+/// these snapshots.
 #[derive(Debug, Clone, Default)]
 pub struct FindingReadModel {
-    active: BTreeMap<TrackedArtifactKey, Vec<ReportedFinding>>,
+    active: BTreeMap<TrackedArtifactKey, Vec<ActiveFindingRecord>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,10 +90,11 @@ impl FindingReadModel {
         &mut self,
         component_key: Box<str>,
         artifact: ArtifactRef,
-        canonical_findings: Vec<ReportedFinding>,
+        canonical_findings: &[ReportedFinding],
     ) {
         let key = TrackedArtifactKey::new(component_key, artifact);
-        self.active.insert(key, canonical_findings);
+        self.active
+            .insert(key, canonicalize_findings(canonical_findings));
     }
 
     #[must_use]
@@ -135,7 +137,12 @@ impl FindingReadModel {
                 component_key.into(),
                 artifact.clone(),
             ))
-            .cloned()
+            .map(|findings| {
+                findings
+                    .iter()
+                    .map(ActiveFindingRecord::to_reported_finding)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     }
 
@@ -160,17 +167,22 @@ impl FindingReadModel {
                 query
                     .package_name
                     .as_deref()
-                    .is_none_or(|package_name| finding.package.name.as_ref() == package_name)
+                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
             })
             .collect::<Vec<_>>();
-        filtered.sort_unstable_by(|left, right| operator_finding_sort_key(left, right));
+        filtered.sort_unstable_by_key(|finding| {
+            (
+                std::cmp::Reverse(severity_rank(finding.severity)),
+                finding_dedup_key(finding),
+            )
+        });
 
         let total = filtered.len();
         let page = filtered
             .into_iter()
             .skip(offset)
             .take(limit)
-            .cloned()
+            .map(ActiveFindingRecord::to_reported_finding)
             .collect::<Vec<_>>();
 
         ActiveFindingsPage {
@@ -198,8 +210,47 @@ impl TrackedArtifactKey {
     }
 }
 
-fn canonicalize_findings(findings: &[ReportedFinding]) -> Vec<ReportedFinding> {
-    let mut canonical = findings.to_vec();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveFindingRecord {
+    vulnerability_id: Box<str>,
+    package_name: Box<str>,
+    package_version: Box<str>,
+    package_purl: Option<Box<str>>,
+    severity: Severity,
+}
+
+impl ActiveFindingRecord {
+    fn to_reported_finding(&self) -> ReportedFinding {
+        let mut finding = ReportedFinding::new(
+            self.vulnerability_id.clone(),
+            crate::PackageCoordinate {
+                name: self.package_name.clone(),
+                version: self.package_version.clone(),
+                purl: self.package_purl.clone(),
+            },
+        );
+        finding.severity = self.severity;
+        finding
+    }
+}
+
+impl From<&ReportedFinding> for ActiveFindingRecord {
+    fn from(finding: &ReportedFinding) -> Self {
+        Self {
+            vulnerability_id: finding.vulnerability_id.clone(),
+            package_name: finding.package.name.clone(),
+            package_version: finding.package.version.clone(),
+            package_purl: finding.package.purl.clone(),
+            severity: finding.severity,
+        }
+    }
+}
+
+fn canonicalize_findings(findings: &[ReportedFinding]) -> Vec<ActiveFindingRecord> {
+    let mut canonical = findings
+        .iter()
+        .map(ActiveFindingRecord::from)
+        .collect::<Vec<_>>();
     canonical.sort_unstable_by(finding_sort_key);
     canonical.dedup_by(|left, right| finding_dedup_key(left) == finding_dedup_key(right));
     canonical
@@ -207,19 +258,13 @@ fn canonicalize_findings(findings: &[ReportedFinding]) -> Vec<ReportedFinding> {
 
 pub(crate) fn canonicalize_reported_findings(findings: &[ReportedFinding]) -> Vec<ReportedFinding> {
     canonicalize_findings(findings)
+        .into_iter()
+        .map(|finding| finding.to_reported_finding())
+        .collect()
 }
 
-fn finding_sort_key(left: &ReportedFinding, right: &ReportedFinding) -> std::cmp::Ordering {
+fn finding_sort_key(left: &ActiveFindingRecord, right: &ActiveFindingRecord) -> std::cmp::Ordering {
     finding_dedup_key(left).cmp(&finding_dedup_key(right))
-}
-
-fn operator_finding_sort_key(
-    left: &ReportedFinding,
-    right: &ReportedFinding,
-) -> std::cmp::Ordering {
-    severity_rank(right.severity)
-        .cmp(&severity_rank(left.severity))
-        .then_with(|| finding_dedup_key(left).cmp(&finding_dedup_key(right)))
 }
 
 const fn severity_rank(value: Severity) -> u8 {
@@ -243,12 +288,12 @@ const fn normalize_page_limit(limit: usize) -> usize {
     }
 }
 
-fn finding_dedup_key(finding: &ReportedFinding) -> FindingDedupKey<'_> {
+fn finding_dedup_key(finding: &ActiveFindingRecord) -> FindingDedupKey<'_> {
     FindingDedupKey {
         vulnerability_id: finding.vulnerability_id.as_ref(),
-        package_name: finding.package.name.as_ref(),
-        package_version: finding.package.version.as_ref(),
-        package_purl: finding.package.purl.as_deref(),
+        package_name: finding.package_name.as_ref(),
+        package_version: finding.package_version.as_ref(),
+        package_purl: finding.package_purl.as_deref(),
     }
 }
 
