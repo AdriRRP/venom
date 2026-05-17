@@ -170,7 +170,11 @@ async fn register_collection(
 async fn list_collections(
     State(state): State<ApiState>,
 ) -> Result<Json<ListCollectionsResponse>, ApiError> {
-    Ok(Json(state.read_snapshot().list_collections()))
+    let response = state
+        .read_snapshot()
+        .list_collections()
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
 }
 
 async fn collection_detail(
@@ -679,6 +683,11 @@ mod tests {
             "release:2026.05"
         );
         assert_eq!(payload["collections"][0]["members"], 1);
+        assert_eq!(
+            payload["collections"][0]["scan_schedule"],
+            serde_json::Value::Null
+        );
+        assert_eq!(payload["collections"][0]["due_now"], false);
 
         let response = router
             .oneshot(
@@ -776,6 +785,71 @@ mod tests {
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["scan_schedule"]["cadence_minutes"], 60);
         assert_eq!(payload["scan_schedule"]["freshness"], "deterministic");
+    }
+
+    #[tokio::test]
+    async fn api_lists_scheduled_collections_with_due_state() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-operations", "state"),
+                temp_path("collection-operations", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"collection_key":"release:2026.07","name":"July Release"}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("second collection request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get("/collections")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("list collections request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(
+            payload["collections"][0]["collection_key"],
+            "release:2026.05"
+        );
+        assert_eq!(payload["collections"][0]["due_now"], true);
+        assert_eq!(
+            payload["collections"][0]["scan_schedule"]["cadence_minutes"],
+            60
+        );
+        assert_eq!(
+            payload["collections"][1]["collection_key"],
+            "release:2026.07"
+        );
+        assert_eq!(
+            payload["collections"][1]["scan_schedule"],
+            serde_json::Value::Null
+        );
+        assert_eq!(payload["collections"][1]["due_now"], false);
     }
 
     #[tokio::test]

@@ -106,23 +106,32 @@ impl AppReadSnapshot {
         })
     }
 
-    #[must_use]
-    pub fn list_collections(&self) -> ListCollectionsResponse {
+    /// Query the operator-facing collection board with schedule and due state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the current system time cannot be read.
+    pub fn list_collections(&self) -> Result<ListCollectionsResponse, AppServiceError> {
+        let now_unix_ms = current_unix_millis()?;
         let collections = self
             .inventory
-            .collections()
+            .collection_operations_summaries(now_unix_ms)
             .into_iter()
             .map(|collection| CollectionSummary {
                 collection_key: collection.collection_key.into(),
                 name: collection.name.into(),
-                members: collection.component_keys.len(),
+                members: collection.members,
+                scan_schedule: collection
+                    .scan_schedule
+                    .map(CollectionScanScheduleItem::from),
+                due_now: collection.due_now,
             })
             .collect::<Vec<_>>();
         let managed_collections = collections.len();
-        ListCollectionsResponse {
+        Ok(ListCollectionsResponse {
             managed_collections,
             collections,
-        }
+        })
     }
 
     /// Query one managed collection detail by key.
@@ -1021,6 +1030,8 @@ pub struct CollectionSummary {
     pub collection_key: String,
     pub name: String,
     pub members: usize,
+    pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub due_now: bool,
 }
 
 #[derive(Debug, Serialize)]
