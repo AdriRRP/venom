@@ -1,13 +1,14 @@
 use crate::infra::http_integration_publisher::{
     HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher,
 };
-use crate::infra::postgres_backend::PostgresBackend;
+use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresBackend};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration,
+    CollectionScanScheduler, ComponentInventory, ComponentRegistration, DurableScanRuntime,
     DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
@@ -36,6 +37,7 @@ impl std::error::Error for AppServiceError {}
 
 #[derive(Debug, Clone)]
 pub struct AppReadSnapshot {
+    inventory: ComponentInventory,
     read_model: FindingReadModel,
     command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
 }
@@ -103,6 +105,68 @@ impl AppReadSnapshot {
             status: status.as_str().to_owned(),
         })
     }
+
+    /// Query the operator-facing collection board with schedule and due state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the current system time cannot be read.
+    pub fn list_collections(&self) -> Result<ListCollectionsResponse, AppServiceError> {
+        let now_unix_ms = current_unix_millis()?;
+        let collections = self
+            .inventory
+            .collection_operations_summaries(now_unix_ms)
+            .into_iter()
+            .map(|collection| CollectionSummary {
+                collection_key: collection.collection_key.into(),
+                name: collection.name.into(),
+                members: collection.members,
+                scan_schedule: collection
+                    .scan_schedule
+                    .map(CollectionScanScheduleItem::from),
+                due_now: collection.due_now,
+            })
+            .collect::<Vec<_>>();
+        let managed_collections = collections.len();
+        Ok(ListCollectionsResponse {
+            managed_collections,
+            collections,
+        })
+    }
+
+    /// Query one managed collection detail by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError::NotFound`] when the collection is unknown.
+    pub fn collection_detail(
+        &self,
+        collection_key: &str,
+    ) -> Result<CollectionDetailResponse, AppServiceError> {
+        let collection = self
+            .inventory
+            .collections()
+            .into_iter()
+            .find(|collection| collection.collection_key.as_ref() == collection_key)
+            .ok_or_else(|| {
+                AppServiceError::NotFound(format!("unknown collection: {collection_key}"))
+            })?;
+
+        Ok(CollectionDetailResponse {
+            collection_key: collection.collection_key.into(),
+            name: collection.name.into(),
+            scan_schedule: collection
+                .scan_schedule
+                .map(CollectionScanScheduleItem::from),
+            members: collection
+                .component_keys
+                .into_iter()
+                .map(|component_key| CollectionMemberItem {
+                    component_key: component_key.into(),
+                })
+                .collect(),
+        })
+    }
 }
 
 pub struct AppService {
@@ -156,10 +220,12 @@ impl AppService {
     pub fn read_snapshot(&self) -> AppReadSnapshot {
         match &self.backend {
             AppBackend::Local(local) => AppReadSnapshot {
+                inventory: local.state.ingestion().inventory().clone(),
                 read_model: local.state.read_model().clone(),
                 command_statuses: local.runtime.command_statuses_snapshot(),
             },
             AppBackend::Postgres(postgres) => AppReadSnapshot {
+                inventory: postgres.inventory_snapshot(),
                 read_model: postgres.read_model_snapshot(),
                 command_statuses: postgres.command_statuses_snapshot(),
             },
@@ -221,6 +287,141 @@ impl AppService {
         Ok(BindArtifactResponse {
             change: result.change.as_str().to_owned(),
             bound_artifacts: result.bound_artifacts,
+        })
+    }
+
+    /// Create one closed release collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn register_collection(
+        &mut self,
+        request: CollectionRegistrationRequest,
+    ) -> Result<RegisterCollectionResponse, AppServiceError> {
+        let registration = CollectionRegistration::new(request.collection_key, request.name);
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .register_collection(registration)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .register_collection(registration)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(RegisterCollectionResponse {
+            change: result.change.as_str().to_owned(),
+            managed_collections: result.managed_collections,
+        })
+    }
+
+    /// Add one managed component to one closed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        request: CollectionMembershipRequest,
+    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .add_component_to_collection(collection_key, &request.component_key)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .add_component_to_collection(collection_key, &request.component_key)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(CollectionMembershipResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
+        })
+    }
+
+    /// Remove one managed component from one closed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .remove_component_from_collection(collection_key, component_key)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .remove_component_from_collection(collection_key, component_key)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(CollectionMembershipResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
+        })
+    }
+
+    /// Configure one periodic scan schedule for one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or the durable write fails.
+    pub async fn configure_collection_scan_schedule(
+        &mut self,
+        collection_key: &str,
+        request: ConfigureCollectionScanScheduleRequest,
+    ) -> Result<ConfigureCollectionScanScheduleResponse, AppServiceError> {
+        let freshness = parse_freshness(&request.freshness)?;
+        if request.cadence_minutes == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "cadence_minutes must be greater than zero".to_owned(),
+            ));
+        }
+        let next_due_at_unix_ms = current_unix_millis()?;
+
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .configure_collection_scan_schedule(
+                    collection_key,
+                    request.cadence_minutes,
+                    freshness,
+                    next_due_at_unix_ms,
+                )
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .configure_collection_scan_schedule(
+                    collection_key,
+                    request.cadence_minutes,
+                    freshness,
+                    next_due_at_unix_ms,
+                )
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        let Some(schedule) = result.schedule else {
+            return Err(AppServiceError::InvalidRequest(format!(
+                "unknown collection: {collection_key}"
+            )));
+        };
+
+        Ok(ConfigureCollectionScanScheduleResponse {
+            change: result.change.as_str().to_owned(),
+            collection_key: collection_key.to_owned(),
+            cadence_minutes: schedule.cadence_minutes,
+            freshness: freshness_name(schedule.freshness).to_owned(),
+            next_due_at_unix_ms: schedule.next_due_at_unix_ms,
         })
     }
 
@@ -364,6 +565,133 @@ impl AppService {
             artifact_identity: request.artifact_identity,
             freshness: request.freshness,
         })
+    }
+
+    /// Create and durably enqueue one canonical scan batch for one closed release collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid, the collection is unmanaged,
+    /// or the durable runtime cannot append the commands.
+    pub async fn request_collection_scan(
+        &mut self,
+        collection_key: &str,
+        request: RequestCollectionScanCommand,
+    ) -> Result<RequestCollectionScanResponse, AppServiceError> {
+        let freshness = parse_freshness(&request.freshness)?;
+        let command_ids = match &mut self.backend {
+            AppBackend::Local(local) => {
+                let batch = ScanPlanner::new(local.state.ingestion().inventory())
+                    .plan_collection(collection_key, freshness)
+                    .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+                let mut command_ids = Vec::with_capacity(batch.requests.len());
+                for scan_request in batch.requests {
+                    let command = local
+                        .runtime
+                        .enqueue(scan_request)
+                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                    command_ids.push(command.command_id.into());
+                }
+                command_ids
+            }
+            AppBackend::Postgres(postgres) => postgres
+                .request_collection_scan(collection_key, freshness)
+                .await
+                .map_err(AppServiceError::State)?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        };
+
+        Ok(RequestCollectionScanResponse {
+            collection_key: collection_key.to_owned(),
+            freshness: request.freshness,
+            enqueued: command_ids.len(),
+            command_ids,
+        })
+    }
+
+    /// Materialize due collection scan schedules into canonical durable scan commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or the durable state fails.
+    pub async fn run_collection_scan_worker_until_idle(
+        &mut self,
+        request: DrainCollectionScanWorkerCommand,
+    ) -> Result<DrainCollectionScanWorkerResponse, AppServiceError> {
+        let max_collections = request.max_collections.ok_or_else(|| {
+            AppServiceError::InvalidRequest("max_collections is required".to_owned())
+        })?;
+        if max_collections == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "max_collections must be greater than zero".to_owned(),
+            ));
+        }
+
+        let now_unix_ms = current_unix_millis()?;
+        match &mut self.backend {
+            AppBackend::Local(local) => {
+                let mut inventory = local.state.ingestion().inventory().clone();
+                let due_scans = CollectionScanScheduler::new(&mut inventory)
+                    .collect_due(now_unix_ms, max_collections);
+
+                for due_scan in &due_scans {
+                    local
+                        .state
+                        .record_collection_scan_materialization(
+                            due_scan.collection_key.as_ref(),
+                            due_scan.next_due_at_unix_ms,
+                            now_unix_ms,
+                            u32::try_from(due_scan.requests.len()).map_err(|_| {
+                                AppServiceError::State(
+                                    "collection scheduler command count overflow".to_owned(),
+                                )
+                            })?,
+                        )
+                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                }
+
+                let processed_collections = due_scans.len();
+                let mut enqueued_commands = 0_usize;
+                let mut last_collection_key = None;
+                for due_scan in due_scans {
+                    enqueued_commands += due_scan.requests.len();
+                    last_collection_key = Some(due_scan.collection_key.to_string());
+                    for scan_request in due_scan.requests {
+                        let _ = local
+                            .runtime
+                            .enqueue(scan_request)
+                            .map_err(|error| AppServiceError::State(error.to_string()))?;
+                    }
+                }
+
+                let pending_due_remaining =
+                    inventory.due_collection_keys(now_unix_ms, usize::MAX).len();
+                let outcome = if processed_collections == 0 {
+                    "idle"
+                } else if pending_due_remaining == 0 {
+                    "drained"
+                } else {
+                    "limited"
+                };
+
+                Ok(DrainCollectionScanWorkerResponse {
+                    outcome: outcome.to_owned(),
+                    processed_collections,
+                    enqueued_commands,
+                    pending_due_remaining,
+                    last_collection_key,
+                })
+            }
+            AppBackend::Postgres(postgres) => {
+                let result = postgres
+                    .drain_due_collection_scans(max_collections, now_unix_ms)
+                    .await
+                    .map_err(AppServiceError::State)?;
+                Ok(DrainCollectionScanWorkerResponse::from(result))
+            }
+        }
     }
 
     /// Drain pending scan commands through one bounded worker loop.
@@ -666,6 +994,78 @@ pub struct RegisterComponentResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CollectionRegistrationRequest {
+    pub collection_key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterCollectionResponse {
+    pub change: String,
+    pub managed_collections: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CollectionMembershipRequest {
+    pub component_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionMembershipResponse {
+    pub change: String,
+    pub members: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListCollectionsResponse {
+    pub managed_collections: usize,
+    pub collections: Vec<CollectionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionSummary {
+    pub collection_key: String,
+    pub name: String,
+    pub members: usize,
+    pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub due_now: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionDetailResponse {
+    pub collection_key: String,
+    pub name: String,
+    pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionMemberItem {
+    pub component_key: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CollectionScanScheduleItem {
+    pub cadence_minutes: u32,
+    pub freshness: &'static str,
+    pub next_due_at_unix_ms: u64,
+    pub last_materialized_at_unix_ms: Option<u64>,
+    pub last_enqueued_commands: Option<u32>,
+}
+
+impl From<venom_domain::CollectionScanSchedule> for CollectionScanScheduleItem {
+    fn from(value: venom_domain::CollectionScanSchedule) -> Self {
+        Self {
+            cadence_minutes: value.cadence_minutes,
+            freshness: freshness_name(value.freshness),
+            next_due_at_unix_ms: value.next_due_at_unix_ms,
+            last_materialized_at_unix_ms: value.last_materialized_at_unix_ms,
+            last_enqueued_commands: value.last_enqueued_commands,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct BindArtifactRequest {
     pub artifact_kind: String,
     pub artifact_identity: String,
@@ -686,6 +1086,21 @@ pub struct ConfigureProviderRequest {
 pub struct ConfigureProviderResponse {
     pub change: String,
     pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureCollectionScanScheduleRequest {
+    pub cadence_minutes: u32,
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigureCollectionScanScheduleResponse {
+    pub change: String,
+    pub collection_key: String,
+    pub cadence_minutes: u32,
+    pub freshness: String,
+    pub next_due_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -802,6 +1217,45 @@ pub struct RequestScanResponse {
     pub freshness: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RequestCollectionScanCommand {
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestCollectionScanResponse {
+    pub collection_key: String,
+    pub freshness: String,
+    pub enqueued: usize,
+    pub command_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DrainCollectionScanWorkerCommand {
+    pub max_collections: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DrainCollectionScanWorkerResponse {
+    pub outcome: String,
+    pub processed_collections: usize,
+    pub enqueued_commands: usize,
+    pub pending_due_remaining: usize,
+    pub last_collection_key: Option<String>,
+}
+
+impl From<DrainDueCollectionScansResult> for DrainCollectionScanWorkerResponse {
+    fn from(value: DrainDueCollectionScansResult) -> Self {
+        Self {
+            outcome: value.outcome.into(),
+            processed_collections: value.processed_collections,
+            enqueued_commands: value.enqueued_commands,
+            pending_due_remaining: value.pending_due_remaining,
+            last_collection_key: value.last_collection_key.map(Into::into),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScanCommandStatusResponse {
     pub command_id: String,
@@ -888,6 +1342,21 @@ fn parse_freshness(value: &str) -> Result<EvidenceFreshness, AppServiceError> {
             "unsupported freshness: {value}"
         ))),
     }
+}
+
+const fn freshness_name(value: EvidenceFreshness) -> &'static str {
+    match value {
+        EvidenceFreshness::Deterministic => "deterministic",
+        EvidenceFreshness::Live => "live",
+    }
+}
+
+fn current_unix_millis() -> Result<u64, AppServiceError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppServiceError::State(error.to_string()))?;
+    u64::try_from(duration.as_millis())
+        .map_err(|_| AppServiceError::State("current unix millis overflow".to_owned()))
 }
 
 fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {

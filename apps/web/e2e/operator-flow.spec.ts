@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("operator flow registers, scans, and queries one active finding", async ({
+test("operator flow registers, targets one collection, scans, and queries one active finding", async ({
 	page,
 }) => {
 	await page.goto("/operations");
@@ -8,14 +8,34 @@ test("operator flow registers, scans, and queries one active finding", async ({
 	await page.getByRole("button", { name: "Register" }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
 
+	await page.getByRole("button", { name: "Create Collection" }).click();
+	await expect(page.getByText(/Managed collections: 1\./i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Add Component" }).click();
+	await expect(page.getByText(/Members: 1\./i)).toBeVisible();
+	await expect(page.getByText(/release:2026.05/i)).toBeVisible();
+
 	await page.getByRole("button", { name: "Bind Artifact" }).click();
 	await expect(page.getByText(/Bound artifacts: 1\./i)).toBeVisible();
 
 	await page.getByRole("button", { name: "Configure Provider" }).click();
 	await expect(page.getByText(/Provider: fixture-provider\./i)).toBeVisible();
 
-	await page.getByRole("button", { name: "Request Scan" }).click();
-	await expect(page.getByText(/Command: scan-command-/i)).toBeVisible();
+	await page
+		.getByRole("button", { name: "Configure Collection Schedule" })
+		.click();
+	await expect(page.getByText(/Cadence: 60 minutes\./i)).toBeVisible();
+	await expect(page.getByText(/Due now: 1\./i)).toBeVisible();
+	await expect(page.getByText(/due now - every 60 minutes/i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Run Collection Scheduler" }).click();
+	await expect(
+		page.getByText(/Processed collections: 1\. Enqueued commands: 1\./i),
+	).toBeVisible();
+	await expect(page.getByText(/last run \d+ - last enqueued 1/i)).toBeVisible();
+	await expect(
+		page.getByText(/Last run at \d+\. Last enqueued commands: 1\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();

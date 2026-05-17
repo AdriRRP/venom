@@ -2,15 +2,17 @@ use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CompletedScanCommand,
-    ComponentRegistration, ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
-    ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FailedScanCommand,
-    FindingChangeSet, FindingIngestion, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublicationFailure,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, PendingIntegrationEvent,
-    ProviderScanReport, PublishIntegrationEventsResult, RegisterComponentChange,
-    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
-    ScanRequest, as_provider_error, validate_provider_scan_report,
+    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
+    CollectionScanScheduler, CompletedScanCommand, ComponentInventory, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
+    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, RegisterCollectionChange, RegisterCollectionResult,
+    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -23,6 +25,15 @@ pub struct PostgresBackend {
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainDueCollectionScansResult {
+    pub outcome: Box<str>,
+    pub processed_collections: usize,
+    pub enqueued_commands: usize,
+    pub pending_due_remaining: usize,
+    pub last_collection_key: Option<Box<str>>,
 }
 
 impl PostgresBackend {
@@ -80,6 +91,34 @@ impl PostgresBackend {
         Ok(result)
     }
 
+    /// Durably create one closed release collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn register_collection(
+        &mut self,
+        registration: CollectionRegistration,
+    ) -> Result<RegisterCollectionResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .register_collection(registration.clone());
+        if result.change == RegisterCollectionChange::Created {
+            sqlx::query(&format!(
+                "INSERT INTO {} (collection_key, name) VALUES ($1, $2)",
+                self.names.collections
+            ))
+            .bind(registration.collection_key.as_ref())
+            .bind(registration.name.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably bind one immutable artifact to one managed component in Postgres.
     ///
     /// # Errors
@@ -105,6 +144,105 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres artifact binding insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably add one managed component to one collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<venom_domain::AddCollectionComponentResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .add_component_to_collection(collection_key, component_key);
+        if result.change == venom_domain::AddCollectionComponentChange::Added {
+            sqlx::query(&format!(
+                concat!("INSERT INTO {} (collection_key, component_key) VALUES ($1, $2)"),
+                self.names.collection_memberships
+            ))
+            .bind(collection_key)
+            .bind(component_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably remove one managed component from one collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<venom_domain::RemoveCollectionComponentResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .remove_component_from_collection(collection_key, component_key);
+        if result.change == venom_domain::RemoveCollectionComponentChange::Removed {
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE collection_key = $1 AND component_key = $2",
+                self.names.collection_memberships
+            ))
+            .bind(collection_key)
+            .bind(component_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably configure one periodic collection scan schedule in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn configure_collection_scan_schedule(
+        &mut self,
+        collection_key: &str,
+        cadence_minutes: u32,
+        freshness: EvidenceFreshness,
+        next_due_at_unix_ms: u64,
+    ) -> Result<ConfigureCollectionScanScheduleResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .configure_collection_scan_schedule(
+                collection_key,
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
+            );
+        if result.change == ConfigureCollectionScanScheduleChange::Configured {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (collection_key, cadence_minutes, freshness, next_due_at_unix_ms) VALUES ($1, $2, $3, $4) ",
+                    "ON CONFLICT (collection_key) DO UPDATE SET cadence_minutes = EXCLUDED.cadence_minutes, freshness = EXCLUDED.freshness, next_due_at_unix_ms = EXCLUDED.next_due_at_unix_ms, updated_at = NOW()"
+                ),
+                self.names.collection_scan_schedules
+            ))
+            .bind(collection_key)
+            .bind(i32::try_from(cadence_minutes).map_err(|_| "cadence_minutes overflow".to_owned())?)
+            .bind(freshness_name(freshness))
+            .bind(i64::try_from(next_due_at_unix_ms).map_err(|_| "next due overflow".to_owned())?)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection scan schedule upsert failed: {error}"))?;
             self.ingestion = candidate;
         }
         Ok(result)
@@ -256,6 +394,11 @@ impl PostgresBackend {
     }
 
     #[must_use]
+    pub fn inventory_snapshot(&self) -> ComponentInventory {
+        self.ingestion.inventory().clone()
+    }
+
+    #[must_use]
     pub fn pending_commands(&self) -> usize {
         self.commands
             .values()
@@ -328,6 +471,253 @@ impl PostgresBackend {
             },
         );
         Ok(command_id)
+    }
+
+    /// Durably enqueue one canonical scan batch for one managed collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the collection is unmanaged or the durable write fails.
+    pub async fn request_collection_scan(
+        &mut self,
+        collection_key: &str,
+        freshness: EvidenceFreshness,
+    ) -> Result<Vec<Box<str>>, String> {
+        let batch = ScanPlanner::new(self.ingestion.inventory())
+            .plan_collection(collection_key, freshness)
+            .map_err(|error| error.as_str().to_owned())?;
+
+        if batch.requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let command_ids = (0..batch.requests.len())
+            .map(|_| next_command_id())
+            .collect::<Vec<_>>();
+
+        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+            "INSERT INTO {} (command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
+            self.names.scan_commands
+        ));
+        query_builder.push_values(
+            command_ids.iter().zip(batch.requests.iter()),
+            |mut row, (command_id, request)| {
+                row.push_bind(command_id.as_ref())
+                    .push_bind(request.component_key.as_ref())
+                    .push_bind(artifact_kind_name(request.artifact.kind))
+                    .push_bind(request.artifact.identity.as_ref())
+                    .push_bind(freshness_name(request.freshness))
+                    .push_bind(scan_command_status_name(ScanCommandStatus::Pending));
+            },
+        );
+        query_builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
+
+        for (command_id, request) in command_ids.iter().cloned().zip(batch.requests) {
+            self.order.push(command_id.clone());
+            self.commands.insert(
+                command_id,
+                ScanCommandRecord {
+                    request,
+                    status: ScanCommandStatus::Pending,
+                },
+            );
+        }
+
+        Ok(command_ids)
+    }
+
+    /// Durably materialize due collection scan schedules into canonical pending commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn drain_due_collection_scans(
+        &mut self,
+        max_collections: usize,
+        now_unix_ms: u64,
+    ) -> Result<DrainDueCollectionScansResult, String> {
+        if max_collections == 0 {
+            return Ok(DrainDueCollectionScansResult {
+                outcome: "idle".into(),
+                processed_collections: 0,
+                enqueued_commands: 0,
+                pending_due_remaining: 0,
+                last_collection_key: None,
+            });
+        }
+
+        let mut candidate_ingestion = self.ingestion.clone();
+        let due_scans = CollectionScanScheduler::new(candidate_ingestion.inventory_mut())
+            .collect_due(now_unix_ms, max_collections);
+        let pending_due_remaining = candidate_ingestion
+            .inventory()
+            .due_collection_keys(now_unix_ms, usize::MAX)
+            .len();
+        let processed_collections = due_scans.len();
+        if due_scans.is_empty() {
+            return Ok(DrainDueCollectionScansResult {
+                outcome: "idle".into(),
+                processed_collections: 0,
+                enqueued_commands: 0,
+                pending_due_remaining,
+                last_collection_key: None,
+            });
+        }
+
+        let schedule_rows = due_scans
+            .iter()
+            .map(|due_scan| {
+                let schedule = candidate_ingestion
+                    .inventory()
+                    .collection_scan_schedule(due_scan.collection_key.as_ref())
+                    .expect("scheduled collection should still exist after scheduler pass");
+                (due_scan.collection_key.clone(), schedule)
+            })
+            .collect::<Vec<_>>();
+        let all_requests = due_scans
+            .iter()
+            .flat_map(|due_scan| due_scan.requests.iter().cloned())
+            .collect::<Vec<_>>();
+        let command_ids = (0..all_requests.len())
+            .map(|_| next_command_id())
+            .collect::<Vec<_>>();
+
+        let mut transaction = self.begin_transaction().await?;
+        self.insert_pending_scan_commands(&mut transaction, &command_ids, &all_requests)
+            .await?;
+        self.upsert_collection_scan_schedules(&mut transaction, &schedule_rows)
+            .await?;
+        self.commit_transaction(transaction).await?;
+
+        self.ingestion = candidate_ingestion;
+        for (command_id, request) in command_ids.iter().cloned().zip(all_requests) {
+            self.order.push(command_id.clone());
+            self.commands.insert(
+                command_id,
+                ScanCommandRecord {
+                    request,
+                    status: ScanCommandStatus::Pending,
+                },
+            );
+        }
+
+        Ok(DrainDueCollectionScansResult {
+            outcome: if pending_due_remaining == 0 {
+                "drained".into()
+            } else {
+                "limited".into()
+            },
+            processed_collections,
+            enqueued_commands: command_ids.len(),
+            pending_due_remaining,
+            last_collection_key: due_scans
+                .last()
+                .map(|due_scan| due_scan.collection_key.clone()),
+        })
+    }
+
+    async fn begin_transaction(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, String> {
+        self.pool
+            .begin()
+            .await
+            .map_err(|error| format!("postgres transaction begin failed: {error}"))
+    }
+
+    async fn commit_transaction(
+        &self,
+        transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), String> {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("postgres transaction commit failed: {error}"))
+    }
+
+    async fn insert_pending_scan_commands(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        command_ids: &[Box<str>],
+        requests: &[ScanRequest],
+    ) -> Result<(), String> {
+        if requests.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+            "INSERT INTO {} (command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
+            self.names.scan_commands
+        ));
+        query_builder.push_values(
+            command_ids.iter().zip(requests.iter()),
+            |mut row, (command_id, request)| {
+                row.push_bind(command_id.as_ref())
+                    .push_bind(request.component_key.as_ref())
+                    .push_bind(artifact_kind_name(request.artifact.kind))
+                    .push_bind(request.artifact.identity.as_ref())
+                    .push_bind(freshness_name(request.freshness))
+                    .push_bind(scan_command_status_name(ScanCommandStatus::Pending));
+            },
+        );
+        query_builder
+            .build()
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| format!("postgres due collection scan insert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn upsert_collection_scan_schedules(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        schedule_rows: &[(Box<str>, venom_domain::CollectionScanSchedule)],
+    ) -> Result<(), String> {
+        if schedule_rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+            "INSERT INTO {} (collection_key, cadence_minutes, freshness, next_due_at_unix_ms, last_materialized_at_unix_ms, last_enqueued_commands) ",
+            self.names.collection_scan_schedules
+        ));
+        query_builder.push_values(
+            schedule_rows.iter(),
+            |mut row, (collection_key, schedule)| {
+                row.push_bind(collection_key.as_ref())
+                    .push_bind(
+                        i32::try_from(schedule.cadence_minutes).expect("cadence should fit i32"),
+                    )
+                    .push_bind(freshness_name(schedule.freshness))
+                    .push_bind(
+                        i64::try_from(schedule.next_due_at_unix_ms)
+                            .expect("next due should fit i64"),
+                    )
+                    .push_bind(schedule.last_materialized_at_unix_ms.map(|value| {
+                        i64::try_from(value).expect("last materialized should fit i64")
+                    }))
+                    .push_bind(
+                        schedule
+                            .last_enqueued_commands
+                            .map(i32::try_from)
+                            .transpose()
+                            .expect("last command count should fit i32"),
+                    );
+            },
+        );
+        query_builder.push(
+            " ON CONFLICT (collection_key) DO UPDATE SET cadence_minutes = EXCLUDED.cadence_minutes, freshness = EXCLUDED.freshness, next_due_at_unix_ms = EXCLUDED.next_due_at_unix_ms, last_materialized_at_unix_ms = EXCLUDED.last_materialized_at_unix_ms, last_enqueued_commands = EXCLUDED.last_enqueued_commands, updated_at = NOW()",
+        );
+        query_builder
+            .build()
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                format!("postgres collection scan schedule batch upsert failed: {error}")
+            })?;
+        Ok(())
     }
 
     #[must_use]
@@ -658,6 +1048,9 @@ impl PostgresBackend {
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
         self.create_components_table().await?;
+        self.create_collections_table().await?;
+        self.create_collection_memberships_table().await?;
+        self.create_collection_scan_schedules_table().await?;
         self.create_artifact_bindings_table().await?;
         self.create_provider_runtime_configs_table().await?;
         self.create_integration_runtime_config_table().await?;
@@ -682,6 +1075,82 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres components table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collections_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT PRIMARY KEY, ",
+                "name TEXT NOT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collection_memberships_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT NOT NULL REFERENCES {}(collection_key) ON DELETE CASCADE, ",
+                "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "PRIMARY KEY (collection_key, component_key)",
+                ")"
+            ),
+            self.names.collection_memberships, self.names.collections, self.names.components
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection memberships table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collection_scan_schedules_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT PRIMARY KEY REFERENCES {}(collection_key) ON DELETE CASCADE, ",
+                "cadence_minutes INTEGER NOT NULL, ",
+                "freshness TEXT NOT NULL, ",
+                "next_due_at_unix_ms BIGINT NOT NULL, ",
+                "last_materialized_at_unix_ms BIGINT NULL, ",
+                "last_enqueued_commands INTEGER NULL, ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.collection_scan_schedules, self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection scan schedules table create failed: {error}")
+        })?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS last_materialized_at_unix_ms BIGINT NULL",
+            self.names.collection_scan_schedules
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection scan schedules add last_materialized_at failed: {error}")
+        })?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS last_enqueued_commands INTEGER NULL",
+            self.names.collection_scan_schedules
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection scan schedules add last_enqueued_commands failed: {error}")
+        })?;
         Ok(())
     }
 
@@ -826,6 +1295,9 @@ impl PostgresBackend {
         self.pending_integration_events.clear();
 
         self.load_components().await?;
+        self.load_collections().await?;
+        self.load_collection_memberships().await?;
+        self.load_collection_scan_schedules().await?;
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
         self.load_integration_runtime_config().await?;
@@ -854,6 +1326,112 @@ impl PostgresBackend {
             }
         }
 
+        Ok(())
+    }
+
+    async fn load_collections(&mut self) -> Result<(), String> {
+        let collections = sqlx::query_as::<_, (String, String)>(&format!(
+            "SELECT collection_key, name FROM {} ORDER BY created_at, collection_key",
+            self.names.collections
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections load failed: {error}"))?;
+        for (collection_key, name) in collections {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .register_collection(CollectionRegistration::new(collection_key, name));
+            if result.change == RegisterCollectionChange::Rejected {
+                return Err("postgres collections contain conflicting registration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_collection_memberships(&mut self) -> Result<(), String> {
+        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT collection_key, component_key FROM {} ",
+                "ORDER BY created_at, collection_key, component_key"
+            ),
+            self.names.collection_memberships
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection memberships load failed: {error}"))?;
+        for (collection_key, component_key) in memberships {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .add_component_to_collection(&collection_key, &component_key);
+            if result.change == venom_domain::AddCollectionComponentChange::Rejected {
+                return Err("postgres collection memberships contain invalid ownership".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_collection_scan_schedules(&mut self) -> Result<(), String> {
+        let schedules = sqlx::query_as::<_, (String, i32, String, i64, Option<i64>, Option<i32>)>(&format!(
+            concat!(
+                "SELECT collection_key, cadence_minutes, freshness, next_due_at_unix_ms, last_materialized_at_unix_ms, last_enqueued_commands ",
+                "FROM {} ORDER BY collection_key"
+            ),
+            self.names.collection_scan_schedules
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection scan schedules load failed: {error}"))?;
+        for (
+            collection_key,
+            cadence_minutes,
+            freshness,
+            next_due_at_unix_ms,
+            last_materialized_at_unix_ms,
+            last_enqueued_commands,
+        ) in schedules
+        {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .configure_collection_scan_schedule(
+                    &collection_key,
+                    u32::try_from(cadence_minutes)
+                        .map_err(|_| "postgres schedule cadence must be positive".to_owned())?,
+                    parse_freshness(&freshness)?,
+                    u64::try_from(next_due_at_unix_ms)
+                        .map_err(|_| "postgres schedule next due must be positive".to_owned())?,
+                );
+            if result.change == ConfigureCollectionScanScheduleChange::Rejected {
+                return Err(
+                    "postgres collection scan schedules contain invalid configuration".to_owned(),
+                );
+            }
+            if let Some(materialized_at) = last_materialized_at_unix_ms {
+                let materialized_result = self
+                    .ingestion
+                    .inventory_mut()
+                    .record_collection_scan_materialization(
+                        &collection_key,
+                        u64::try_from(next_due_at_unix_ms).map_err(|_| {
+                            "postgres schedule next due must be positive".to_owned()
+                        })?,
+                        u64::try_from(materialized_at).map_err(|_| {
+                            "postgres schedule materialized time must be positive".to_owned()
+                        })?,
+                        u32::try_from(last_enqueued_commands.unwrap_or_default()).map_err(
+                            |_| "postgres schedule command count must fit u32".to_owned(),
+                        )?,
+                    );
+                if materialized_result.change == ConfigureCollectionScanScheduleChange::Rejected {
+                    return Err(
+                        "postgres collection scan materializations contain invalid state"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1049,6 +1627,9 @@ struct ScanCommandRecord {
 struct TableNames {
     schema: Box<str>,
     components: Box<str>,
+    collections: Box<str>,
+    collection_memberships: Box<str>,
+    collection_scan_schedules: Box<str>,
     artifact_bindings: Box<str>,
     provider_runtime_configs: Box<str>,
     integration_runtime_config: Box<str>,
@@ -1062,6 +1643,10 @@ impl TableNames {
         let schema = validate_schema_name(schema)?;
         Ok(Self {
             components: format!("{schema}.components").into_boxed_str(),
+            collections: format!("{schema}.collections").into_boxed_str(),
+            collection_memberships: format!("{schema}.collection_memberships").into_boxed_str(),
+            collection_scan_schedules: format!("{schema}.collection_scan_schedules")
+                .into_boxed_str(),
             artifact_bindings: format!("{schema}.artifact_bindings").into_boxed_str(),
             provider_runtime_configs: format!("{schema}.provider_runtime_configs").into_boxed_str(),
             integration_runtime_config: format!("{schema}.integration_runtime_config")
@@ -1193,10 +1778,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
-        ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, FindingProvider,
-        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-        ReportedFinding, RunNextScanResult, ScanCommandStatus,
+        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
+        EvidenceFreshness, FindingProvider, FindingProviderError, IntegrationEvent,
+        IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RunNextScanResult,
+        ScanCommandStatus,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -1329,6 +1915,120 @@ mod tests {
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_rebuilds_release_collections() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collections");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(
+            reopened
+                .inventory_snapshot()
+                .collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_collection_scan_request_batches_pending_commands() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_scan_batch");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:billing-api",
+                "Billing API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .bind_artifact(
+                "component:billing-api",
+                ArtifactRef::new(
+                    ArtifactKind::ContainerImage,
+                    "registry.example/billing@sha256:222",
+                ),
+            )
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:billing-api")
+            .await
+            .expect("collection membership should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+
+        let command_ids = backend
+            .request_collection_scan("release:2026.05", EvidenceFreshness::Deterministic)
+            .await
+            .expect("collection scan request should persist");
+
+        assert_eq!(command_ids.len(), 2);
+        assert_eq!(backend.pending_commands(), 2);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_commands(), 2);
+        assert_eq!(
+            reopened.command_status(command_ids[0].as_ref()),
+            Some(ScanCommandStatus::Pending)
+        );
+        assert_eq!(
+            reopened.command_status(command_ids[1].as_ref()),
+            Some(ScanCommandStatus::Pending)
+        );
     }
 
     #[tokio::test]

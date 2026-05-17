@@ -19,16 +19,21 @@ pub use integration::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 pub use inventory::{
-    BindArtifactChange, BindArtifactResult, ComponentInventory, ComponentRegistration,
-    ConfigureProviderChange, ConfigureProviderResult, RegisterComponentChange,
-    RegisterComponentResult,
+    AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange,
+    BindArtifactResult, CollectionRegistration, CollectionScanSchedule, ComponentInventory,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
+    ManagedCollection, ManagedCollectionOperationsSummary, RegisterCollectionChange,
+    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
+    RemoveCollectionComponentChange, RemoveCollectionComponentResult,
 };
 pub use scanning::{
-    CompletedScanCommand, DockerSyftGrypeProvider, DurableScanRuntime, DurableScanRuntimeError,
-    EnqueueScanResult, FailedScanCommand, FixtureBundle, FixtureSyftGrypeProvider,
-    OFFICIAL_GRYPE_IMAGE, OFFICIAL_SYFT_IMAGE, RunNextScanResult, SYFT_GRYPE_PROVIDER_KEY,
-    ScanCommandStatus, ScanExecutionError, ScanExecutionResult, ScanPlanner, ScanPlanningError,
-    artifact_identity_from_syft_json, execute_scan,
+    CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,
+    CompletedScanCommand, DockerSyftGrypeProvider, DueCollectionScan, DurableScanRuntime,
+    DurableScanRuntimeError, EnqueueScanResult, FailedScanCommand, FixtureBundle,
+    FixtureSyftGrypeProvider, OFFICIAL_GRYPE_IMAGE, OFFICIAL_SYFT_IMAGE, RunNextScanResult,
+    SYFT_GRYPE_PROVIDER_KEY, ScanCommandStatus, ScanExecutionError, ScanExecutionResult,
+    ScanPlanner, ScanPlanningError, artifact_identity_from_syft_json, execute_scan,
 };
 
 #[must_use]

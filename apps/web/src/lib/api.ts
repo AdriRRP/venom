@@ -40,6 +40,53 @@ export type RegisterComponentResponse = {
 	managed_components: number;
 };
 
+export type CollectionRegistrationRequest = {
+	collectionKey: string;
+	name: string;
+};
+
+export type RegisterCollectionResponse = {
+	change: string;
+	managed_collections: number;
+};
+
+export type CollectionMembershipRequest = {
+	componentKey: string;
+};
+
+export type CollectionMembershipResponse = {
+	change: string;
+	members: number;
+};
+
+export type CollectionSummary = {
+	collection_key: string;
+	name: string;
+	members: number;
+	scan_schedule: CollectionScanSchedule | null;
+	due_now: boolean;
+};
+
+export type ListCollectionsResponse = {
+	managed_collections: number;
+	collections: CollectionSummary[];
+};
+
+export type CollectionDetailResponse = {
+	collection_key: string;
+	name: string;
+	scan_schedule: CollectionScanSchedule | null;
+	members: Array<{ component_key: string }>;
+};
+
+export type CollectionScanSchedule = {
+	cadence_minutes: number;
+	freshness: string;
+	next_due_at_unix_ms: number;
+	last_materialized_at_unix_ms: number | null;
+	last_enqueued_commands: number | null;
+};
+
 export type BindArtifactRequest = {
 	artifactKind: string;
 	artifactIdentity: string;
@@ -59,6 +106,20 @@ export type ConfigureProviderResponse = {
 	provider_key: string | null;
 };
 
+export type ConfigureCollectionScanSchedulePayload = {
+	collectionKey: string;
+	cadenceMinutes: number;
+	freshness: string;
+};
+
+export type ConfigureCollectionScanScheduleResponse = {
+	change: string;
+	collection_key: string;
+	cadence_minutes: number;
+	freshness: string;
+	next_due_at_unix_ms: number;
+};
+
 export type RequestScanPayload = {
 	componentKey: string;
 	artifactKind: string;
@@ -73,6 +134,18 @@ export type RequestScanResponse = {
 	artifact_kind: string;
 	artifact_identity: string;
 	freshness: string;
+};
+
+export type RequestCollectionScanPayload = {
+	collectionKey: string;
+	freshness: string;
+};
+
+export type RequestCollectionScanResponse = {
+	collection_key: string;
+	freshness: string;
+	enqueued: number;
+	command_ids: string[];
 };
 
 export type ScanCommandStatusResponse = {
@@ -106,6 +179,18 @@ export type DrainWorkerResponse = {
 	last_command_status: string | null;
 	last_error_code: string | null;
 	last_retryable: boolean | null;
+};
+
+export type DrainCollectionScanWorkerPayload = {
+	maxCollections?: number;
+};
+
+export type DrainCollectionScanWorkerResponse = {
+	outcome: string;
+	processed_collections: number;
+	enqueued_commands: number;
+	pending_due_remaining: number;
+	last_collection_key: string | null;
 };
 
 export async function fetchApiHealth(): Promise<ApiHealthState> {
@@ -159,6 +244,130 @@ export async function registerComponent(
 		);
 	}
 	return (await response.json()) as RegisterComponentResponse;
+}
+
+export async function registerCollection(
+	request: CollectionRegistrationRequest,
+): Promise<RegisterCollectionResponse> {
+	const response = await fetch("/api/collections", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			collection_key: request.collectionKey,
+			name: request.name,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`collection creation failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RegisterCollectionResponse;
+}
+
+export async function fetchCollections(): Promise<ListCollectionsResponse> {
+	const response = await fetch("/api/collections");
+	if (!response.ok) {
+		throw new Error(`collections query failed with status ${response.status}`);
+	}
+	return (await response.json()) as ListCollectionsResponse;
+}
+
+export async function fetchCollectionDetail(
+	collectionKey: string,
+): Promise<CollectionDetailResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}`,
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection detail query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as CollectionDetailResponse;
+}
+
+export async function addCollectionComponent(
+	collectionKey: string,
+	request: CollectionMembershipRequest,
+): Promise<CollectionMembershipResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}/components`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				component_key: request.componentKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection membership creation failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as CollectionMembershipResponse;
+}
+
+export async function configureCollectionScanSchedule(
+	request: ConfigureCollectionScanSchedulePayload,
+): Promise<ConfigureCollectionScanScheduleResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/scan-schedule`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				cadence_minutes: request.cadenceMinutes,
+				freshness: request.freshness,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection scan schedule failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ConfigureCollectionScanScheduleResponse;
+}
+
+export async function requestCollectionScan(
+	request: RequestCollectionScanPayload,
+): Promise<RequestCollectionScanResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/scan-requests`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				freshness: request.freshness,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection scan request failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RequestCollectionScanResponse;
+}
+
+export async function drainCollectionScanWorker(
+	request: DrainCollectionScanWorkerPayload,
+): Promise<DrainCollectionScanWorkerResponse> {
+	const response = await fetch("/api/collection-scan-workers/drain", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			max_collections: request.maxCollections,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`collection scan worker drain failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as DrainCollectionScanWorkerResponse;
 }
 
 export async function bindArtifact(

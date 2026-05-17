@@ -14,9 +14,10 @@ require_cmd() {
 wait_for_url() {
   local url="$1"
   local label="$2"
+  local max_attempts="$3"
   local attempt
 
-  for attempt in $(seq 1 60); do
+  for attempt in $(seq 1 "${max_attempts}"); do
     if curl -fsS "$url" >/dev/null 2>&1; then
       return 0
     fi
@@ -35,6 +36,8 @@ require_cmd curl
 
 api_port="${VENOM_E2E_API_PORT:-3300}"
 web_port="${VENOM_E2E_WEB_PORT:-4173}"
+api_ready_attempts="${VENOM_E2E_API_READY_ATTEMPTS:-120}"
+web_ready_attempts="${VENOM_E2E_WEB_READY_ATTEMPTS:-60}"
 api_url="http://127.0.0.1:${api_port}"
 web_url="http://127.0.0.1:${web_port}"
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/venom-web-e2e.XXXXXX")"
@@ -69,13 +72,13 @@ VENOM_API_BIND="127.0.0.1:${api_port}" \
 cargo run -p venom-api >"${api_log}" 2>&1 &
 api_pid=$!
 
-wait_for_url "${api_url}/health" "api"
+wait_for_url "${api_url}/health" "api" "${api_ready_attempts}"
 
 VITE_API_TARGET="${api_url}" \
 npm --prefix apps/web run dev -- --host 127.0.0.1 --port "${web_port}" >"${web_log}" 2>&1 &
 web_pid=$!
 
-wait_for_url "${web_url}/findings" "web"
+wait_for_url "${web_url}/findings" "web" "${web_ready_attempts}"
 
 (
   cd apps/web
