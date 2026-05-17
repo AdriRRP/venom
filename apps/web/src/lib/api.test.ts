@@ -1,10 +1,14 @@
 import {
+	addCollectionComponent,
 	bindArtifact,
 	configureProvider,
 	drainScanWorker,
 	fetchActiveFindings,
 	fetchApiHealth,
+	fetchCollectionDetail,
+	fetchCollections,
 	fetchScanCommandStatus,
+	registerCollection,
 	registerComponent,
 	requestScan,
 } from "./api";
@@ -94,6 +98,42 @@ describe("fetchApiHealth", () => {
 		);
 		expect(calls[3]?.input).toBe("/api/scan-requests");
 		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
+	});
+
+	it("serializes collection creation, membership, and read queries", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			},
+		) as typeof fetch;
+
+		await registerCollection({
+			collectionKey: "release:2026.05",
+			name: "May Release",
+		});
+		await addCollectionComponent("release:2026.05", {
+			componentKey: "component:payments-api",
+		});
+		await fetchCollections();
+		await fetchCollectionDetail("release:2026.05");
+
+		expect(calls[0]?.input).toBe("/api/collections");
+		expect(calls[0]?.init?.body).toContain(
+			'"collection_key":"release:2026.05"',
+		);
+		expect(calls[1]?.input).toBe(
+			"/api/collections/release%3A2026.05/components",
+		);
+		expect(calls[1]?.init?.body).toContain(
+			'"component_key":"component:payments-api"',
+		);
+		expect(calls[2]?.input).toBe("/api/collections");
+		expect(calls[3]?.input).toBe("/api/collections/release%3A2026.05");
 	});
 
 	it("serializes scan command lookup and worker drain payloads", async () => {

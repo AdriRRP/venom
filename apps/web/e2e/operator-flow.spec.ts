@@ -8,6 +8,13 @@ test("operator flow registers, scans, and queries one active finding", async ({
 	await page.getByRole("button", { name: "Register" }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
 
+	await page.getByRole("button", { name: "Create Collection" }).click();
+	await expect(page.getByText(/Managed collections: 1\./i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Add Component" }).click();
+	await expect(page.getByText(/Members: 1\./i)).toBeVisible();
+	await expect(page.getByText(/release:2026.05/i)).toBeVisible();
+
 	await page.getByRole("button", { name: "Bind Artifact" }).click();
 	await expect(page.getByText(/Bound artifacts: 1\./i)).toBeVisible();
 

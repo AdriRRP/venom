@@ -66,6 +66,70 @@ describe("OperationsPage", () => {
 		expect(await screen.findByText(/Change: registered/i)).toBeInTheDocument();
 	});
 
+	it("creates one collection and adds one managed component", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+							},
+						],
+						change: "created",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05/components") {
+				return new Response(
+					JSON.stringify({
+						change: "added",
+						members: 1,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						members: [{ component_key: "component:payments-api" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(screen.getByRole("button", { name: "Create Collection" }));
+		fireEvent.click(screen.getByRole("button", { name: "Add Component" }));
+
+		expect(
+			await screen.findByText(/Managed collections: 1\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/Change: added\. Members: 1\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/component:payments-api/i),
+		).toBeInTheDocument();
+	});
+
 	it("requests one canonical scan from the operator flow", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);

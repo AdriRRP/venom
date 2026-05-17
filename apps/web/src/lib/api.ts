@@ -40,6 +40,42 @@ export type RegisterComponentResponse = {
 	managed_components: number;
 };
 
+export type CollectionRegistrationRequest = {
+	collectionKey: string;
+	name: string;
+};
+
+export type RegisterCollectionResponse = {
+	change: string;
+	managed_collections: number;
+};
+
+export type CollectionMembershipRequest = {
+	componentKey: string;
+};
+
+export type CollectionMembershipResponse = {
+	change: string;
+	members: number;
+};
+
+export type CollectionSummary = {
+	collection_key: string;
+	name: string;
+	members: number;
+};
+
+export type ListCollectionsResponse = {
+	managed_collections: number;
+	collections: CollectionSummary[];
+};
+
+export type CollectionDetailResponse = {
+	collection_key: string;
+	name: string;
+	members: Array<{ component_key: string }>;
+};
+
 export type BindArtifactRequest = {
 	artifactKind: string;
 	artifactIdentity: string;
@@ -159,6 +195,69 @@ export async function registerComponent(
 		);
 	}
 	return (await response.json()) as RegisterComponentResponse;
+}
+
+export async function registerCollection(
+	request: CollectionRegistrationRequest,
+): Promise<RegisterCollectionResponse> {
+	const response = await fetch("/api/collections", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			collection_key: request.collectionKey,
+			name: request.name,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`collection creation failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RegisterCollectionResponse;
+}
+
+export async function fetchCollections(): Promise<ListCollectionsResponse> {
+	const response = await fetch("/api/collections");
+	if (!response.ok) {
+		throw new Error(`collections query failed with status ${response.status}`);
+	}
+	return (await response.json()) as ListCollectionsResponse;
+}
+
+export async function fetchCollectionDetail(
+	collectionKey: string,
+): Promise<CollectionDetailResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}`,
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection detail query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as CollectionDetailResponse;
+}
+
+export async function addCollectionComponent(
+	collectionKey: string,
+	request: CollectionMembershipRequest,
+): Promise<CollectionMembershipResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}/components`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				component_key: request.componentKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection membership creation failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as CollectionMembershipResponse;
 }
 
 export async function bindArtifact(

@@ -1,20 +1,28 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
+	addCollectionComponent,
 	bindArtifact,
 	configureProvider,
 	drainScanWorker,
 	fetchApiHealth,
+	fetchCollectionDetail,
+	fetchCollections,
 	fetchScanCommandStatus,
+	registerCollection,
 	registerComponent,
 	requestScan,
 } from "../lib/api";
 
 export function OperationsPage() {
+	const queryClient = useQueryClient();
 	const [operatorState, setOperatorState] = useState({
 		componentKey: "component:payments-api",
 		name: "Payments API",
+		collectionKey: "release:2026.05",
+		collectionName: "May Release",
+		collectionComponentKey: "component:payments-api",
 		artifactKind: "container-image",
 		artifactIdentity: "registry.example/payments@sha256:111",
 		providerKey: "fixture-provider",
@@ -42,6 +50,35 @@ export function OperationsPage() {
 
 	const registerComponentMutation = useMutation({
 		mutationFn: registerComponent,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
+	const registerCollectionMutation = useMutation({
+		mutationFn: registerCollection,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
+	const addCollectionComponentMutation = useMutation({
+		mutationFn: (request: { collectionKey: string; componentKey: string }) =>
+			addCollectionComponent(request.collectionKey, {
+				componentKey: request.componentKey,
+			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
 	});
 
 	const bindArtifactMutation = useMutation({
@@ -87,6 +124,19 @@ export function OperationsPage() {
 				}));
 			}
 		},
+	});
+
+	const collectionsQuery = useQuery({
+		queryKey: ["collections"],
+		queryFn: fetchCollections,
+		refetchInterval: 15_000,
+	});
+
+	const collectionDetailQuery = useQuery({
+		queryKey: ["collection-detail", operatorState.collectionKey],
+		queryFn: () => fetchCollectionDetail(operatorState.collectionKey),
+		enabled: operatorState.collectionKey.length > 0,
+		refetchInterval: 15_000,
 	});
 
 	return (
@@ -161,6 +211,150 @@ export function OperationsPage() {
 							</p>
 						</div>
 					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Release Scope</p>
+							<h2>Create Collection</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void registerCollectionMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								name: operatorState.collectionName,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input
+								name="collectionKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionKey}
+							/>
+						</label>
+						<label>
+							Name
+							<input
+								name="collectionName"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionName: event.target.value,
+									}))
+								}
+								value={operatorState.collectionName}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Create Collection
+						</button>
+					</form>
+					{registerCollectionMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection change</strong>
+							<p>
+								Change: {registerCollectionMutation.data.change}. Managed
+								collections:{" "}
+								{registerCollectionMutation.data.managed_collections}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Release Scope</p>
+							<h2>Manage Collection Membership</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void addCollectionComponentMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								componentKey: operatorState.collectionComponentKey,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input
+								name="membershipCollectionKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionKey}
+							/>
+						</label>
+						<label>
+							Component key
+							<input
+								name="collectionComponentKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionComponentKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionComponentKey}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Add Component
+						</button>
+					</form>
+					{addCollectionComponentMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection membership</strong>
+							<p>
+								Change: {addCollectionComponentMutation.data.change}. Members:{" "}
+								{addCollectionComponentMutation.data.members}.
+							</p>
+						</div>
+					) : null}
+					<div className="result-card">
+						<strong>Collections</strong>
+						{collectionsQuery.data ? (
+							<ul>
+								{collectionsQuery.data.collections.map((collection) => (
+									<li key={collection.collection_key}>
+										{collection.collection_key} ({collection.name}) -{" "}
+										{collection.members} members
+									</li>
+								))}
+							</ul>
+						) : (
+							<p>No collections loaded yet.</p>
+						)}
+					</div>
+					<div className="result-card">
+						<strong>Current collection detail</strong>
+						{collectionDetailQuery.data ? (
+							<ul>
+								{collectionDetailQuery.data.members.map((member) => (
+									<li key={member.component_key}>{member.component_key}</li>
+								))}
+							</ul>
+						) : (
+							<p>No collection detail loaded yet.</p>
+						)}
+					</div>
 				</section>
 
 				<section className="panel">
