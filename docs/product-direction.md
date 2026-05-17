@@ -13,7 +13,7 @@ The platform target is:
 
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
-- see which release collections are due now and which are scheduled next
+- see which release collections are due now, which are scheduled next, and what the last scheduler pass materialized
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings
 - derive discovery and withdrawal semantics inside VENOM rather than trusting provider delta semantics
