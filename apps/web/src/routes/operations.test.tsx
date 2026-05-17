@@ -81,6 +81,8 @@ describe("OperationsPage", () => {
 								collection_key: "release:2026.05",
 								name: "May Release",
 								members: 1,
+								scan_schedule: null,
+								due_now: false,
 							},
 						],
 						change: "created",
@@ -129,6 +131,9 @@ describe("OperationsPage", () => {
 		expect(
 			await screen.findByText(/component:payments-api/i),
 		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/Total: 1\. Scheduled: 0\. Due now: 0\./i),
+		).toBeInTheDocument();
 	});
 
 	it("configures one collection scan schedule and runs the scheduler", async () => {
@@ -145,6 +150,42 @@ describe("OperationsPage", () => {
 						cadence_minutes: 60,
 						freshness: "deterministic",
 						next_due_at_unix_ms: 1000,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								scan_schedule: {
+									cadence_minutes: 60,
+									freshness: "deterministic",
+									next_due_at_unix_ms: 1000,
+								},
+								due_now: true,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						scan_schedule: {
+							cadence_minutes: 60,
+							freshness: "deterministic",
+							next_due_at_unix_ms: 1000,
+						},
+						members: [{ component_key: "component:payments-api" }],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -184,6 +225,12 @@ describe("OperationsPage", () => {
 			await screen.findByText(
 				/Processed collections: 1\. Enqueued commands: 1\./i,
 			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/Scheduled: 1\. Due now: 1\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/due now - every 60 minutes/i),
 		).toBeInTheDocument();
 	});
 

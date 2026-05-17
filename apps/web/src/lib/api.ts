@@ -63,6 +63,8 @@ export type CollectionSummary = {
 	collection_key: string;
 	name: string;
 	members: number;
+	scan_schedule: CollectionScanSchedule | null;
+	due_now: boolean;
 };
 
 export type ListCollectionsResponse = {

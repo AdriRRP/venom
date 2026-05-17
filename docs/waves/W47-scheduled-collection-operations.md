@@ -41,8 +41,8 @@ Give operators one compact, durable, and efficiently queryable view of scheduled
 |---|---|---|---|
 | `W47-S01` | done | define one canonical operator-facing scheduled collection view in the domain | `scripts/check-slice.sh --wave W47-scheduled-collection-operations --slice W47-S01 --lane acceptance --path crates/venom-domain/src/inventory --path crates/venom-domain/examples/acceptance.rs --path features/view-collection-schedules.feature` |
 | `W47-S02` | done | expose scheduled collection operator summaries through the API and durable snapshots | `scripts/check-slice.sh --wave W47-scheduled-collection-operations --slice W47-S02 --lane integration --path apps/api/src/app --path apps/api/src/http` |
-| `W47-S03` | in_progress | surface the scheduled collection operations board in the UI and browser flow | `scripts/check-slice.sh --wave W47-scheduled-collection-operations --slice W47-S03 --lane e2e --path apps/web/src --path apps/web/e2e` |
-| `W47-S04` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W47-scheduled-collection-operations` |
+| `W47-S03` | done | surface the scheduled collection operations board in the UI and browser flow | `scripts/check-slice.sh --wave W47-scheduled-collection-operations --slice W47-S03 --lane e2e --path apps/web/src --path apps/web/e2e` |
+| `W47-S04` | in_progress | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W47-scheduled-collection-operations` |
 
 ## Language impact
 

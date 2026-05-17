@@ -25,6 +25,8 @@ test("operator flow registers, targets one collection, scans, and queries one ac
 		.getByRole("button", { name: "Configure Collection Schedule" })
 		.click();
 	await expect(page.getByText(/Cadence: 60 minutes\./i)).toBeVisible();
+	await expect(page.getByText(/Due now: 1\./i)).toBeVisible();
+	await expect(page.getByText(/due now - every 60 minutes/i)).toBeVisible();
 
 	await page.getByRole("button", { name: "Run Collection Scheduler" }).click();
 	await expect(

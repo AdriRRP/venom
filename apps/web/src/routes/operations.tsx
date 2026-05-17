@@ -93,6 +93,7 @@ export function OperationsPage() {
 			freshness: string;
 		}) => configureCollectionScanSchedule(request),
 		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
 			void queryClient.invalidateQueries({
 				queryKey: ["collection-detail", operatorState.collectionKey],
 			});
@@ -157,6 +158,7 @@ export function OperationsPage() {
 	const drainCollectionScanWorkerMutation = useMutation({
 		mutationFn: drainCollectionScanWorker,
 		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
 			void queryClient.invalidateQueries({
 				queryKey: ["collection-detail", operatorState.collectionKey],
 			});
@@ -175,6 +177,19 @@ export function OperationsPage() {
 		enabled: operatorState.collectionKey.length > 0,
 		refetchInterval: 15_000,
 	});
+
+	const scheduledCollectionSummary = useMemo(() => {
+		const collections = collectionsQuery.data?.collections ?? [];
+		const scheduled = collections.filter(
+			(collection) => collection.scan_schedule !== null,
+		);
+		const dueNow = scheduled.filter((collection) => collection.due_now);
+		return {
+			total: collections.length,
+			scheduled: scheduled.length,
+			dueNow: dueNow.length,
+		};
+	}, [collectionsQuery.data]);
 
 	return (
 		<AppShell apiHealth={healthLabel} currentView="operations">
@@ -367,12 +382,20 @@ export function OperationsPage() {
 					) : null}
 					<div className="result-card">
 						<strong>Collections</strong>
+						<p>
+							Total: {scheduledCollectionSummary.total}. Scheduled:{" "}
+							{scheduledCollectionSummary.scheduled}. Due now:{" "}
+							{scheduledCollectionSummary.dueNow}.
+						</p>
 						{collectionsQuery.data ? (
 							<ul>
 								{collectionsQuery.data.collections.map((collection) => (
 									<li key={collection.collection_key}>
 										{collection.collection_key} ({collection.name}) -{" "}
-										{collection.members} members
+										{collection.members} members -{" "}
+										{collection.scan_schedule
+											? `${collection.due_now ? "due now" : "due later"} - every ${collection.scan_schedule.cadence_minutes} minutes (${collection.scan_schedule.freshness})`
+											: "manual only"}
 									</li>
 								))}
 							</ul>
