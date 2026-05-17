@@ -1,7 +1,9 @@
 import {
 	addCollectionComponent,
 	bindArtifact,
+	configureCollectionScanSchedule,
 	configureProvider,
+	drainCollectionScanWorker,
 	drainScanWorker,
 	fetchActiveFindings,
 	fetchApiHealth,
@@ -101,7 +103,7 @@ describe("fetchApiHealth", () => {
 		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
 	});
 
-	it("serializes collection creation, membership, scan targeting, and read queries", async () => {
+	it("serializes collection creation, membership, scheduling, scan targeting, and read queries", async () => {
 		const calls: Array<{ input: string; init?: RequestInit }> = [];
 		globalThis.fetch = vi.fn(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -119,6 +121,11 @@ describe("fetchApiHealth", () => {
 		});
 		await addCollectionComponent("release:2026.05", {
 			componentKey: "component:payments-api",
+		});
+		await configureCollectionScanSchedule({
+			collectionKey: "release:2026.05",
+			cadenceMinutes: 60,
+			freshness: "deterministic",
 		});
 		await requestCollectionScan({
 			collectionKey: "release:2026.05",
@@ -138,11 +145,15 @@ describe("fetchApiHealth", () => {
 			'"component_key":"component:payments-api"',
 		);
 		expect(calls[2]?.input).toBe(
+			"/api/collections/release%3A2026.05/scan-schedule",
+		);
+		expect(calls[2]?.init?.body).toContain('"cadence_minutes":60');
+		expect(calls[3]?.input).toBe(
 			"/api/collections/release%3A2026.05/scan-requests",
 		);
-		expect(calls[2]?.init?.body).toContain('"freshness":"deterministic"');
-		expect(calls[3]?.input).toBe("/api/collections");
-		expect(calls[4]?.input).toBe("/api/collections/release%3A2026.05");
+		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
+		expect(calls[4]?.input).toBe("/api/collections");
+		expect(calls[5]?.input).toBe("/api/collections/release%3A2026.05");
 	});
 
 	it("serializes scan command lookup and worker drain payloads", async () => {
@@ -170,6 +181,9 @@ describe("fetchApiHealth", () => {
 				},
 			],
 		});
+		await drainCollectionScanWorker({
+			maxCollections: 8,
+		});
 
 		expect(calls[0]?.input).toBe("/api/scan-commands/cmd-1");
 		expect(calls[1]?.input).toBe("/api/scan-workers/drain");
@@ -179,5 +193,7 @@ describe("fetchApiHealth", () => {
 		expect(calls[1]?.init?.body).toContain(
 			'"vulnerability_id":"CVE-2026-0001"',
 		);
+		expect(calls[2]?.input).toBe("/api/collection-scan-workers/drain");
+		expect(calls[2]?.init?.body).toContain('"max_collections":8');
 	});
 });

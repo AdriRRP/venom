@@ -102,6 +102,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						scan_schedule: null,
 						members: [{ component_key: "component:payments-api" }],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -127,6 +128,62 @@ describe("OperationsPage", () => {
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(/component:payments-api/i),
+		).toBeInTheDocument();
+	});
+
+	it("configures one collection scan schedule and runs the scheduler", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections/release%3A2026.05/scan-schedule") {
+				return new Response(
+					JSON.stringify({
+						change: "configured",
+						collection_key: "release:2026.05",
+						cadence_minutes: 60,
+						freshness: "deterministic",
+						next_due_at_unix_ms: 1000,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collection-scan-workers/drain") {
+				return new Response(
+					JSON.stringify({
+						outcome: "drained",
+						processed_collections: 1,
+						enqueued_commands: 1,
+						pending_due_remaining: 0,
+						last_collection_key: "release:2026.05",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Configure Collection Schedule" }),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Run Collection Scheduler" }),
+		);
+
+		expect(
+			await screen.findByText(/Cadence: 60 minutes\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/Processed collections: 1\. Enqueued commands: 1\./i,
+			),
 		).toBeInTheDocument();
 	});
 

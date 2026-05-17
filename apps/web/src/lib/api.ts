@@ -73,7 +73,14 @@ export type ListCollectionsResponse = {
 export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
+	scan_schedule: CollectionScanSchedule | null;
 	members: Array<{ component_key: string }>;
+};
+
+export type CollectionScanSchedule = {
+	cadence_minutes: number;
+	freshness: string;
+	next_due_at_unix_ms: number;
 };
 
 export type BindArtifactRequest = {
@@ -93,6 +100,20 @@ export type ConfigureProviderRequest = {
 export type ConfigureProviderResponse = {
 	change: string;
 	provider_key: string | null;
+};
+
+export type ConfigureCollectionScanSchedulePayload = {
+	collectionKey: string;
+	cadenceMinutes: number;
+	freshness: string;
+};
+
+export type ConfigureCollectionScanScheduleResponse = {
+	change: string;
+	collection_key: string;
+	cadence_minutes: number;
+	freshness: string;
+	next_due_at_unix_ms: number;
 };
 
 export type RequestScanPayload = {
@@ -154,6 +175,18 @@ export type DrainWorkerResponse = {
 	last_command_status: string | null;
 	last_error_code: string | null;
 	last_retryable: boolean | null;
+};
+
+export type DrainCollectionScanWorkerPayload = {
+	maxCollections?: number;
+};
+
+export type DrainCollectionScanWorkerResponse = {
+	outcome: string;
+	processed_collections: number;
+	enqueued_commands: number;
+	pending_due_remaining: number;
+	last_collection_key: string | null;
 };
 
 export async function fetchApiHealth(): Promise<ApiHealthState> {
@@ -272,6 +305,28 @@ export async function addCollectionComponent(
 	return (await response.json()) as CollectionMembershipResponse;
 }
 
+export async function configureCollectionScanSchedule(
+	request: ConfigureCollectionScanSchedulePayload,
+): Promise<ConfigureCollectionScanScheduleResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/scan-schedule`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				cadence_minutes: request.cadenceMinutes,
+				freshness: request.freshness,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection scan schedule failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ConfigureCollectionScanScheduleResponse;
+}
+
 export async function requestCollectionScan(
 	request: RequestCollectionScanPayload,
 ): Promise<RequestCollectionScanResponse> {
@@ -291,6 +346,24 @@ export async function requestCollectionScan(
 		);
 	}
 	return (await response.json()) as RequestCollectionScanResponse;
+}
+
+export async function drainCollectionScanWorker(
+	request: DrainCollectionScanWorkerPayload,
+): Promise<DrainCollectionScanWorkerResponse> {
+	const response = await fetch("/api/collection-scan-workers/drain", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			max_collections: request.maxCollections,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`collection scan worker drain failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as DrainCollectionScanWorkerResponse;
 }
 
 export async function bindArtifact(

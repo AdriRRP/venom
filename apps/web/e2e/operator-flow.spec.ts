@@ -21,8 +21,15 @@ test("operator flow registers, targets one collection, scans, and queries one ac
 	await page.getByRole("button", { name: "Configure Provider" }).click();
 	await expect(page.getByText(/Provider: fixture-provider\./i)).toBeVisible();
 
-	await page.getByRole("button", { name: "Request Collection Scan" }).click();
-	await expect(page.getByText(/First command: scan-command-/i)).toBeVisible();
+	await page
+		.getByRole("button", { name: "Configure Collection Schedule" })
+		.click();
+	await expect(page.getByText(/Cadence: 60 minutes\./i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Run Collection Scheduler" }).click();
+	await expect(
+		page.getByText(/Processed collections: 1\. Enqueued commands: 1\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();

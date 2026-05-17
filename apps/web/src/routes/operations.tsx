@@ -4,7 +4,9 @@ import { AppShell } from "../app/app-shell";
 import {
 	addCollectionComponent,
 	bindArtifact,
+	configureCollectionScanSchedule,
 	configureProvider,
+	drainCollectionScanWorker,
 	drainScanWorker,
 	fetchApiHealth,
 	fetchCollectionDetail,
@@ -24,6 +26,8 @@ export function OperationsPage() {
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
+		cadenceMinutes: "60",
+		maxCollections: "8",
 		artifactKind: "container-image",
 		artifactIdentity: "registry.example/payments@sha256:111",
 		providerKey: "fixture-provider",
@@ -82,6 +86,19 @@ export function OperationsPage() {
 		},
 	});
 
+	const configureCollectionScanScheduleMutation = useMutation({
+		mutationFn: (request: {
+			collectionKey: string;
+			cadenceMinutes: number;
+			freshness: string;
+		}) => configureCollectionScanSchedule(request),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
 	const bindArtifactMutation = useMutation({
 		mutationFn: (request: {
 			componentKey: string;
@@ -134,6 +151,15 @@ export function OperationsPage() {
 					commandId: data.last_command_id ?? current.commandId,
 				}));
 			}
+		},
+	});
+
+	const drainCollectionScanWorkerMutation = useMutation({
+		mutationFn: drainCollectionScanWorker,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
 		},
 	});
 
@@ -357,15 +383,118 @@ export function OperationsPage() {
 					<div className="result-card">
 						<strong>Current collection detail</strong>
 						{collectionDetailQuery.data ? (
-							<ul>
-								{collectionDetailQuery.data.members.map((member) => (
-									<li key={member.component_key}>{member.component_key}</li>
-								))}
-							</ul>
+							<>
+								{collectionDetailQuery.data.scan_schedule ? (
+									<p>
+										Schedule: every{" "}
+										{collectionDetailQuery.data.scan_schedule.cadence_minutes}{" "}
+										minutes (
+										{collectionDetailQuery.data.scan_schedule.freshness}). Next
+										due at{" "}
+										{
+											collectionDetailQuery.data.scan_schedule
+												.next_due_at_unix_ms
+										}
+										.
+									</p>
+								) : (
+									<p>No schedule configured.</p>
+								)}
+								<ul>
+									{collectionDetailQuery.data.members.map((member) => (
+										<li key={member.component_key}>{member.component_key}</li>
+									))}
+								</ul>
+							</>
 						) : (
 							<p>No collection detail loaded yet.</p>
 						)}
 					</div>
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scheduling</p>
+							<h2>Configure Collection Schedule</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void configureCollectionScanScheduleMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								cadenceMinutes: Number.parseInt(
+									operatorState.cadenceMinutes,
+									10,
+								),
+								freshness: operatorState.freshness,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input
+								name="scheduleCollectionKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionKey}
+							/>
+						</label>
+						<label>
+							Cadence minutes
+							<input
+								name="cadenceMinutes"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										cadenceMinutes: event.target.value,
+									}))
+								}
+								value={operatorState.cadenceMinutes}
+							/>
+						</label>
+						<label>
+							Freshness
+							<select
+								name="scheduleFreshness"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										freshness: event.target.value,
+									}))
+								}
+								value={operatorState.freshness}
+							>
+								<option value="deterministic">deterministic</option>
+								<option value="live">live</option>
+							</select>
+						</label>
+						<button className="primary-button" type="submit">
+							Configure Collection Schedule
+						</button>
+					</form>
+					{configureCollectionScanScheduleMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection schedule</strong>
+							<p>
+								Change: {configureCollectionScanScheduleMutation.data.change}.
+								Cadence:{" "}
+								{configureCollectionScanScheduleMutation.data.cadence_minutes}{" "}
+								minutes. Next due at{" "}
+								{
+									configureCollectionScanScheduleMutation.data
+										.next_due_at_unix_ms
+								}
+								.
+							</p>
+						</div>
+					) : null}
 				</section>
 
 				<section className="panel">
@@ -652,6 +781,62 @@ export function OperationsPage() {
 								Enqueued: {requestCollectionScanMutation.data.enqueued}. First
 								command:{" "}
 								{requestCollectionScanMutation.data.command_ids[0] ?? "none"}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Scheduling</p>
+							<h2>Run Collection Scheduler</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void drainCollectionScanWorkerMutation.mutateAsync({
+								maxCollections: Number.parseInt(
+									operatorState.maxCollections,
+									10,
+								),
+							});
+						}}
+					>
+						<label>
+							Max collections
+							<input
+								name="maxCollections"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										maxCollections: event.target.value,
+									}))
+								}
+								value={operatorState.maxCollections}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Run Collection Scheduler
+						</button>
+					</form>
+					{drainCollectionScanWorkerMutation.data ? (
+						<div className="result-card">
+							<strong>Last scheduler run</strong>
+							<p>
+								Outcome: {drainCollectionScanWorkerMutation.data.outcome}.
+								Processed collections:{" "}
+								{drainCollectionScanWorkerMutation.data.processed_collections}.
+								Enqueued commands:{" "}
+								{drainCollectionScanWorkerMutation.data.enqueued_commands}.
+								Pending due remaining:{" "}
+								{drainCollectionScanWorkerMutation.data.pending_due_remaining}.
+								Last collection:{" "}
+								{drainCollectionScanWorkerMutation.data.last_collection_key ??
+									"none"}
+								.
 							</p>
 						</div>
 					) : null}
