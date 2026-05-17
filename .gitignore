@@ -21,6 +21,10 @@ __pycache__/
 
 # Logs
 *.log
+/playwright-report
+**/playwright-report
+/test-results
+**/test-results
 
 # Local durable runtime state
 /var/state
