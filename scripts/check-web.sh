@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/check-web.sh [--lane quality|test|build|all]
+  scripts/check-web.sh [--lane quality|test|build|e2e|all]
 EOF
 }
 
@@ -56,6 +56,10 @@ run_build() {
   )
 }
 
+run_e2e() {
+  ./scripts/check-web-e2e.sh
+}
+
 case "$lane" in
   quality)
     run_quality
@@ -65,6 +69,9 @@ case "$lane" in
     ;;
   build)
     run_build
+    ;;
+  e2e)
+    run_e2e
     ;;
   all)
     run_quality

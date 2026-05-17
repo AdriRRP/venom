@@ -132,6 +132,7 @@ For the UI:
 
 - component and hook tests live here
 - typecheck and lint are part of the same default frontend quality path
+- browser-driven UI E2E belongs to L4 rather than this lane
 
 ### L1. Integration
 
@@ -168,6 +169,7 @@ Owned under:
 
 - `features/e2e/**`
 - `apps/web/e2e/**` when browser-driven UI flows become necessary
+- `scripts/check-web-e2e.sh` for deterministic local browser-driven smoke execution
 
 ### Contract checks
 
@@ -236,6 +238,7 @@ Run the full required set:
 - all BDD
 - acceptance or E2E checks with real local infrastructure where relevant
 - frontend quality, tests, and build when the wave touches `apps/web/**`
+- frontend browser E2E when `apps/web/e2e/**` exists
 
 Selection rule:
 

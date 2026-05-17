@@ -44,6 +44,11 @@ jobs:
         if: ${{ hashFiles('apps/web/package.json') != '' }}
         run: npm --prefix apps/web install
 
+      - name: Install Playwright browser
+        if: ${{ hashFiles('apps/web/e2e/**/*') != '' }}
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
       - name: Run test gate
         run: ./scripts/check-tests.sh
 
@@ -52,3 +57,7 @@ jobs:
 
       - name: Run contract gate
         run: ./scripts/check-contracts.sh
+
+      - name: Run web e2e gate
+        if: ${{ hashFiles('apps/web/e2e/**/*') != '' }}
+        run: ./scripts/check-web.sh --lane e2e

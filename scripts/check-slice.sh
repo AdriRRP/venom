@@ -49,7 +49,11 @@ has_acceptance_specs() {
 }
 
 has_e2e_specs() {
-  find features/e2e -type f ! -name '.gitkeep' | grep -q .
+  if find features/e2e -type f ! -name '.gitkeep' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+
+  find apps/web/e2e -type f ! -name '.gitkeep' 2>/dev/null | grep -q .
 }
 
 has_contract_specs() {
@@ -66,8 +70,13 @@ run_acceptance_lane() {
 }
 
 run_e2e_lane() {
-  if has_e2e_specs; then
-    fail "e2e specs exist but no e2e runner is wired yet"
+  if find features/e2e -type f ! -name '.gitkeep' 2>/dev/null | grep -q .; then
+    fail "feature e2e specs exist but no feature e2e runner is wired yet"
+  fi
+
+  if find apps/web/e2e -type f ! -name '.gitkeep' 2>/dev/null | grep -q .; then
+    ./scripts/check-web.sh --lane e2e
+    return 0
   fi
 
   echo "SKIP: no e2e specs"
