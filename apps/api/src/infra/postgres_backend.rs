@@ -74,8 +74,8 @@ impl PostgresBackend {
         &mut self,
         registration: ComponentRegistration,
     ) -> Result<RegisterComponentResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate.inventory_mut().register(registration.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register(registration.clone());
         if result.change == RegisterComponentChange::Registered {
             sqlx::query(&format!(
                 "INSERT INTO {} (component_key, name) VALUES ($1, $2)",
@@ -86,7 +86,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component insert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -100,10 +100,8 @@ impl PostgresBackend {
         &mut self,
         registration: CollectionRegistration,
     ) -> Result<RegisterCollectionResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .register_collection(registration.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_collection(registration.clone());
         if result.change == RegisterCollectionChange::Created {
             sqlx::query(&format!(
                 "INSERT INTO {} (collection_key, name) VALUES ($1, $2)",
@@ -114,7 +112,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection insert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -129,10 +127,8 @@ impl PostgresBackend {
         component_key: &str,
         artifact: ArtifactRef,
     ) -> Result<BindArtifactResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .bind_artifact(component_key, artifact.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.bind_artifact(component_key, artifact.clone());
         if result.change == BindArtifactChange::Bound {
             sqlx::query(&format!(
                 "INSERT INTO {} (component_key, artifact_kind, artifact_identity) VALUES ($1, $2, $3)",
@@ -144,7 +140,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres artifact binding insert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -159,10 +155,8 @@ impl PostgresBackend {
         collection_key: &str,
         component_key: &str,
     ) -> Result<venom_domain::AddCollectionComponentResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .add_component_to_collection(collection_key, component_key);
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.add_component_to_collection(collection_key, component_key);
         if result.change == venom_domain::AddCollectionComponentChange::Added {
             sqlx::query(&format!(
                 concat!("INSERT INTO {} (collection_key, component_key) VALUES ($1, $2)"),
@@ -173,7 +167,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -188,10 +182,9 @@ impl PostgresBackend {
         collection_key: &str,
         component_key: &str,
     ) -> Result<venom_domain::RemoveCollectionComponentResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .remove_component_from_collection(collection_key, component_key);
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result =
+            candidate_inventory.remove_component_from_collection(collection_key, component_key);
         if result.change == venom_domain::RemoveCollectionComponentChange::Removed {
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE collection_key = $1 AND component_key = $2",
@@ -202,7 +195,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -219,15 +212,13 @@ impl PostgresBackend {
         freshness: EvidenceFreshness,
         next_due_at_unix_ms: u64,
     ) -> Result<ConfigureCollectionScanScheduleResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .configure_collection_scan_schedule(
-                collection_key,
-                cadence_minutes,
-                freshness,
-                next_due_at_unix_ms,
-            );
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_collection_scan_schedule(
+            collection_key,
+            cadence_minutes,
+            freshness,
+            next_due_at_unix_ms,
+        );
         if result.change == ConfigureCollectionScanScheduleChange::Configured {
             sqlx::query(&format!(
                 concat!(
@@ -243,7 +234,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection scan schedule upsert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -258,10 +249,8 @@ impl PostgresBackend {
         component_key: &str,
         provider_key: &str,
     ) -> Result<ConfigureProviderResult, String> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .configure_provider(component_key, provider_key);
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_provider(component_key, provider_key);
         if result.change == ConfigureProviderChange::Configured {
             sqlx::query(&format!(
                 concat!(
@@ -275,7 +264,7 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres provider config upsert failed: {error}"))?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
