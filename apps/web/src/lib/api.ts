@@ -25,6 +25,7 @@ export type ActiveFindingsRequest = {
 	artifactKind: string;
 	artifactIdentity: string;
 	minSeverity?: string;
+	packageName?: string;
 	limit?: number;
 	offset?: number;
 };
@@ -125,6 +126,10 @@ export async function fetchActiveFindings(
 
 	if (request.minSeverity && request.minSeverity !== "all") {
 		params.set("min_severity", request.minSeverity);
+	}
+
+	if (request.packageName) {
+		params.set("package_name", request.packageName);
 	}
 
 	const response = await fetch(`/api/findings/active?${params.toString()}`);
