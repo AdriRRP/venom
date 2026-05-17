@@ -77,10 +77,41 @@ impl ApiState {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
-    fn refresh_snapshot(&self, service: &AppService) {
-        self.inner
-            .read_snapshot_tx
-            .send_replace(Arc::new(service.read_snapshot()));
+    fn refresh_inventory_snapshot(&self, service: &AppService) {
+        let next = self
+            .read_snapshot()
+            .with_inventory(service.inventory_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    fn refresh_read_model_snapshot(&self, service: &AppService) {
+        let next = self
+            .read_snapshot()
+            .with_read_model(service.read_model_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    fn refresh_command_statuses_snapshot(&self, service: &AppService) {
+        let next = self
+            .read_snapshot()
+            .with_command_statuses(service.command_statuses_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    fn refresh_inventory_and_command_statuses_snapshot(&self, service: &AppService) {
+        let next = self.read_snapshot().with_inventory_and_command_statuses(
+            service.inventory_snapshot(),
+            service.command_statuses_snapshot(),
+        );
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    fn refresh_read_model_and_command_statuses_snapshot(&self, service: &AppService) {
+        let next = self.read_snapshot().with_read_model_and_command_statuses(
+            service.read_model_snapshot(),
+            service.command_statuses_snapshot(),
+        );
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 }
 
@@ -143,7 +174,7 @@ async fn register_component(
             .register_component(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -160,7 +191,7 @@ async fn register_collection(
             .register_collection(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -199,7 +230,7 @@ async fn add_component_to_collection(
             .add_component_to_collection(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -216,7 +247,7 @@ async fn remove_component_from_collection(
             .remove_component_from_collection(&collection_key, &component_key)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -234,7 +265,7 @@ async fn configure_collection_scan_schedule(
             .configure_collection_scan_schedule(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -252,7 +283,7 @@ async fn bind_artifact(
             .bind_artifact(&component_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -270,7 +301,7 @@ async fn configure_provider(
             .configure_provider(&component_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -287,7 +318,6 @@ async fn configure_integration_runtime(
             .configure_integration_runtime(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };
@@ -304,7 +334,7 @@ async fn record_provider_report(
             .record_provider_report(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };
@@ -321,7 +351,7 @@ async fn request_scan(
             .request_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -339,7 +369,7 @@ async fn request_collection_scan(
             .request_collection_scan(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -367,7 +397,7 @@ async fn drain_collection_scan_worker(
             .run_collection_scan_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_and_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -384,7 +414,7 @@ async fn run_next_scan(
             .run_next_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_and_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -401,7 +431,7 @@ async fn drain_worker(
             .run_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_and_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -418,7 +448,6 @@ async fn drain_integration_worker(
             .publish_integration_events_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };

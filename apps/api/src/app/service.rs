@@ -5,6 +5,7 @@ use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresBack
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration,
@@ -37,12 +38,81 @@ impl std::error::Error for AppServiceError {}
 
 #[derive(Debug, Clone)]
 pub struct AppReadSnapshot {
-    inventory: ComponentInventory,
-    read_model: FindingReadModel,
-    command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    inventory: Arc<ComponentInventory>,
+    read_model: Arc<FindingReadModel>,
+    command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
 
 impl AppReadSnapshot {
+    #[must_use]
+    pub fn new(
+        inventory: ComponentInventory,
+        read_model: FindingReadModel,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    ) -> Self {
+        Self {
+            inventory: Arc::new(inventory),
+            read_model: Arc::new(read_model),
+            command_statuses: Arc::new(command_statuses),
+        }
+    }
+
+    #[must_use]
+    pub fn with_inventory(&self, inventory: ComponentInventory) -> Self {
+        Self {
+            inventory: Arc::new(inventory),
+            read_model: Arc::clone(&self.read_model),
+            command_statuses: Arc::clone(&self.command_statuses),
+        }
+    }
+
+    #[must_use]
+    pub fn with_read_model(&self, read_model: FindingReadModel) -> Self {
+        Self {
+            inventory: Arc::clone(&self.inventory),
+            read_model: Arc::new(read_model),
+            command_statuses: Arc::clone(&self.command_statuses),
+        }
+    }
+
+    #[must_use]
+    pub fn with_command_statuses(
+        &self,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    ) -> Self {
+        Self {
+            inventory: Arc::clone(&self.inventory),
+            read_model: Arc::clone(&self.read_model),
+            command_statuses: Arc::new(command_statuses),
+        }
+    }
+
+    #[must_use]
+    pub fn with_inventory_and_command_statuses(
+        &self,
+        inventory: ComponentInventory,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    ) -> Self {
+        Self {
+            inventory: Arc::new(inventory),
+            read_model: Arc::clone(&self.read_model),
+            command_statuses: Arc::new(command_statuses),
+        }
+    }
+
+    #[must_use]
+    pub fn with_read_model_and_command_statuses(
+        &self,
+        read_model: FindingReadModel,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    ) -> Self {
+        Self {
+            inventory: Arc::clone(&self.inventory),
+            read_model: Arc::new(read_model),
+            command_statuses: Arc::new(command_statuses),
+        }
+    }
+
     /// Query the currently active findings for one managed component and artifact.
     ///
     /// # Errors
@@ -220,15 +290,39 @@ impl AppService {
     pub fn read_snapshot(&self) -> AppReadSnapshot {
         match &self.backend {
             AppBackend::Local(local) => AppReadSnapshot {
-                inventory: local.state.ingestion().inventory().clone(),
-                read_model: local.state.read_model().clone(),
-                command_statuses: local.runtime.command_statuses_snapshot(),
+                inventory: Arc::new(local.state.ingestion().inventory().clone()),
+                read_model: Arc::new(local.state.read_model().clone()),
+                command_statuses: Arc::new(local.runtime.command_statuses_snapshot()),
             },
-            AppBackend::Postgres(postgres) => AppReadSnapshot {
-                inventory: postgres.inventory_snapshot(),
-                read_model: postgres.read_model_snapshot(),
-                command_statuses: postgres.command_statuses_snapshot(),
-            },
+            AppBackend::Postgres(postgres) => AppReadSnapshot::new(
+                postgres.inventory_snapshot(),
+                postgres.read_model_snapshot(),
+                postgres.command_statuses_snapshot(),
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn inventory_snapshot(&self) -> ComponentInventory {
+        match &self.backend {
+            AppBackend::Local(local) => local.state.ingestion().inventory().clone(),
+            AppBackend::Postgres(postgres) => postgres.inventory_snapshot(),
+        }
+    }
+
+    #[must_use]
+    pub fn read_model_snapshot(&self) -> FindingReadModel {
+        match &self.backend {
+            AppBackend::Local(local) => local.state.read_model().clone(),
+            AppBackend::Postgres(postgres) => postgres.read_model_snapshot(),
+        }
+    }
+
+    #[must_use]
+    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
+        match &self.backend {
+            AppBackend::Local(local) => local.runtime.command_statuses_snapshot(),
+            AppBackend::Postgres(postgres) => postgres.command_statuses_snapshot(),
         }
     }
 
