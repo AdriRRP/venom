@@ -57,6 +57,29 @@ select {
 	color: #475569;
 }
 
+.sidebar-nav {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	margin: 1.5rem 0;
+}
+
+.nav-link {
+	padding: 0.75rem 0.9rem;
+	border-radius: 14px;
+	color: #334155;
+	text-decoration: none;
+	background: rgba(255, 255, 255, 0.5);
+	border: 1px solid transparent;
+	font-weight: 600;
+}
+
+.nav-link.active {
+	background: rgba(255, 255, 255, 0.92);
+	border-color: rgba(15, 23, 42, 0.08);
+	color: #0f172a;
+}
+
 .status-card,
 .panel {
 	border: 1px solid rgba(15, 23, 42, 0.08);
@@ -97,6 +120,11 @@ select {
 
 .content {
 	padding: 2rem;
+}
+
+.panel-stack {
+	display: grid;
+	gap: 1.5rem;
 }
 
 .panel {
@@ -164,6 +192,23 @@ select {
 	flex-wrap: wrap;
 	margin: 1rem 0;
 	color: #475569;
+}
+
+.mutation-grid {
+	grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+}
+
+.result-card {
+	margin-top: 1rem;
+	padding: 1rem;
+	border-radius: 16px;
+	background: rgba(255, 252, 245, 0.8);
+	border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.result-card p {
+	margin: 0.5rem 0 0;
+	color: #334155;
 }
 
 .error-banner {

@@ -1,12 +1,15 @@
+import { Link } from "@tanstack/react-router";
 import type { PropsWithChildren } from "react";
 
 export type ApiHealthState = "healthy" | "unhealthy" | "loading";
+export type AppShellView = "findings" | "operations";
 
 type AppShellProps = PropsWithChildren<{
 	apiHealth: ApiHealthState;
+	currentView: AppShellView;
 }>;
 
-export function AppShell({ apiHealth, children }: AppShellProps) {
+export function AppShell({ apiHealth, currentView, children }: AppShellProps) {
 	return (
 		<div className="shell">
 			<aside className="sidebar">
@@ -17,6 +20,24 @@ export function AppShell({ apiHealth, children }: AppShellProps) {
 						Thin operator-facing UI over the canonical Rust API.
 					</p>
 				</div>
+				<nav aria-label="Primary" className="sidebar-nav">
+					<Link
+						className={
+							currentView === "findings" ? "nav-link active" : "nav-link"
+						}
+						to="/findings"
+					>
+						Active Findings
+					</Link>
+					<Link
+						className={
+							currentView === "operations" ? "nav-link active" : "nav-link"
+						}
+						to="/operations"
+					>
+						Operations
+					</Link>
+				</nav>
 				<dl className="status-card">
 					<div>
 						<dt>API Health</dt>

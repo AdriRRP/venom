@@ -1,6 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { FindingsPage } from "./findings";
+
+vi.mock("@tanstack/react-router", async () => ({
+	Link: ({
+		children,
+		className,
+		to,
+	}: {
+		children: ReactNode;
+		className?: string;
+		to: string;
+	}) => (
+		<a className={className} href={to}>
+			{children}
+		</a>
+	),
+}));
 
 describe("FindingsPage", () => {
 	it("renders the first operator screen shape", () => {
@@ -32,7 +49,9 @@ describe("FindingsPage", () => {
 			</QueryClientProvider>,
 		);
 
-		expect(screen.getByText("Active Findings")).toBeInTheDocument();
+		expect(
+			screen.getByRole("heading", { level: 2, name: "Active Findings" }),
+		).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Query" })).toBeInTheDocument();
 		expect(screen.getByText("No active findings yet.")).toBeInTheDocument();
 	});

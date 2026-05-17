@@ -66,7 +66,7 @@ export function FindingsPage() {
 	}, [healthQuery.data, healthQuery.isLoading]);
 
 	return (
-		<AppShell apiHealth={healthLabel}>
+		<AppShell apiHealth={healthLabel} currentView="findings">
 			<section className="panel">
 				<div className="panel-header">
 					<div>
