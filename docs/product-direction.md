@@ -13,6 +13,7 @@ The platform target is:
 
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
+- see which release collections are due now and which are scheduled next
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings
 - derive discovery and withdrawal semantics inside VENOM rather than trusting provider delta semantics
@@ -33,7 +34,7 @@ The platform target is:
 | Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |
 | Contextual risk | change meaning by runtime context | `classify-finding.feature` |
 | Governance | accept, suppress, withdraw, explain | `accept-risk.feature` |
-| Operations | answer what is active, changed, pending | `view-active-findings.feature` |
+| Operations | answer what is active, changed, pending, and due now | `view-active-findings.feature`, `view-collection-schedules.feature` |
 | Reliability substrate | keep all of the above durable and rebuildable | usually verified by infra and acceptance gates rather than a standalone business feature |
 
 ## Wave discovery rule
