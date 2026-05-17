@@ -422,6 +422,63 @@ impl PostgresBackend {
         Ok(command_id)
     }
 
+    /// Durably enqueue one canonical scan batch for one managed collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the collection is unmanaged or the durable write fails.
+    pub async fn request_collection_scan(
+        &mut self,
+        collection_key: &str,
+        freshness: EvidenceFreshness,
+    ) -> Result<Vec<Box<str>>, String> {
+        let batch = ScanPlanner::new(self.ingestion.inventory())
+            .plan_collection(collection_key, freshness)
+            .map_err(|error| error.as_str().to_owned())?;
+
+        if batch.requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let command_ids = (0..batch.requests.len())
+            .map(|_| next_command_id())
+            .collect::<Vec<_>>();
+
+        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+            "INSERT INTO {} (command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
+            self.names.scan_commands
+        ));
+        query_builder.push_values(
+            command_ids.iter().zip(batch.requests.iter()),
+            |mut row, (command_id, request)| {
+                row.push_bind(command_id.as_ref())
+                    .push_bind(request.component_key.as_ref())
+                    .push_bind(artifact_kind_name(request.artifact.kind))
+                    .push_bind(request.artifact.identity.as_ref())
+                    .push_bind(freshness_name(request.freshness))
+                    .push_bind(scan_command_status_name(ScanCommandStatus::Pending));
+            },
+        );
+        query_builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
+
+        for (command_id, request) in command_ids.iter().cloned().zip(batch.requests) {
+            self.order.push(command_id.clone());
+            self.commands.insert(
+                command_id,
+                ScanCommandRecord {
+                    request,
+                    status: ScanCommandStatus::Pending,
+                },
+            );
+        }
+
+        Ok(command_ids)
+    }
+
     #[must_use]
     pub fn command_status(&self, command_id: &str) -> Option<ScanCommandStatus> {
         self.commands.get(command_id).map(|record| record.status)
@@ -1546,6 +1603,81 @@ mod tests {
                 .inventory_snapshot()
                 .collection_members("release:2026.05"),
             Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_collection_scan_request_batches_pending_commands() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_scan_batch");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:billing-api",
+                "Billing API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .bind_artifact(
+                "component:billing-api",
+                ArtifactRef::new(
+                    ArtifactKind::ContainerImage,
+                    "registry.example/billing@sha256:222",
+                ),
+            )
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:billing-api")
+            .await
+            .expect("collection membership should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+
+        let command_ids = backend
+            .request_collection_scan("release:2026.05", EvidenceFreshness::Deterministic)
+            .await
+            .expect("collection scan request should persist");
+
+        assert_eq!(command_ids.len(), 2);
+        assert_eq!(backend.pending_commands(), 2);
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(reopened.pending_commands(), 2);
+        assert_eq!(
+            reopened.command_status(command_ids[0].as_ref()),
+            Some(ScanCommandStatus::Pending)
+        );
+        assert_eq!(
+            reopened.command_status(command_ids[1].as_ref()),
+            Some(ScanCommandStatus::Pending)
         );
     }
 

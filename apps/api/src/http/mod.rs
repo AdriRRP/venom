@@ -6,8 +6,9 @@ use crate::app::service::{
     ConfigureProviderRequest, ConfigureProviderResponse, DrainIntegrationWorkerCommand,
     DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
     ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterCollectionResponse, RegisterComponentResponse, RequestScanCommand, RequestScanResponse,
-    RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RequestCollectionScanCommand,
+    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
+    RunNextScanResponse, ScanCommandStatusResponse,
 };
 use axum::{
     Json, Router,
@@ -97,6 +98,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/components/{component_key}",
             axum::routing::delete(remove_component_from_collection),
+        )
+        .route(
+            "/collections/{collection_key}/scan-requests",
+            post(request_collection_scan),
         )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
@@ -282,6 +287,24 @@ async fn request_scan(
         let mut service = state.inner.service.lock().await;
         let response = service
             .request_scan(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn request_collection_scan(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<RequestCollectionScanCommand>,
+) -> Result<Json<RequestCollectionScanResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .request_collection_scan(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
@@ -631,6 +654,39 @@ mod tests {
             payload["members"][0]["component_key"],
             "component:payments-api"
         );
+    }
+
+    #[tokio::test]
+    async fn api_requests_collection_scan_batch() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-scan", "state"),
+                temp_path("collection-scan", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_collection_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["collection_key"], "release:2026.05");
+        assert_eq!(payload["freshness"], "deterministic");
+        assert_eq!(payload["enqueued"], 1);
+        assert_eq!(payload["command_ids"].as_array().map_or(0, Vec::len), 1);
     }
 
     #[tokio::test]
@@ -1076,6 +1132,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_collection_scan_request_reloads_pending_commands() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_scan");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_collection_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        let command_id = payload["command_ids"][0]
+            .as_str()
+            .expect("command id should be present")
+            .to_owned();
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = reloaded
+            .oneshot(
+                Request::get(format!("/scan-commands/{command_id}"))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("status request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["status"], "pending");
+    }
+
+    #[tokio::test]
     async fn postgres_integration_publication_worker_is_bounded_and_durable() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -1407,6 +1521,23 @@ mod tests {
             )
             .await
             .expect("scan request should succeed")
+    }
+
+    async fn enqueue_collection_scan_request(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/scan-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "freshness": "deterministic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection scan request should succeed")
     }
 
     async fn run_next_scan_with_fixture(router: axum::Router) -> axum::response::Response {

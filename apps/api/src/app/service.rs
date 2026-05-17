@@ -500,6 +500,50 @@ impl AppService {
         })
     }
 
+    /// Create and durably enqueue one canonical scan batch for one closed release collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid, the collection is unmanaged,
+    /// or the durable runtime cannot append the commands.
+    pub async fn request_collection_scan(
+        &mut self,
+        collection_key: &str,
+        request: RequestCollectionScanCommand,
+    ) -> Result<RequestCollectionScanResponse, AppServiceError> {
+        let freshness = parse_freshness(&request.freshness)?;
+        let command_ids = match &mut self.backend {
+            AppBackend::Local(local) => {
+                let batch = ScanPlanner::new(local.state.ingestion().inventory())
+                    .plan_collection(collection_key, freshness)
+                    .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+                let mut command_ids = Vec::with_capacity(batch.requests.len());
+                for scan_request in batch.requests {
+                    let command = local
+                        .runtime
+                        .enqueue(scan_request)
+                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                    command_ids.push(command.command_id.into());
+                }
+                command_ids
+            }
+            AppBackend::Postgres(postgres) => postgres
+                .request_collection_scan(collection_key, freshness)
+                .await
+                .map_err(AppServiceError::State)?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        };
+
+        Ok(RequestCollectionScanResponse {
+            collection_key: collection_key.to_owned(),
+            freshness: request.freshness,
+            enqueued: command_ids.len(),
+            command_ids,
+        })
+    }
+
     /// Drain pending scan commands through one bounded worker loop.
     ///
     /// # Errors
@@ -982,6 +1026,19 @@ pub struct RequestScanResponse {
     pub artifact_kind: String,
     pub artifact_identity: String,
     pub freshness: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestCollectionScanCommand {
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestCollectionScanResponse {
+    pub collection_key: String,
+    pub freshness: String,
+    pub enqueued: usize,
+    pub command_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
