@@ -1,4 +1,4 @@
-use crate::ArtifactRef;
+use crate::{ArtifactRef, EvidenceFreshness};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Canonical registration request for one managed component.
@@ -226,6 +226,48 @@ pub struct RemoveCollectionComponentResult {
     pub members: usize,
 }
 
+/// Durable periodic scan schedule attached to one managed collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionScanSchedule {
+    /// Explicit periodic cadence in minutes.
+    pub cadence_minutes: u32,
+    /// Freshness mode that every materialized collection scan request must use.
+    pub freshness: EvidenceFreshness,
+    /// Unix epoch time in milliseconds when the next scheduler pass may materialize one batch.
+    pub next_due_at_unix_ms: u64,
+}
+
+/// Observable outcome of configuring one collection scan schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigureCollectionScanScheduleChange {
+    /// The collection now has one schedule or its schedule changed.
+    Configured,
+    /// The exact same schedule already existed.
+    Unchanged,
+    /// The configuration was rejected because the collection is missing or invalid.
+    Rejected,
+}
+
+impl ConfigureCollectionScanScheduleChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of configuring one collection scan schedule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureCollectionScanScheduleResult {
+    /// Observable state change caused by the schedule configuration attempt.
+    pub change: ConfigureCollectionScanScheduleChange,
+    /// Schedule visible after the operation when the collection exists.
+    pub schedule: Option<CollectionScanSchedule>,
+}
+
 /// Operator-facing snapshot of one managed collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedCollection {
@@ -235,6 +277,8 @@ pub struct ManagedCollection {
     pub name: Box<str>,
     /// Canonical managed component keys in the collection.
     pub component_keys: Vec<Box<str>>,
+    /// Optional periodic collection scan schedule.
+    pub scan_schedule: Option<CollectionScanSchedule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +292,7 @@ struct ComponentRecord {
 struct CollectionRecord {
     registration: CollectionRegistration,
     component_keys: BTreeSet<Box<str>>,
+    scan_schedule: Option<CollectionScanSchedule>,
 }
 
 /// Minimal in-memory inventory of managed components and their immutable artifacts.
@@ -372,6 +417,7 @@ impl ComponentInventory {
                     CollectionRecord {
                         registration,
                         component_keys: BTreeSet::new(),
+                        scan_schedule: None,
                     },
                 );
                 RegisterCollectionChange::Created
@@ -440,6 +486,47 @@ impl ComponentInventory {
         RemoveCollectionComponentResult {
             change,
             members: record.component_keys.len(),
+        }
+    }
+
+    /// Configure one periodic collection scan schedule.
+    #[must_use]
+    pub fn configure_collection_scan_schedule(
+        &mut self,
+        collection_key: &str,
+        cadence_minutes: u32,
+        freshness: EvidenceFreshness,
+        next_due_at_unix_ms: u64,
+    ) -> ConfigureCollectionScanScheduleResult {
+        if cadence_minutes == 0 {
+            return ConfigureCollectionScanScheduleResult {
+                change: ConfigureCollectionScanScheduleChange::Rejected,
+                schedule: None,
+            };
+        }
+
+        let Some(record) = self.collections.get_mut(collection_key) else {
+            return ConfigureCollectionScanScheduleResult {
+                change: ConfigureCollectionScanScheduleChange::Rejected,
+                schedule: None,
+            };
+        };
+
+        let schedule = CollectionScanSchedule {
+            cadence_minutes,
+            freshness,
+            next_due_at_unix_ms,
+        };
+        let change = if record.scan_schedule == Some(schedule) {
+            ConfigureCollectionScanScheduleChange::Unchanged
+        } else {
+            record.scan_schedule = Some(schedule);
+            ConfigureCollectionScanScheduleChange::Configured
+        };
+
+        ConfigureCollectionScanScheduleResult {
+            change,
+            schedule: record.scan_schedule,
         }
     }
 
@@ -514,6 +601,40 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn collection_scan_schedule(&self, collection_key: &str) -> Option<CollectionScanSchedule> {
+        self.collections
+            .get(collection_key)
+            .and_then(|record| record.scan_schedule)
+    }
+
+    #[must_use]
+    pub fn due_collection_keys(&self, now_unix_ms: u64, limit: usize) -> Vec<Box<str>> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut due = self
+            .collections
+            .iter()
+            .filter_map(|(collection_key, record)| {
+                record.scan_schedule.and_then(|schedule| {
+                    (schedule.next_due_at_unix_ms <= now_unix_ms)
+                        .then_some((schedule.next_due_at_unix_ms, collection_key.clone()))
+                })
+            })
+            .collect::<Vec<_>>();
+        due.sort_by(|(left_due, left_key), (right_due, right_key)| {
+            left_due
+                .cmp(right_due)
+                .then_with(|| left_key.as_ref().cmp(right_key.as_ref()))
+        });
+        due.into_iter()
+            .take(limit)
+            .map(|(_, collection_key)| collection_key)
+            .collect()
+    }
+
+    #[must_use]
     pub fn collections(&self) -> Vec<ManagedCollection> {
         self.collections
             .values()
@@ -521,6 +642,7 @@ impl ComponentInventory {
                 collection_key: record.registration.collection_key.clone(),
                 name: record.registration.name.clone(),
                 component_keys: record.component_keys.iter().cloned().collect(),
+                scan_schedule: record.scan_schedule,
             })
             .collect()
     }
@@ -530,10 +652,11 @@ impl ComponentInventory {
 mod tests {
     use super::{
         AddCollectionComponentChange, BindArtifactChange, CollectionRegistration,
-        ComponentInventory, ComponentRegistration, ConfigureProviderChange,
-        RegisterCollectionChange, RegisterComponentChange, RemoveCollectionComponentChange,
+        ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
+        ConfigureProviderChange, RegisterCollectionChange, RegisterComponentChange,
+        RemoveCollectionComponentChange,
     };
-    use crate::{ArtifactKind, ArtifactRef};
+    use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
     fn artifact(identity: &str) -> ArtifactRef {
         ArtifactRef::new(ArtifactKind::ContainerImage, identity)
@@ -737,6 +860,70 @@ mod tests {
         assert_eq!(
             inventory.collection_members("release:2026.05"),
             Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[test]
+    fn managed_collection_can_configure_one_periodic_scan_schedule() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.05",
+            "May Release",
+        ));
+
+        let result = inventory.configure_collection_scan_schedule(
+            "release:2026.05",
+            60,
+            EvidenceFreshness::Deterministic,
+            1_000,
+        );
+
+        assert_eq!(
+            result.change,
+            ConfigureCollectionScanScheduleChange::Configured
+        );
+        assert_eq!(
+            inventory.collection_scan_schedule("release:2026.05"),
+            Some(super::CollectionScanSchedule {
+                cadence_minutes: 60,
+                freshness: EvidenceFreshness::Deterministic,
+                next_due_at_unix_ms: 1_000,
+            })
+        );
+    }
+
+    #[test]
+    fn due_collections_are_ordered_by_due_time_then_key() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.05",
+            "May Release",
+        ));
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.06",
+            "June Release",
+        ));
+        let _ = inventory.configure_collection_scan_schedule(
+            "release:2026.05",
+            60,
+            EvidenceFreshness::Deterministic,
+            2_000,
+        );
+        let _ = inventory.configure_collection_scan_schedule(
+            "release:2026.06",
+            60,
+            EvidenceFreshness::Deterministic,
+            1_000,
+        );
+
+        let due = inventory.due_collection_keys(2_000, 8);
+
+        assert_eq!(
+            due,
+            vec![
+                Box::<str>::from("release:2026.06"),
+                Box::<str>::from("release:2026.05"),
+            ]
         );
     }
 

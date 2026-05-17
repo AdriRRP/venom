@@ -1,6 +1,7 @@
 use crate::{
     AddCollectionComponentChange, AddCollectionComponentResult, ArtifactRef, BindArtifactChange,
     BindArtifactResult, CollectionRegistration, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FindingChangeSet, FindingIngestion,
     FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
@@ -276,6 +277,39 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably configure one periodic scan schedule for one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn configure_collection_scan_schedule(
+        &mut self,
+        collection_key: &str,
+        cadence_minutes: u32,
+        freshness: EvidenceFreshness,
+        next_due_at_unix_ms: u64,
+    ) -> Result<ConfigureCollectionScanScheduleResult, DurableStateError> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .configure_collection_scan_schedule(
+                collection_key,
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
+            );
+        if result.change == ConfigureCollectionScanScheduleChange::Configured {
+            self.append_event(&DurableEvent::CollectionScanScheduleConfigured {
+                collection_key: collection_key.into(),
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably configure the integration publication runtime.
     ///
     /// # Errors
@@ -365,7 +399,8 @@ impl DurableState {
             | DurableEvent::ComponentProviderConfigured { .. }
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
-            | DurableEvent::CollectionComponentRemoved { .. } => {
+            | DurableEvent::CollectionComponentRemoved { .. }
+            | DurableEvent::CollectionScanScheduleConfigured { .. } => {
                 self.apply_inventory_event(event, line)
             }
             DurableEvent::IntegrationRuntimeConfigured { config } => {
@@ -420,6 +455,18 @@ impl DurableState {
             } => self.apply_collection_component_removed(
                 collection_key.as_ref(),
                 component_key.as_ref(),
+                line,
+            ),
+            DurableEvent::CollectionScanScheduleConfigured {
+                collection_key,
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
+            } => self.apply_collection_scan_schedule_configured(
+                collection_key.as_ref(),
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
                 line,
             ),
             DurableEvent::IntegrationRuntimeConfigured { .. }
@@ -541,6 +588,35 @@ impl DurableState {
                 line,
                 reason: "invalid collection membership removal".into(),
             }),
+        }
+    }
+
+    fn apply_collection_scan_schedule_configured(
+        &mut self,
+        collection_key: &str,
+        cadence_minutes: u32,
+        freshness: EvidenceFreshness,
+        next_due_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .configure_collection_scan_schedule(
+                collection_key,
+                cadence_minutes,
+                freshness,
+                next_due_at_unix_ms,
+            );
+        match result.change {
+            ConfigureCollectionScanScheduleChange::Configured
+            | ConfigureCollectionScanScheduleChange::Unchanged => Ok(()),
+            ConfigureCollectionScanScheduleChange::Rejected => {
+                Err(DurableStateError::CorruptHistory {
+                    line,
+                    reason: "invalid collection scan schedule".into(),
+                })
+            }
         }
     }
 
@@ -670,6 +746,12 @@ enum DurableEvent {
     CollectionComponentRemoved {
         collection_key: Box<str>,
         component_key: Box<str>,
+    },
+    CollectionScanScheduleConfigured {
+        collection_key: Box<str>,
+        cadence_minutes: u32,
+        freshness: EvidenceFreshness,
+        next_due_at_unix_ms: u64,
     },
     IntegrationRuntimeConfigured {
         config: IntegrationRuntimeConfig,
@@ -992,6 +1074,40 @@ mod tests {
                 .inventory()
                 .collection_members("release:2026.05"),
             Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[test]
+    fn replay_keeps_collection_scan_schedules() {
+        let path = temp_path("durable-state-collection-schedules");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .expect("collection should persist");
+        let _ = state
+            .configure_collection_scan_schedule(
+                "release:2026.05",
+                60,
+                EvidenceFreshness::Deterministic,
+                1_000,
+            )
+            .expect("schedule should persist");
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+
+        assert_eq!(
+            rebuilt
+                .ingestion()
+                .inventory()
+                .collection_scan_schedule("release:2026.05"),
+            Some(crate::CollectionScanSchedule {
+                cadence_minutes: 60,
+                freshness: EvidenceFreshness::Deterministic,
+                next_due_at_unix_ms: 1_000,
+            })
         );
     }
 

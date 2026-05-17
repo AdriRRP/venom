@@ -7,7 +7,8 @@ use std::time::SystemTime;
 use venom_domain::{
     ActiveFindingsPage, ActiveFindingsQuery, AddCollectionComponentResult, ArtifactKind,
     ArtifactRef, BindArtifactResult, CollectionRegistration, CollectionScanBatch,
-    CollectionScanPlanningError, ComponentRegistration, DurableScanRuntime, DurableState,
+    CollectionScanPlanningError, CollectionScanScheduler, ComponentRegistration,
+    ConfigureCollectionScanScheduleResult, DueCollectionScan, DurableScanRuntime, DurableState,
     EvidenceFreshness, FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
     RegisterCollectionResult, RegisterComponentResult, ReportedFinding, RunNextScanResult,
@@ -23,11 +24,13 @@ struct AcceptanceWorld {
     last_registration: Option<RegisterComponentResult>,
     last_collection_registration: Option<RegisterCollectionResult>,
     last_collection_membership: Option<AddCollectionComponentResult>,
+    last_collection_scan_schedule: Option<ConfigureCollectionScanScheduleResult>,
     last_artifact_binding: Option<BindArtifactResult>,
     last_scan_request: Option<ScanRequest>,
     last_scan_planning_error: Option<ScanPlanningError>,
     last_collection_scan_batch: Option<CollectionScanBatch>,
     last_collection_scan_planning_error: Option<CollectionScanPlanningError>,
+    last_due_collection_scans: Vec<DueCollectionScan>,
     provider_failure: Option<FindingProviderError>,
     last_scan_execution: Option<ScanExecutionResult>,
     last_scan_execution_error: Option<String>,
@@ -50,11 +53,13 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_registration = None;
     world.last_collection_registration = None;
     world.last_collection_membership = None;
+    world.last_collection_scan_schedule = None;
     world.last_artifact_binding = None;
     world.last_scan_request = None;
     world.last_scan_planning_error = None;
     world.last_collection_scan_batch = None;
     world.last_collection_scan_planning_error = None;
+    world.last_due_collection_scans.clear();
     world.provider_failure = None;
     world.last_scan_execution = None;
     world.last_scan_execution_error = None;
@@ -358,6 +363,7 @@ async fn venom_binds_artifact_to_component(
     );
 }
 
+#[given(expr = "VENOM durably binds artifact {string} to component {string}")]
 #[when(expr = "VENOM durably binds artifact {string} to component {string}")]
 async fn venom_durably_binds_artifact_to_component(
     world: &mut AcceptanceWorld,
@@ -417,6 +423,65 @@ async fn venom_durably_adds_component_to_collection(
     }
 }
 
+#[given(
+    expr = "VENOM schedules a deterministic collection scan for {string} every {int} minutes due at unix ms {int}"
+)]
+#[when(
+    expr = "VENOM schedules a deterministic collection scan for {string} every {int} minutes due at unix ms {int}"
+)]
+async fn venom_schedules_a_deterministic_collection_scan(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    cadence_minutes: usize,
+    next_due_at_unix_ms: usize,
+) {
+    world.last_collection_scan_schedule = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .configure_collection_scan_schedule(
+                &collection_key,
+                u32::try_from(cadence_minutes).expect("cadence should fit u32"),
+                EvidenceFreshness::Deterministic,
+                u64::try_from(next_due_at_unix_ms).expect("next due should fit u64"),
+            ),
+    );
+}
+
+#[given(
+    expr = "VENOM durably schedules a deterministic collection scan for {string} every {int} minutes due at unix ms {int}"
+)]
+#[when(
+    expr = "VENOM durably schedules a deterministic collection scan for {string} every {int} minutes due at unix ms {int}"
+)]
+async fn venom_durably_schedules_a_deterministic_collection_scan(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    cadence_minutes: usize,
+    next_due_at_unix_ms: usize,
+) {
+    let Some(state) = world.durable_state.as_mut() else {
+        world.last_durable_error = Some("missing durable state".to_owned());
+        world.last_collection_scan_schedule = None;
+        return;
+    };
+    match state.configure_collection_scan_schedule(
+        &collection_key,
+        u32::try_from(cadence_minutes).expect("cadence should fit u32"),
+        EvidenceFreshness::Deterministic,
+        u64::try_from(next_due_at_unix_ms).expect("next due should fit u64"),
+    ) {
+        Ok(result) => {
+            world.last_collection_scan_schedule = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_collection_scan_schedule = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
 #[when(expr = "VENOM plans a deterministic scan for component {string} and artifact {string}")]
 async fn venom_plans_a_deterministic_scan(
     world: &mut AcceptanceWorld,
@@ -462,6 +527,19 @@ async fn venom_plans_a_deterministic_collection_scan(
             world.last_collection_scan_planning_error = Some(error);
         }
     }
+}
+
+#[when(expr = "VENOM materializes due collection scans at unix ms {int} with limit {int}")]
+async fn venom_materializes_due_collection_scans(
+    world: &mut AcceptanceWorld,
+    now_unix_ms: usize,
+    limit: usize,
+) {
+    let mut scheduler = CollectionScanScheduler::new(world.ingestion.inventory_mut());
+    world.last_due_collection_scans = scheduler.collect_due(
+        u64::try_from(now_unix_ms).expect("current time should fit u64"),
+        limit,
+    );
 }
 
 #[when(
@@ -682,6 +760,19 @@ async fn the_collection_membership_result_is(world: &mut AcceptanceWorld, expect
     );
 }
 
+#[then(expr = "the collection scan schedule result is {string}")]
+async fn the_collection_scan_schedule_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_scan_schedule
+            .as_ref()
+            .expect("a collection scan schedule attempt must exist")
+            .change
+            .as_str(),
+        expected
+    );
+}
+
 #[then(expr = "collection {string} has {int} members")]
 async fn collection_has_members(
     world: &mut AcceptanceWorld,
@@ -875,6 +966,71 @@ async fn the_collection_scan_batch_has_requests(world: &mut AcceptanceWorld, exp
             .expect("a collection scan batch must exist before assertions")
             .requests
             .len(),
+        expected
+    );
+}
+
+#[then(expr = "{int} due collection scans are materialized")]
+async fn due_collection_scans_are_materialized(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(world.last_due_collection_scans.len(), expected);
+}
+
+#[then(expr = "the first due collection scan targets collection {string}")]
+async fn the_first_due_collection_scan_targets_collection(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_due_collection_scans
+            .first()
+            .expect("a due collection scan must exist")
+            .collection_key
+            .as_ref(),
+        expected
+    );
+}
+
+#[then(expr = "the first due collection scan has {int} requests")]
+async fn the_first_due_collection_scan_has_requests(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_due_collection_scans
+            .first()
+            .expect("a due collection scan must exist")
+            .requests
+            .len(),
+        expected
+    );
+}
+
+#[then(expr = "collection {string} next due is unix ms {int}")]
+async fn collection_next_due_is_unix_ms(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    expected: usize,
+) {
+    let expected = u64::try_from(expected).expect("expected due should fit u64");
+    if let Some(state) = world.durable_state.as_ref() {
+        assert_eq!(
+            state
+                .ingestion()
+                .inventory()
+                .collection_scan_schedule(&collection_key)
+                .expect("the collection must have a schedule")
+                .next_due_at_unix_ms,
+            expected
+        );
+        return;
+    }
+
+    assert_eq!(
+        world
+            .ingestion
+            .inventory()
+            .collection_scan_schedule(&collection_key)
+            .expect("the collection must have a schedule")
+            .next_due_at_unix_ms,
         expected
     );
 }
@@ -1313,6 +1469,7 @@ async fn main() {
         "manage-collections.feature",
         "register-component.feature",
         "request-collection-scan.feature",
+        "schedule-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
         "view-active-findings.feature",

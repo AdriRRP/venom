@@ -1,8 +1,10 @@
+pub mod collection_scan_scheduler;
 pub mod durable_scan_runtime;
 pub mod scan_execution;
 pub mod scan_planning;
 pub mod syft_grype;
 
+pub use collection_scan_scheduler::{CollectionScanScheduler, DueCollectionScan};
 pub use durable_scan_runtime::{
     CompletedScanCommand, DurableScanRuntime, DurableScanRuntimeError, EnqueueScanResult,
     FailedScanCommand, RunNextScanResult, ScanCommandStatus,
