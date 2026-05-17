@@ -98,4 +98,54 @@ describe("OperationsPage", () => {
 
 		expect(await screen.findByText(/Command: cmd-1/i)).toBeInTheDocument();
 	});
+
+	it("refreshes one command status and runs the fixture worker", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/scan-commands/cmd-1") {
+				return new Response(
+					JSON.stringify({
+						command_id: "cmd-1",
+						status: "pending",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/scan-workers/drain") {
+				return new Response(
+					JSON.stringify({
+						outcome: "completed",
+						processed: 1,
+						completed: 1,
+						failed: 0,
+						pending_remaining: 0,
+						last_command_id: "cmd-1",
+						last_command_status: "completed",
+						last_error_code: null,
+						last_retryable: null,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.change(screen.getByRole("textbox", { name: "Command id" }), {
+			target: { value: "cmd-1" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Refresh Status" }));
+		fireEvent.click(screen.getByRole("button", { name: "Run Worker" }));
+
+		expect(await screen.findByText(/Status: pending/i)).toBeInTheDocument();
+		expect(await screen.findByText(/Outcome: completed/i)).toBeInTheDocument();
+	});
 });
