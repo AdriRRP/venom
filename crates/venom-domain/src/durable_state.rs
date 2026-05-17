@@ -147,13 +147,13 @@ impl DurableState {
         &mut self,
         registration: ComponentRegistration,
     ) -> Result<RegisterComponentResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate.inventory_mut().register(registration.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register(registration.clone());
         if result.change == RegisterComponentChange::Registered {
             self.append_event(&DurableEvent::ComponentRegistered {
                 registration: StoredComponentRegistration::from(registration),
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -168,16 +168,14 @@ impl DurableState {
         component_key: &str,
         artifact: ArtifactRef,
     ) -> Result<BindArtifactResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .bind_artifact(component_key, artifact.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.bind_artifact(component_key, artifact.clone());
         if result.change == BindArtifactChange::Bound {
             self.append_event(&DurableEvent::ArtifactBound {
                 component_key: component_key.into(),
                 artifact,
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -193,16 +191,14 @@ impl DurableState {
         provider_key: impl Into<Box<str>>,
     ) -> Result<ConfigureProviderResult, DurableStateError> {
         let provider_key = provider_key.into();
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .configure_provider(component_key, provider_key.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_provider(component_key, provider_key.clone());
         if result.change == ConfigureProviderChange::Configured {
             self.append_event(&DurableEvent::ComponentProviderConfigured {
                 component_key: component_key.into(),
                 provider_key,
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -216,15 +212,13 @@ impl DurableState {
         &mut self,
         registration: CollectionRegistration,
     ) -> Result<RegisterCollectionResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .register_collection(registration.clone());
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_collection(registration.clone());
         if result.change == RegisterCollectionChange::Created {
             self.append_event(&DurableEvent::CollectionRegistered {
                 registration: StoredCollectionRegistration::from(registration),
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -239,16 +233,14 @@ impl DurableState {
         collection_key: &str,
         component_key: &str,
     ) -> Result<AddCollectionComponentResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .add_component_to_collection(collection_key, component_key);
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.add_component_to_collection(collection_key, component_key);
         if result.change == AddCollectionComponentChange::Added {
             self.append_event(&DurableEvent::CollectionComponentAdded {
                 collection_key: collection_key.into(),
                 component_key: component_key.into(),
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -263,16 +255,15 @@ impl DurableState {
         collection_key: &str,
         component_key: &str,
     ) -> Result<RemoveCollectionComponentResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .remove_component_from_collection(collection_key, component_key);
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result =
+            candidate_inventory.remove_component_from_collection(collection_key, component_key);
         if result.change == RemoveCollectionComponentChange::Removed {
             self.append_event(&DurableEvent::CollectionComponentRemoved {
                 collection_key: collection_key.into(),
                 component_key: component_key.into(),
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -289,15 +280,13 @@ impl DurableState {
         freshness: EvidenceFreshness,
         next_due_at_unix_ms: u64,
     ) -> Result<ConfigureCollectionScanScheduleResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .configure_collection_scan_schedule(
-                collection_key,
-                cadence_minutes,
-                freshness,
-                next_due_at_unix_ms,
-            );
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_collection_scan_schedule(
+            collection_key,
+            cadence_minutes,
+            freshness,
+            next_due_at_unix_ms,
+        );
         if result.change == ConfigureCollectionScanScheduleChange::Configured {
             self.append_event(&DurableEvent::CollectionScanScheduleConfigured {
                 collection_key: collection_key.into(),
@@ -305,7 +294,7 @@ impl DurableState {
                 freshness,
                 next_due_at_unix_ms,
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -322,15 +311,13 @@ impl DurableState {
         materialized_at_unix_ms: u64,
         enqueued_commands: u32,
     ) -> Result<ConfigureCollectionScanScheduleResult, DurableStateError> {
-        let mut candidate = self.ingestion.clone();
-        let result = candidate
-            .inventory_mut()
-            .record_collection_scan_materialization(
-                collection_key,
-                next_due_at_unix_ms,
-                materialized_at_unix_ms,
-                enqueued_commands,
-            );
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.record_collection_scan_materialization(
+            collection_key,
+            next_due_at_unix_ms,
+            materialized_at_unix_ms,
+            enqueued_commands,
+        );
         if result.change == ConfigureCollectionScanScheduleChange::Configured {
             self.append_event(&DurableEvent::CollectionScanScheduleMaterialized {
                 collection_key: collection_key.into(),
@@ -338,7 +325,7 @@ impl DurableState {
                 materialized_at_unix_ms,
                 enqueued_commands,
             })?;
-            self.ingestion = candidate;
+            *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
