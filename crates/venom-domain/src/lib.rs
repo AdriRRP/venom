@@ -26,10 +26,11 @@ pub use inventory::{
     RemoveCollectionComponentChange, RemoveCollectionComponentResult,
 };
 pub use scanning::{
-    CompletedScanCommand, DockerSyftGrypeProvider, DurableScanRuntime, DurableScanRuntimeError,
-    EnqueueScanResult, FailedScanCommand, FixtureBundle, FixtureSyftGrypeProvider,
-    OFFICIAL_GRYPE_IMAGE, OFFICIAL_SYFT_IMAGE, RunNextScanResult, SYFT_GRYPE_PROVIDER_KEY,
-    ScanCommandStatus, ScanExecutionError, ScanExecutionResult, ScanPlanner, ScanPlanningError,
+    CollectionScanBatch, CollectionScanPlanningError, CompletedScanCommand,
+    DockerSyftGrypeProvider, DurableScanRuntime, DurableScanRuntimeError, EnqueueScanResult,
+    FailedScanCommand, FixtureBundle, FixtureSyftGrypeProvider, OFFICIAL_GRYPE_IMAGE,
+    OFFICIAL_SYFT_IMAGE, RunNextScanResult, SYFT_GRYPE_PROVIDER_KEY, ScanCommandStatus,
+    ScanExecutionError, ScanExecutionResult, ScanPlanner, ScanPlanningError,
     artifact_identity_from_syft_json, execute_scan,
 };
 

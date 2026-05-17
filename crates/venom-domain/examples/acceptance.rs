@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::{
     ActiveFindingsPage, ActiveFindingsQuery, AddCollectionComponentResult, ArtifactKind,
-    ArtifactRef, BindArtifactResult, CollectionRegistration, ComponentRegistration,
-    DurableScanRuntime, DurableState, EvidenceFreshness, FindingChangeSet, FindingIngestion,
-    FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    PackageCoordinate, ProviderScanReport, RegisterCollectionResult, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanExecutionResult, ScanPlanner, ScanPlanningError,
-    ScanRequest, Severity, execute_scan,
+    ArtifactRef, BindArtifactResult, CollectionRegistration, CollectionScanBatch,
+    CollectionScanPlanningError, ComponentRegistration, DurableScanRuntime, DurableState,
+    EvidenceFreshness, FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
+    RegisterCollectionResult, RegisterComponentResult, ReportedFinding, RunNextScanResult,
+    ScanExecutionResult, ScanPlanner, ScanPlanningError, ScanRequest, Severity, execute_scan,
 };
 
 #[derive(Debug, Default, cucumber::World)]
@@ -26,6 +26,8 @@ struct AcceptanceWorld {
     last_artifact_binding: Option<BindArtifactResult>,
     last_scan_request: Option<ScanRequest>,
     last_scan_planning_error: Option<ScanPlanningError>,
+    last_collection_scan_batch: Option<CollectionScanBatch>,
+    last_collection_scan_planning_error: Option<CollectionScanPlanningError>,
     provider_failure: Option<FindingProviderError>,
     last_scan_execution: Option<ScanExecutionResult>,
     last_scan_execution_error: Option<String>,
@@ -51,6 +53,8 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_artifact_binding = None;
     world.last_scan_request = None;
     world.last_scan_planning_error = None;
+    world.last_collection_scan_batch = None;
+    world.last_collection_scan_planning_error = None;
     world.provider_failure = None;
     world.last_scan_execution = None;
     world.last_scan_execution_error = None;
@@ -376,6 +380,7 @@ async fn venom_durably_binds_artifact_to_component(
     }
 }
 
+#[given(expr = "VENOM adds component {string} to collection {string}")]
 #[when(expr = "VENOM adds component {string} to collection {string}")]
 async fn venom_adds_component_to_collection(
     world: &mut AcceptanceWorld,
@@ -438,6 +443,25 @@ async fn venom_plans_a_live_scan(
         artifact_identity,
         EvidenceFreshness::Live,
     );
+}
+
+#[when(expr = "VENOM plans a deterministic collection scan for {string}")]
+async fn venom_plans_a_deterministic_collection_scan(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+) {
+    match ScanPlanner::new(world.ingestion.inventory())
+        .plan_collection(&collection_key, EvidenceFreshness::Deterministic)
+    {
+        Ok(batch) => {
+            world.last_collection_scan_batch = Some(batch);
+            world.last_collection_scan_planning_error = None;
+        }
+        Err(error) => {
+            world.last_collection_scan_batch = None;
+            world.last_collection_scan_planning_error = Some(error);
+        }
+    }
 }
 
 #[when(
@@ -787,6 +811,20 @@ async fn the_scan_planning_is_rejected_as(world: &mut AcceptanceWorld, expected:
     );
 }
 
+#[then(expr = "the collection scan planning is rejected as {string}")]
+async fn the_collection_scan_planning_is_rejected_as(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_planning_error
+            .expect("a collection scan planning error must exist")
+            .as_str(),
+        expected
+    );
+}
+
 #[then(expr = "the scan request targets component {string}")]
 async fn the_scan_request_targets_component(world: &mut AcceptanceWorld, expected: String) {
     assert_eq!(
@@ -810,6 +848,105 @@ async fn the_scan_request_freshness_is(world: &mut AcceptanceWorld, expected: St
         EvidenceFreshness::Live => "live",
     };
     assert_eq!(actual, expected);
+}
+
+#[then(expr = "the collection scan batch targets collection {string}")]
+async fn the_collection_scan_batch_targets_collection(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .collection_key
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the collection scan batch has {int} requests")]
+async fn the_collection_scan_batch_has_requests(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .requests
+            .len(),
+        expected
+    );
+}
+
+#[then(expr = "the first collection scan request targets component {string}")]
+async fn the_first_collection_scan_request_targets_component(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .requests[0]
+            .component_key
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first collection scan request targets artifact {string}")]
+async fn the_first_collection_scan_request_targets_artifact(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .requests[0]
+            .artifact
+            .identity
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the second collection scan request targets component {string}")]
+async fn the_second_collection_scan_request_targets_component(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .requests[1]
+            .component_key
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the second collection scan request targets artifact {string}")]
+async fn the_second_collection_scan_request_targets_artifact(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_scan_batch
+            .as_ref()
+            .expect("a collection scan batch must exist before assertions")
+            .requests[1]
+            .artifact
+            .identity
+            .as_ref(),
+        expected.as_str()
+    );
 }
 
 #[then(expr = "the durable runtime has {int} pending scan command")]
@@ -1175,6 +1312,7 @@ async fn main() {
     for feature in [
         "manage-collections.feature",
         "register-component.feature",
+        "request-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
         "view-active-findings.feature",

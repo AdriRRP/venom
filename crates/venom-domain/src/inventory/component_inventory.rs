@@ -475,6 +475,17 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn bound_artifact_refs(&self, component_key: &str) -> Option<Vec<ArtifactRef>> {
+        self.components.get(component_key).map(|record| {
+            record
+                .artifacts
+                .iter()
+                .cloned()
+                .collect::<Vec<ArtifactRef>>()
+        })
+    }
+
+    #[must_use]
     pub fn is_collection_managed(&self, collection_key: &str) -> bool {
         self.collections.contains_key(collection_key)
     }

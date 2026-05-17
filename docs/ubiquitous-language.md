@@ -34,6 +34,7 @@ flowchart LR
 | Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A closed explicit grouping of managed components operated as one release or platform scope. | "group", "universe" as the default term |
+| Collection Scan | process | The act of expanding one closed collection into canonical scan requests for each currently owned immutable artifact of each collection member. | implicit ad hoc loops over components |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
 | Context Profile | entity | A reusable template of execution-context information. | "preset" as the canonical domain name |
 | Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |
