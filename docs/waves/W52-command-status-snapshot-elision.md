@@ -1,7 +1,7 @@
 # W52. Command Status Snapshot Elision
 
 Wave: `W52-command-status-snapshot-elision`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -30,7 +30,7 @@ Reduce API-layer copy churn by removing scan command statuses from the shared re
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W52-S01` | done | remove command status snapshots from API read state and serve them directly from `AppService` | `scripts/check-slice.sh --wave W52-command-status-snapshot-elision --slice W52-S01 --lane integration --path apps/api/src/app/service.rs --path apps/api/src/http/mod.rs --path apps/api/src/infra/postgres_backend.rs` |
-| `W52-S02` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W52-command-status-snapshot-elision` |
+| `W52-S02` | done | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W52-command-status-snapshot-elision` |
 
 ## Language impact
 
