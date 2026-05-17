@@ -2,8 +2,10 @@ use crate::app::service::{
     self, ActiveFindingsResponse, AppReadSnapshot, AppService, BindArtifactRequest,
     BindArtifactResponse, CollectionDetailResponse, CollectionMembershipRequest,
     CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
-    ConfigureProviderRequest, ConfigureProviderResponse, DrainIntegrationWorkerCommand,
+    ConfigureProviderRequest, ConfigureProviderResponse, DrainCollectionScanWorkerCommand,
+    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
     DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
     ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
     RegisterCollectionResponse, RegisterComponentResponse, RequestCollectionScanCommand,
@@ -100,6 +102,10 @@ pub fn build_router(state: ApiState) -> Router {
             axum::routing::delete(remove_component_from_collection),
         )
         .route(
+            "/collections/{collection_key}/scan-schedule",
+            post(configure_collection_scan_schedule),
+        )
+        .route(
             "/collections/{collection_key}/scan-requests",
             post(request_collection_scan),
         )
@@ -111,6 +117,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/integration-runtime", post(configure_integration_runtime))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
+        .route(
+            "/collection-scan-workers/drain",
+            post(drain_collection_scan_worker),
+        )
         .route("/scan-workers/run-next", post(run_next_scan))
         .route("/scan-workers/drain", post(drain_worker))
         .route("/integration-workers/drain", post(drain_integration_worker))
@@ -200,6 +210,24 @@ async fn remove_component_from_collection(
         let mut service = state.inner.service.lock().await;
         let response = service
             .remove_component_from_collection(&collection_key, &component_key)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn configure_collection_scan_schedule(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<ConfigureCollectionScanScheduleRequest>,
+) -> Result<Json<ConfigureCollectionScanScheduleResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .configure_collection_scan_schedule(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
@@ -322,6 +350,23 @@ async fn scan_command_status(
         .read_snapshot()
         .scan_command_status(&command_id)
         .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn drain_collection_scan_worker(
+    State(state): State<ApiState>,
+    Json(request): Json<DrainCollectionScanWorkerCommand>,
+) -> Result<Json<DrainCollectionScanWorkerResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .run_collection_scan_worker_until_idle(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
     Ok(Json(response))
 }
 
@@ -687,6 +732,85 @@ mod tests {
         assert_eq!(payload["freshness"], "deterministic");
         assert_eq!(payload["enqueued"], 1);
         assert_eq!(payload["command_ids"].as_array().map_or(0, Vec::len), 1);
+    }
+
+    #[tokio::test]
+    async fn api_configures_collection_scan_schedule_and_exposes_it_in_detail() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-schedule", "state"),
+                temp_path("collection-schedule", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["change"], "configured");
+        assert_eq!(payload["cadence_minutes"], 60);
+        assert_eq!(payload["freshness"], "deterministic");
+
+        let response = router
+            .oneshot(
+                Request::get("/collections/release%3A2026.05")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection detail request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["scan_schedule"]["cadence_minutes"], 60);
+        assert_eq!(payload["scan_schedule"]["freshness"], "deterministic");
+    }
+
+    #[tokio::test]
+    async fn api_drains_due_collection_scan_schedules_into_pending_commands() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-scheduler", "state"),
+                temp_path("collection-scheduler", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_collection_scheduler(router.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["outcome"], "drained");
+        assert_eq!(payload["processed_collections"], 1);
+        assert_eq!(payload["enqueued_commands"], 1);
+        assert_eq!(payload["pending_due_remaining"], 0);
     }
 
     #[tokio::test]
@@ -1190,6 +1314,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_collection_schedule_reloads_and_drains_due_commands() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_schedule");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = drain_collection_scheduler(reloaded.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["processed_collections"], 1);
+        assert_eq!(payload["enqueued_commands"], 1);
+        assert_eq!(payload["pending_due_remaining"], 0);
+    }
+
+    #[tokio::test]
     async fn postgres_integration_publication_worker_is_bounded_and_durable() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -1393,6 +1559,24 @@ mod tests {
             .expect("configure provider request should succeed")
     }
 
+    async fn configure_collection_schedule(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/scan-schedule")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "cadence_minutes": 60,
+                            "freshness": "deterministic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("configure collection schedule request should succeed")
+    }
+
     async fn configure_fixture_integration_runtime(
         router: axum::Router,
     ) -> axum::response::Response {
@@ -1592,6 +1776,26 @@ mod tests {
             )
             .await
             .expect("drain request should succeed")
+    }
+
+    async fn drain_collection_scheduler(
+        router: axum::Router,
+        max_collections: usize,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collection-scan-workers/drain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "max_collections": max_collections
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection scan drain request should succeed")
     }
 
     async fn drain_integration_worker_with_success(

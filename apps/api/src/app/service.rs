@@ -1,15 +1,16 @@
 use crate::infra::http_integration_publisher::{
     HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher,
 };
-use crate::infra::postgres_backend::PostgresBackend;
+use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresBackend};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration, ComponentInventory,
-    ComponentRegistration, DurableScanRuntime, DurableState, EvidenceFreshness, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration,
+    CollectionScanScheduler, ComponentInventory, ComponentRegistration, DurableScanRuntime,
+    DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult, ReportedFinding,
     RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
@@ -145,6 +146,9 @@ impl AppReadSnapshot {
         Ok(CollectionDetailResponse {
             collection_key: collection.collection_key.into(),
             name: collection.name.into(),
+            scan_schedule: collection
+                .scan_schedule
+                .map(CollectionScanScheduleItem::from),
             members: collection
                 .component_keys
                 .into_iter()
@@ -358,6 +362,60 @@ impl AppService {
         })
     }
 
+    /// Configure one periodic scan schedule for one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or the durable write fails.
+    pub async fn configure_collection_scan_schedule(
+        &mut self,
+        collection_key: &str,
+        request: ConfigureCollectionScanScheduleRequest,
+    ) -> Result<ConfigureCollectionScanScheduleResponse, AppServiceError> {
+        let freshness = parse_freshness(&request.freshness)?;
+        if request.cadence_minutes == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "cadence_minutes must be greater than zero".to_owned(),
+            ));
+        }
+        let next_due_at_unix_ms = current_unix_millis()?;
+
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .configure_collection_scan_schedule(
+                    collection_key,
+                    request.cadence_minutes,
+                    freshness,
+                    next_due_at_unix_ms,
+                )
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .configure_collection_scan_schedule(
+                    collection_key,
+                    request.cadence_minutes,
+                    freshness,
+                    next_due_at_unix_ms,
+                )
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        let Some(schedule) = result.schedule else {
+            return Err(AppServiceError::InvalidRequest(format!(
+                "unknown collection: {collection_key}"
+            )));
+        };
+
+        Ok(ConfigureCollectionScanScheduleResponse {
+            change: result.change.as_str().to_owned(),
+            collection_key: collection_key.to_owned(),
+            cadence_minutes: schedule.cadence_minutes,
+            freshness: freshness_name(schedule.freshness).to_owned(),
+            next_due_at_unix_ms: schedule.next_due_at_unix_ms,
+        })
+    }
+
     /// Configure the runtime provider that one managed component will use for scan execution.
     ///
     /// # Errors
@@ -542,6 +600,92 @@ impl AppService {
             enqueued: command_ids.len(),
             command_ids,
         })
+    }
+
+    /// Materialize due collection scan schedules into canonical durable scan commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the request is invalid or the durable state fails.
+    pub async fn run_collection_scan_worker_until_idle(
+        &mut self,
+        request: DrainCollectionScanWorkerCommand,
+    ) -> Result<DrainCollectionScanWorkerResponse, AppServiceError> {
+        let max_collections = request.max_collections.ok_or_else(|| {
+            AppServiceError::InvalidRequest("max_collections is required".to_owned())
+        })?;
+        if max_collections == 0 {
+            return Err(AppServiceError::InvalidRequest(
+                "max_collections must be greater than zero".to_owned(),
+            ));
+        }
+
+        let now_unix_ms = current_unix_millis()?;
+        match &mut self.backend {
+            AppBackend::Local(local) => {
+                let mut inventory = local.state.ingestion().inventory().clone();
+                let due_scans = CollectionScanScheduler::new(&mut inventory)
+                    .collect_due(now_unix_ms, max_collections);
+
+                for due_scan in &due_scans {
+                    let schedule = inventory
+                        .collection_scan_schedule(due_scan.collection_key.as_ref())
+                        .ok_or_else(|| {
+                            AppServiceError::State(
+                                "due collection schedule missing after local scheduling".to_owned(),
+                            )
+                        })?;
+                    local
+                        .state
+                        .configure_collection_scan_schedule(
+                            due_scan.collection_key.as_ref(),
+                            schedule.cadence_minutes,
+                            schedule.freshness,
+                            schedule.next_due_at_unix_ms,
+                        )
+                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                }
+
+                let processed_collections = due_scans.len();
+                let mut enqueued_commands = 0_usize;
+                let mut last_collection_key = None;
+                for due_scan in due_scans {
+                    enqueued_commands += due_scan.requests.len();
+                    last_collection_key = Some(due_scan.collection_key.to_string());
+                    for scan_request in due_scan.requests {
+                        let _ = local
+                            .runtime
+                            .enqueue(scan_request)
+                            .map_err(|error| AppServiceError::State(error.to_string()))?;
+                    }
+                }
+
+                let pending_due_remaining =
+                    inventory.due_collection_keys(now_unix_ms, usize::MAX).len();
+                let outcome = if processed_collections == 0 {
+                    "idle"
+                } else if pending_due_remaining == 0 {
+                    "drained"
+                } else {
+                    "limited"
+                };
+
+                Ok(DrainCollectionScanWorkerResponse {
+                    outcome: outcome.to_owned(),
+                    processed_collections,
+                    enqueued_commands,
+                    pending_due_remaining,
+                    last_collection_key,
+                })
+            }
+            AppBackend::Postgres(postgres) => {
+                let result = postgres
+                    .drain_due_collection_scans(max_collections, now_unix_ms)
+                    .await
+                    .map_err(AppServiceError::State)?;
+                Ok(DrainCollectionScanWorkerResponse::from(result))
+            }
+        }
     }
 
     /// Drain pending scan commands through one bounded worker loop.
@@ -883,12 +1027,30 @@ pub struct CollectionSummary {
 pub struct CollectionDetailResponse {
     pub collection_key: String,
     pub name: String,
+    pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub members: Vec<CollectionMemberItem>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CollectionMemberItem {
     pub component_key: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CollectionScanScheduleItem {
+    pub cadence_minutes: u32,
+    pub freshness: &'static str,
+    pub next_due_at_unix_ms: u64,
+}
+
+impl From<venom_domain::CollectionScanSchedule> for CollectionScanScheduleItem {
+    fn from(value: venom_domain::CollectionScanSchedule) -> Self {
+        Self {
+            cadence_minutes: value.cadence_minutes,
+            freshness: freshness_name(value.freshness),
+            next_due_at_unix_ms: value.next_due_at_unix_ms,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -912,6 +1074,21 @@ pub struct ConfigureProviderRequest {
 pub struct ConfigureProviderResponse {
     pub change: String,
     pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureCollectionScanScheduleRequest {
+    pub cadence_minutes: u32,
+    pub freshness: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigureCollectionScanScheduleResponse {
+    pub change: String,
+    pub collection_key: String,
+    pub cadence_minutes: u32,
+    pub freshness: String,
+    pub next_due_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1041,6 +1218,32 @@ pub struct RequestCollectionScanResponse {
     pub command_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DrainCollectionScanWorkerCommand {
+    pub max_collections: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DrainCollectionScanWorkerResponse {
+    pub outcome: String,
+    pub processed_collections: usize,
+    pub enqueued_commands: usize,
+    pub pending_due_remaining: usize,
+    pub last_collection_key: Option<String>,
+}
+
+impl From<DrainDueCollectionScansResult> for DrainCollectionScanWorkerResponse {
+    fn from(value: DrainDueCollectionScansResult) -> Self {
+        Self {
+            outcome: value.outcome.into(),
+            processed_collections: value.processed_collections,
+            enqueued_commands: value.enqueued_commands,
+            pending_due_remaining: value.pending_due_remaining,
+            last_collection_key: value.last_collection_key.map(Into::into),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScanCommandStatusResponse {
     pub command_id: String,
@@ -1127,6 +1330,21 @@ fn parse_freshness(value: &str) -> Result<EvidenceFreshness, AppServiceError> {
             "unsupported freshness: {value}"
         ))),
     }
+}
+
+const fn freshness_name(value: EvidenceFreshness) -> &'static str {
+    match value {
+        EvidenceFreshness::Deterministic => "deterministic",
+        EvidenceFreshness::Live => "live",
+    }
+}
+
+fn current_unix_millis() -> Result<u64, AppServiceError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| AppServiceError::State(error.to_string()))?;
+    u64::try_from(duration.as_millis())
+        .map_err(|_| AppServiceError::State("current unix millis overflow".to_owned()))
 }
 
 fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
