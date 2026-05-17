@@ -18,6 +18,7 @@ const defaultRequest = {
 	artifactKind: "container-image",
 	artifactIdentity: "registry.example/payments@sha256:111",
 	minSeverity: "all",
+	packageName: "",
 	limit: 50,
 	offset: 0,
 };
@@ -65,6 +66,27 @@ export function FindingsPage() {
 		return healthQuery.data === "healthy" ? "healthy" : "unhealthy";
 	}, [healthQuery.data, healthQuery.isLoading]);
 
+	const findingsWindowLabel = useMemo(() => {
+		const total = findingsQuery.data?.total_active_findings ?? 0;
+		const returned = findingsQuery.data?.returned ?? 0;
+		const offset = findingsQuery.data?.offset ?? request.offset;
+
+		if (total === 0 || returned === 0) {
+			return "Showing 0 of 0";
+		}
+
+		const start = offset + 1;
+		const end = offset + returned;
+		return `Showing ${start}-${end} of ${total}`;
+	}, [findingsQuery.data, request.offset]);
+
+	const canGoPrevious = request.offset > 0 && !findingsQuery.isFetching;
+	const canGoNext =
+		(findingsQuery.data?.offset ?? request.offset) +
+			(findingsQuery.data?.returned ?? 0) <
+			(findingsQuery.data?.total_active_findings ?? 0) &&
+		!findingsQuery.isFetching;
+
 	return (
 		<AppShell apiHealth={healthLabel} currentView="findings">
 			<section className="panel">
@@ -97,6 +119,7 @@ export function FindingsPage() {
 							),
 							artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
 							minSeverity: String(formData.get("minSeverity") ?? "all"),
+							packageName: String(formData.get("packageName") ?? ""),
 							limit: Number(formData.get("limit") ?? 50),
 							offset: 0,
 						});
@@ -119,6 +142,10 @@ export function FindingsPage() {
 							defaultValue={request.artifactIdentity}
 							name="artifactIdentity"
 						/>
+					</label>
+					<label>
+						Package name
+						<input defaultValue={request.packageName} name="packageName" />
 					</label>
 					<label>
 						Minimum severity
@@ -157,6 +184,36 @@ export function FindingsPage() {
 					<span>Returned: {findingsQuery.data?.returned ?? 0}</span>
 					<span>Offset: {findingsQuery.data?.offset ?? 0}</span>
 					<span>Limit: {findingsQuery.data?.limit ?? request.limit}</span>
+					<span>{findingsWindowLabel}</span>
+				</div>
+
+				<div className="results-meta">
+					<button
+						className="secondary-button"
+						disabled={!canGoPrevious}
+						onClick={() => {
+							setRequest((current) => ({
+								...current,
+								offset: Math.max(0, current.offset - current.limit),
+							}));
+						}}
+						type="button"
+					>
+						Previous Page
+					</button>
+					<button
+						className="secondary-button"
+						disabled={!canGoNext}
+						onClick={() => {
+							setRequest((current) => ({
+								...current,
+								offset: current.offset + current.limit,
+							}));
+						}}
+						type="button"
+					>
+						Next Page
+					</button>
 				</div>
 
 				<div className="table-wrap">

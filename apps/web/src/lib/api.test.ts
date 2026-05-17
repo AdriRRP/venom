@@ -45,12 +45,14 @@ describe("fetchApiHealth", () => {
 			artifactKind: "container-image",
 			artifactIdentity: "registry.example/payments@sha256:111",
 			minSeverity: "high",
+			packageName: "openssl",
 		});
 
 		expect(calls[0]).toContain("/api/findings/active?");
 		expect(calls[0]).toContain("component_key=component%3Apayments-api");
 		expect(calls[0]).toContain("artifact_kind=container-image");
 		expect(calls[0]).toContain("min_severity=high");
+		expect(calls[0]).toContain("package_name=openssl");
 	});
 
 	it("serializes register, bind, configure, and request-scan mutations", async () => {
