@@ -235,6 +235,10 @@ pub struct CollectionScanSchedule {
     pub freshness: EvidenceFreshness,
     /// Unix epoch time in milliseconds when the next scheduler pass may materialize one batch.
     pub next_due_at_unix_ms: u64,
+    /// Unix epoch time in milliseconds when one scheduler pass last materialized this collection.
+    pub last_materialized_at_unix_ms: Option<u64>,
+    /// Number of scan commands enqueued by the last scheduler pass.
+    pub last_enqueued_commands: Option<u32>,
 }
 
 /// Observable outcome of configuring one collection scan schedule.
@@ -527,11 +531,62 @@ impl ComponentInventory {
             };
         };
 
+        let prior_run = record.scan_schedule.map_or((None, None), |schedule| {
+            (
+                schedule.last_materialized_at_unix_ms,
+                schedule.last_enqueued_commands,
+            )
+        });
         let schedule = CollectionScanSchedule {
             cadence_minutes,
             freshness,
             next_due_at_unix_ms,
+            last_materialized_at_unix_ms: prior_run.0,
+            last_enqueued_commands: prior_run.1,
         };
+        let change = if record.scan_schedule == Some(schedule) {
+            ConfigureCollectionScanScheduleChange::Unchanged
+        } else {
+            record.scan_schedule = Some(schedule);
+            ConfigureCollectionScanScheduleChange::Configured
+        };
+
+        ConfigureCollectionScanScheduleResult {
+            change,
+            schedule: record.scan_schedule,
+        }
+    }
+
+    #[must_use]
+    pub fn record_collection_scan_materialization(
+        &mut self,
+        collection_key: &str,
+        next_due_at_unix_ms: u64,
+        materialized_at_unix_ms: u64,
+        enqueued_commands: u32,
+    ) -> ConfigureCollectionScanScheduleResult {
+        let Some(record) = self.collections.get_mut(collection_key) else {
+            return ConfigureCollectionScanScheduleResult {
+                change: ConfigureCollectionScanScheduleChange::Rejected,
+                schedule: None,
+            };
+        };
+
+        let Some(existing_schedule) = record.scan_schedule else {
+            return ConfigureCollectionScanScheduleResult {
+                change: ConfigureCollectionScanScheduleChange::Rejected,
+                schedule: None,
+            };
+        };
+
+        let schedule = CollectionScanSchedule {
+            cadence_minutes: existing_schedule.cadence_minutes,
+            freshness: existing_schedule.freshness,
+            next_due_at_unix_ms,
+            last_materialized_at_unix_ms: Some(materialized_at_unix_ms),
+            last_enqueued_commands: Some(enqueued_commands),
+        };
+
         let change = if record.scan_schedule == Some(schedule) {
             ConfigureCollectionScanScheduleChange::Unchanged
         } else {
@@ -951,6 +1006,8 @@ mod tests {
                 cadence_minutes: 60,
                 freshness: EvidenceFreshness::Deterministic,
                 next_due_at_unix_ms: 1_000,
+                last_materialized_at_unix_ms: None,
+                last_enqueued_commands: None,
             })
         );
     }
@@ -1038,6 +1095,43 @@ mod tests {
         assert!(!summaries[1].due_now);
         assert_eq!(summaries[2].collection_key.as_ref(), "release:2026.07");
         assert!(summaries[2].scan_schedule.is_none());
+    }
+
+    #[test]
+    fn materialized_collection_schedule_keeps_last_run_metadata() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.05",
+            "May Release",
+        ));
+        let _ = inventory.configure_collection_scan_schedule(
+            "release:2026.05",
+            60,
+            EvidenceFreshness::Deterministic,
+            1_000,
+        );
+
+        let result = inventory.record_collection_scan_materialization(
+            "release:2026.05",
+            3_601_500,
+            1_500,
+            1,
+        );
+
+        assert_eq!(
+            result.change,
+            ConfigureCollectionScanScheduleChange::Configured
+        );
+        assert_eq!(
+            inventory.collection_scan_schedule("release:2026.05"),
+            Some(super::CollectionScanSchedule {
+                cadence_minutes: 60,
+                freshness: EvidenceFreshness::Deterministic,
+                next_due_at_unix_ms: 3_601_500,
+                last_materialized_at_unix_ms: Some(1_500),
+                last_enqueued_commands: Some(1),
+            })
+        );
     }
 
     #[test]

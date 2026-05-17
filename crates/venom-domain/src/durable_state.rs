@@ -310,6 +310,39 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably record one collection schedule materialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn record_collection_scan_materialization(
+        &mut self,
+        collection_key: &str,
+        next_due_at_unix_ms: u64,
+        materialized_at_unix_ms: u64,
+        enqueued_commands: u32,
+    ) -> Result<ConfigureCollectionScanScheduleResult, DurableStateError> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .record_collection_scan_materialization(
+                collection_key,
+                next_due_at_unix_ms,
+                materialized_at_unix_ms,
+                enqueued_commands,
+            );
+        if result.change == ConfigureCollectionScanScheduleChange::Configured {
+            self.append_event(&DurableEvent::CollectionScanScheduleMaterialized {
+                collection_key: collection_key.into(),
+                next_due_at_unix_ms,
+                materialized_at_unix_ms,
+                enqueued_commands,
+            })?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably configure the integration publication runtime.
     ///
     /// # Errors
@@ -400,7 +433,8 @@ impl DurableState {
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
             | DurableEvent::CollectionComponentRemoved { .. }
-            | DurableEvent::CollectionScanScheduleConfigured { .. } => {
+            | DurableEvent::CollectionScanScheduleConfigured { .. }
+            | DurableEvent::CollectionScanScheduleMaterialized { .. } => {
                 self.apply_inventory_event(event, line)
             }
             DurableEvent::IntegrationRuntimeConfigured { config } => {
@@ -467,6 +501,18 @@ impl DurableState {
                 cadence_minutes,
                 freshness,
                 next_due_at_unix_ms,
+                line,
+            ),
+            DurableEvent::CollectionScanScheduleMaterialized {
+                collection_key,
+                next_due_at_unix_ms,
+                materialized_at_unix_ms,
+                enqueued_commands,
+            } => self.apply_collection_scan_schedule_materialized(
+                collection_key.as_ref(),
+                next_due_at_unix_ms,
+                materialized_at_unix_ms,
+                enqueued_commands,
                 line,
             ),
             DurableEvent::IntegrationRuntimeConfigured { .. }
@@ -620,6 +666,35 @@ impl DurableState {
         }
     }
 
+    fn apply_collection_scan_schedule_materialized(
+        &mut self,
+        collection_key: &str,
+        next_due_at_unix_ms: u64,
+        materialized_at_unix_ms: u64,
+        enqueued_commands: u32,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .record_collection_scan_materialization(
+                collection_key,
+                next_due_at_unix_ms,
+                materialized_at_unix_ms,
+                enqueued_commands,
+            );
+        match result.change {
+            ConfigureCollectionScanScheduleChange::Configured
+            | ConfigureCollectionScanScheduleChange::Unchanged => Ok(()),
+            ConfigureCollectionScanScheduleChange::Rejected => {
+                Err(DurableStateError::CorruptHistory {
+                    line,
+                    reason: "invalid collection scan materialization".into(),
+                })
+            }
+        }
+    }
+
     fn apply_provider_scan_recorded(
         &mut self,
         report: StoredProviderScanReport,
@@ -752,6 +827,12 @@ enum DurableEvent {
         cadence_minutes: u32,
         freshness: EvidenceFreshness,
         next_due_at_unix_ms: u64,
+    },
+    CollectionScanScheduleMaterialized {
+        collection_key: Box<str>,
+        next_due_at_unix_ms: u64,
+        materialized_at_unix_ms: u64,
+        enqueued_commands: u32,
     },
     IntegrationRuntimeConfigured {
         config: IntegrationRuntimeConfig,
@@ -1107,6 +1188,59 @@ mod tests {
                 cadence_minutes: 60,
                 freshness: EvidenceFreshness::Deterministic,
                 next_due_at_unix_ms: 1_000,
+                last_materialized_at_unix_ms: None,
+                last_enqueued_commands: None,
+            })
+        );
+    }
+
+    #[test]
+    fn replay_keeps_collection_schedule_materialization_metadata() {
+        let path = temp_path("durable-state-collection-schedule-runs");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .expect("collection should persist");
+        let _ = state
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .expect("collection membership should persist");
+        let _ = state
+            .configure_collection_scan_schedule(
+                "release:2026.05",
+                60,
+                EvidenceFreshness::Deterministic,
+                1_000,
+            )
+            .expect("schedule should persist");
+        let _ = state
+            .record_collection_scan_materialization("release:2026.05", 3_601_500, 1_500, 1)
+            .expect("materialization should persist");
+
+        let rebuilt = DurableState::open(&path).expect("durable state should replay");
+
+        assert_eq!(
+            rebuilt
+                .ingestion()
+                .inventory()
+                .collection_scan_schedule("release:2026.05"),
+            Some(crate::CollectionScanSchedule {
+                cadence_minutes: 60,
+                freshness: EvidenceFreshness::Deterministic,
+                next_due_at_unix_ms: 3_601_500,
+                last_materialized_at_unix_ms: Some(1_500),
+                last_enqueued_commands: Some(1),
             })
         );
     }

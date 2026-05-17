@@ -1110,6 +1110,36 @@ async fn the_third_collection_schedule_has_no_periodic_cadence(world: &mut Accep
     );
 }
 
+#[then(expr = "the first collection schedule last ran at unix ms {int}")]
+async fn the_first_collection_schedule_last_ran_at_unix_ms(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .first()
+            .and_then(|summary| summary.scan_schedule)
+            .and_then(|schedule| schedule.last_materialized_at_unix_ms),
+        Some(u64::try_from(expected).expect("expected time should fit u64"))
+    );
+}
+
+#[then(expr = "the first collection schedule last enqueued {int} commands")]
+async fn the_first_collection_schedule_last_enqueued_commands(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .first()
+            .and_then(|summary| summary.scan_schedule)
+            .and_then(|schedule| schedule.last_enqueued_commands),
+        Some(u32::try_from(expected).expect("expected command count should fit u32"))
+    );
+}
+
 #[then(expr = "the first due collection scan targets collection {string}")]
 async fn the_first_due_collection_scan_targets_collection(
     world: &mut AcceptanceWorld,

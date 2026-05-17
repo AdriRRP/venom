@@ -24,6 +24,10 @@ impl<'a> CollectionScanScheduler<'a> {
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// Panics if one collection materializes more than `u32::MAX` scan requests in one pass.
     pub fn collect_due(
         &mut self,
         now_unix_ms: u64,
@@ -52,11 +56,11 @@ impl<'a> CollectionScanScheduler<'a> {
             };
             let next_due_at_unix_ms =
                 now_unix_ms.saturating_add(cadence_minutes_to_millis(schedule.cadence_minutes));
-            let _ = self.inventory.configure_collection_scan_schedule(
+            let _ = self.inventory.record_collection_scan_materialization(
                 collection_key.as_ref(),
-                schedule.cadence_minutes,
-                schedule.freshness,
                 next_due_at_unix_ms,
+                now_unix_ms,
+                u32::try_from(batch.requests.len()).expect("request count should fit u32"),
             );
             due_scans.push(DueCollectionScan {
                 collection_key,
@@ -123,6 +127,20 @@ mod tests {
                 .expect("schedule should remain configured")
                 .next_due_at_unix_ms,
             3_601_500
+        );
+        assert_eq!(
+            inventory
+                .collection_scan_schedule("release:2026.05")
+                .expect("schedule should remain configured")
+                .last_materialized_at_unix_ms,
+            Some(1_500)
+        );
+        assert_eq!(
+            inventory
+                .collection_scan_schedule("release:2026.05")
+                .expect("schedule should remain configured")
+                .last_enqueued_commands,
+            Some(1)
         );
     }
 }
