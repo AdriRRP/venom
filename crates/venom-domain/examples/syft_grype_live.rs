@@ -1,11 +1,13 @@
 #![allow(clippy::needless_pass_by_ref_mut, clippy::unused_async)]
 
 use std::{env, fs, path::PathBuf, time::Duration};
-use venom_domain::{
-    ArtifactKind, ArtifactRef, DockerSyftGrypeProvider, EvidenceFreshness, FindingProvider,
-    ScanRequest, artifact_identity_from_syft_json, as_provider_error,
-    validate_provider_scan_report,
+use venom_domain::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
 };
+use venom_domain::scanning::syft_grype::{
+    DockerSyftGrypeProvider, artifact_identity_from_syft_json,
+};
+use venom_domain::{ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider, ScanRequest};
 
 #[tokio::main]
 async fn main() {

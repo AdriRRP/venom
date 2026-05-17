@@ -1,5 +1,5 @@
 use crate::app::service::{
-    self, ActiveFindingsResponse, AppReadSnapshot, AppService, BindArtifactRequest,
+    self, ActiveFindingsResponse, ApiApplication, ApiReadSnapshot, BindArtifactRequest,
     BindArtifactResponse, CollectionDetailResponse, CollectionMembershipRequest,
     CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
@@ -29,9 +29,9 @@ pub struct ApiState {
 }
 
 struct ApiStateInner {
-    service: Mutex<AppService>,
-    read_snapshot_tx: watch::Sender<Arc<AppReadSnapshot>>,
-    read_snapshot_rx: watch::Receiver<Arc<AppReadSnapshot>>,
+    service: Mutex<ApiApplication>,
+    read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
+    read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
 }
 
 impl ApiState {
@@ -44,8 +44,8 @@ impl ApiState {
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, String> {
-        let service =
-            AppService::open_local(state_path, runtime_path).map_err(|error| error.to_string())?;
+        let service = ApiApplication::open_local(state_path, runtime_path)
+            .map_err(|error| error.to_string())?;
         Ok(Self::new(service))
     }
 
@@ -55,13 +55,13 @@ impl ApiState {
     ///
     /// Returns an error string when the Postgres durable backend cannot be opened.
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
-        let service = AppService::open_postgres(database_url, schema)
+        let service = ApiApplication::open_postgres(database_url, schema)
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self::new(service))
     }
 
-    fn new(service: AppService) -> Self {
+    fn new(service: ApiApplication) -> Self {
         let snapshot = Arc::new(service.read_snapshot());
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
@@ -73,14 +73,22 @@ impl ApiState {
         }
     }
 
-    fn read_snapshot(&self) -> Arc<AppReadSnapshot> {
+    fn read_snapshot(&self) -> Arc<ApiReadSnapshot> {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
-    fn refresh_snapshot(&self, service: &AppService) {
-        self.inner
-            .read_snapshot_tx
-            .send_replace(Arc::new(service.read_snapshot()));
+    fn refresh_inventory_snapshot(&self, service: &ApiApplication) {
+        let next = self
+            .read_snapshot()
+            .with_inventory(service.inventory_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    fn refresh_read_model_snapshot(&self, service: &ApiApplication) {
+        let next = self
+            .read_snapshot()
+            .with_read_model(service.read_model_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 }
 
@@ -143,7 +151,7 @@ async fn register_component(
             .register_component(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -160,7 +168,7 @@ async fn register_collection(
             .register_collection(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -199,7 +207,7 @@ async fn add_component_to_collection(
             .add_component_to_collection(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -216,7 +224,7 @@ async fn remove_component_from_collection(
             .remove_component_from_collection(&collection_key, &component_key)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -234,7 +242,7 @@ async fn configure_collection_scan_schedule(
             .configure_collection_scan_schedule(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -252,7 +260,7 @@ async fn bind_artifact(
             .bind_artifact(&component_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -270,7 +278,7 @@ async fn configure_provider(
             .configure_provider(&component_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -287,7 +295,6 @@ async fn configure_integration_runtime(
             .configure_integration_runtime(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };
@@ -304,7 +311,7 @@ async fn record_provider_report(
             .record_provider_report(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };
@@ -321,7 +328,6 @@ async fn request_scan(
             .request_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };
@@ -339,7 +345,6 @@ async fn request_collection_scan(
             .request_collection_scan(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };
@@ -350,10 +355,12 @@ async fn scan_command_status(
     State(state): State<ApiState>,
     Path(command_id): Path<String>,
 ) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
-    let response = state
-        .read_snapshot()
-        .scan_command_status(&command_id)
-        .map_err(ApiError::from)?;
+    let response = {
+        let service = state.inner.service.lock().await;
+        service
+            .scan_command_status(&command_id)
+            .map_err(ApiError::from)?
+    };
     Ok(Json(response))
 }
 
@@ -367,7 +374,7 @@ async fn drain_collection_scan_worker(
             .run_collection_scan_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -384,7 +391,7 @@ async fn run_next_scan(
             .run_next_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };
@@ -401,7 +408,7 @@ async fn drain_worker(
             .run_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };
@@ -418,7 +425,6 @@ async fn drain_integration_worker(
             .publish_integration_events_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_snapshot(&service);
         drop(service);
         response
     };
@@ -487,15 +493,15 @@ impl ApiError {
     }
 }
 
-impl From<service::AppServiceError> for ApiError {
-    fn from(value: service::AppServiceError) -> Self {
+impl From<service::ApiApplicationError> for ApiError {
+    fn from(value: service::ApiApplicationError) -> Self {
         match value {
-            service::AppServiceError::InvalidRequest(message) => Self::bad_request(message),
-            service::AppServiceError::NotFound(message) => Self {
+            service::ApiApplicationError::InvalidRequest(message) => Self::bad_request(message),
+            service::ApiApplicationError::NotFound(message) => Self {
                 status: StatusCode::NOT_FOUND,
                 message,
             },
-            service::AppServiceError::State(message) => Self::internal(message),
+            service::ApiApplicationError::State(message) => Self::internal(message),
         }
     }
 }

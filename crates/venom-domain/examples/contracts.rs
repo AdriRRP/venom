@@ -6,13 +6,20 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
-use venom_domain::{
-    ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
-    EvidenceFreshness, FindingProvider, FixtureSyftGrypeProvider, IntegrationEventPublishError,
-    IntegrationEventPublisher, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanPlanner,
-    ScanRequest, artifact_identity_from_syft_json, as_provider_error,
-    validate_provider_scan_report,
+use venom_domain::DurableState;
+use venom_domain::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
 };
+use venom_domain::findings::{
+    ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, ScanRequest,
+};
+use venom_domain::integration::{IntegrationEventPublishError, IntegrationEventPublisher};
+use venom_domain::inventory::ComponentRegistration;
+use venom_domain::scanning::syft_grype::{
+    FixtureSyftGrypeProvider, artifact_identity_from_syft_json,
+};
+use venom_domain::scanning::{ScanCommandQueue, ScanPlanner};
 
 #[tokio::main]
 async fn main() {
@@ -98,7 +105,7 @@ async fn run_outbox_contracts() {
     let rebuilt_state = DurableState::open(&state_path).expect("durable state should replay");
     assert_eq!(rebuilt_state.pending_integration_events().len(), 0);
 
-    let mut runtime = DurableScanRuntime::open(&runtime_path).expect("runtime should open");
+    let mut runtime = ScanCommandQueue::open(&runtime_path).expect("runtime should open");
     let request = ScanPlanner::new(state.ingestion().inventory())
         .plan(
             "component:payments-api",
@@ -117,7 +124,7 @@ async fn run_outbox_contracts() {
         .await
         .expect("failed publication outcome must persist explicitly");
     assert_eq!(failed_publish.published, 0);
-    let rebuilt_runtime = DurableScanRuntime::open(&runtime_path).expect("runtime should replay");
+    let rebuilt_runtime = ScanCommandQueue::open(&runtime_path).expect("runtime should replay");
     assert_eq!(rebuilt_runtime.pending_integration_events().len(), 1);
 }
 

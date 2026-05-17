@@ -10,9 +10,6 @@ pub use finding_provider::{
     FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanRequest,
     Severity,
 };
-pub use finding_provider_contract::{
-    FindingProviderContractViolation, as_provider_error, validate_provider_scan_report,
-};
 pub use finding_read_model::{
     ActiveFindingsPage, ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
     MAX_ACTIVE_FINDINGS_PAGE_LIMIT,

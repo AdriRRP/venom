@@ -4,16 +4,22 @@ use cucumber::{World as _, given, then, when};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use venom_domain::{
-    ActiveFindingsPage, ActiveFindingsQuery, AddCollectionComponentResult, ArtifactKind,
-    ArtifactRef, BindArtifactResult, CollectionRegistration, CollectionScanBatch,
-    CollectionScanPlanningError, CollectionScanScheduler, ComponentRegistration,
-    ConfigureCollectionScanScheduleResult, DueCollectionScan, DurableScanRuntime, DurableState,
-    EvidenceFreshness, FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, ManagedCollectionOperationsSummary,
-    PackageCoordinate, ProviderScanReport, RegisterCollectionResult, RegisterComponentResult,
-    ReportedFinding, RunNextScanResult, ScanExecutionResult, ScanPlanner, ScanPlanningError,
-    ScanRequest, Severity, execute_scan,
+use venom_domain::durable_state::DurableState;
+use venom_domain::findings::{
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
+    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
+    ReportedFinding, ScanRequest, Severity,
+};
+use venom_domain::inventory::{
+    AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
+    ComponentRegistration, ConfigureCollectionScanScheduleResult,
+    ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
+};
+use venom_domain::scanning::{
+    CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
+    RunNextScanResult, ScanCommandQueue, ScanExecutionResult, ScanPlanner, ScanPlanningError,
+    execute_scan,
 };
 
 #[derive(Debug, Default, cucumber::World)]
@@ -41,7 +47,7 @@ struct AcceptanceWorld {
     durable_history_path: Option<PathBuf>,
     durable_state: Option<DurableState>,
     durable_runtime_path: Option<PathBuf>,
-    durable_runtime: Option<DurableScanRuntime>,
+    durable_runtime: Option<ScanCommandQueue>,
     last_durable_command_id: Option<String>,
     last_durable_runtime_result: Option<String>,
     last_durable_runtime_error: Option<String>,
@@ -93,7 +99,7 @@ async fn a_new_durable_state(world: &mut AcceptanceWorld) {
 async fn a_new_durable_scan_runtime(world: &mut AcceptanceWorld) {
     let path = durable_history_path("acceptance-durable-runtime");
     world.durable_runtime = Some(
-        DurableScanRuntime::open(&path)
+        ScanCommandQueue::open(&path)
             .expect("a new durable scan runtime must be creatable for acceptance"),
     );
     world.durable_runtime_path = Some(path);
@@ -1564,13 +1570,13 @@ impl AcceptanceWorld {
             .expect("a durable state must exist before durable assertions")
     }
 
-    const fn durable_runtime_mut(&mut self) -> &mut DurableScanRuntime {
+    const fn durable_runtime_mut(&mut self) -> &mut ScanCommandQueue {
         self.durable_runtime
             .as_mut()
             .expect("a durable scan runtime must exist before durable runtime operations")
     }
 
-    const fn durable_runtime_ref(&self) -> &DurableScanRuntime {
+    const fn durable_runtime_ref(&self) -> &ScanCommandQueue {
         self.durable_runtime
             .as_ref()
             .expect("a durable scan runtime must exist before durable runtime assertions")

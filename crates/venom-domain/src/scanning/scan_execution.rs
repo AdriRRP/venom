@@ -1,6 +1,9 @@
+use crate::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
+};
 use crate::{
     FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, ScanRequest, as_provider_error, validate_provider_scan_report,
+    FindingProviderError, ScanRequest,
 };
 
 /// Observable outcome of executing one canonical scan request.

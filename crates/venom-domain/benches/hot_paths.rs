@@ -4,11 +4,14 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::SystemTime;
-use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
-    DurableState, EvidenceFreshness, FindingIngestion, FindingReadModel, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScanRequest, Severity,
+use venom_domain::durable_state::DurableState;
+use venom_domain::findings::{
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingIngestion,
+    FindingReadModel, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanRequest,
+    Severity,
 };
+use venom_domain::inventory::ComponentRegistration;
+use venom_domain::scanning::ScanCommandQueue;
 
 const COMPONENT_KEY: &str = "component:payments-api";
 const ARTIFACT_IDENTITY: &str = "registry.example/payments@sha256:111";
@@ -91,7 +94,7 @@ fn hot_path_benchmarks(criterion: &mut Criterion) {
                 count,
                 |bencher, _| {
                     bencher.iter(|| {
-                        let runtime = DurableScanRuntime::open(black_box(&history_path))
+                        let runtime = ScanCommandQueue::open(black_box(&history_path))
                             .expect("durable runtime history should reopen");
                         black_box(runtime.pending_commands());
                         black_box(runtime.pending_integration_events().len());
@@ -215,7 +218,7 @@ fn seed_durable_scan_runtime_history(events: usize) -> PathBuf {
     let path = benchmark_fixture_root().join(format!("durable-scan-runtime-{events}.jsonl"));
     reset_history_file(&path);
 
-    let mut runtime = DurableScanRuntime::open(&path).expect("durable runtime should open");
+    let mut runtime = ScanCommandQueue::open(&path).expect("durable runtime should open");
     for _ in 0..events {
         runtime
             .enqueue(scan_request())

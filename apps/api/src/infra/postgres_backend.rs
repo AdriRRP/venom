@@ -1,22 +1,33 @@
 use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
-    CollectionScanScheduler, CompletedScanCommand, ComponentInventory, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
-    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
-    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
-    PublishIntegrationEventsResult, RegisterCollectionChange, RegisterCollectionResult,
-    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
+use venom_domain::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
+};
+use venom_domain::findings::{
+    ArtifactKind, ArtifactRef, EvidenceFreshness, FindingChangeSet, FindingIngestion,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingReadModel,
+    ProviderScanReport, ReportedFinding, ScanRequest,
+};
+use venom_domain::integration::{
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
+    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
+    PendingIntegrationEvent, PublishIntegrationEventsResult,
+};
+use venom_domain::inventory::{
+    BindArtifactChange, BindArtifactResult, CollectionRegistration, ComponentInventory,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult,
+};
+use venom_domain::scanning::{
+    CollectionScanScheduler, CompletedScanCommand, FailedScanCommand, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner,
 };
 
 #[derive(Debug)]
-pub struct PostgresBackend {
+pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
     ingestion: FindingIngestion,
@@ -36,7 +47,7 @@ pub struct DrainDueCollectionScansResult {
     pub last_collection_key: Option<Box<str>>,
 }
 
-impl PostgresBackend {
+impl PostgresStore {
     /// Open or create the Postgres durable backend and rebuild in-memory state.
     ///
     /// # Errors
@@ -712,14 +723,6 @@ impl PostgresBackend {
     #[must_use]
     pub fn command_status(&self, command_id: &str) -> Option<ScanCommandStatus> {
         self.commands.get(command_id).map(|record| record.status)
-    }
-
-    #[must_use]
-    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
-        self.commands
-            .iter()
-            .map(|(command_id, record)| (command_id.clone(), record.status))
-            .collect()
     }
 
     #[must_use]
@@ -1763,7 +1766,7 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::PostgresBackend;
+    use super::PostgresStore;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
@@ -1863,7 +1866,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("outbox_report");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -1900,7 +1903,7 @@ mod tests {
             IntegrationEvent::FindingChangesObserved { .. }
         ));
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
@@ -1912,7 +1915,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("collections");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -1934,7 +1937,7 @@ mod tests {
             .await
             .expect("collection membership should persist");
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(
@@ -1951,7 +1954,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("collection_scan_batch");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -2006,7 +2009,7 @@ mod tests {
         assert_eq!(command_ids.len(), 2);
         assert_eq!(backend.pending_commands(), 2);
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_commands(), 2);
@@ -2026,7 +2029,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("outbox_command");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -2068,7 +2071,7 @@ mod tests {
             IntegrationEvent::ScanCommandCompleted { .. }
         ));
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(
@@ -2084,7 +2087,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("publish_success");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -2122,7 +2125,7 @@ mod tests {
         assert_eq!(result.published, 1);
         assert_eq!(backend.pending_integration_events().len(), 0);
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 0);
@@ -2134,7 +2137,7 @@ mod tests {
             return;
         };
         let schema = temp_schema("publish_failure");
-        let mut backend = PostgresBackend::open(&database_url, &schema)
+        let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
         let _ = backend
@@ -2172,7 +2175,7 @@ mod tests {
         assert_eq!(result.published, 0);
         assert_eq!(backend.pending_integration_events().len(), 1);
 
-        let reopened = PostgresBackend::open(&database_url, &schema)
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
