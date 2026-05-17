@@ -1,7 +1,7 @@
 # W50. Inventory Clone Reduction
 
 Wave: `W50-inventory-clone-reduction`
-Status: `active`
+Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
 Infra profile: `db`
@@ -34,7 +34,7 @@ Reduce unnecessary full-ingestion clones on inventory-only durable writes in bot
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W50-S01` | done | replace full ingestion clones with inventory-only clones on inventory-only writes | `scripts/check-slice.sh --wave W50-inventory-clone-reduction --slice W50-S01 --lane integration --path crates/venom-domain/src/durable_state.rs --path apps/api/src/infra/postgres_backend.rs` |
-| `W50-S02` | planned | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W50-inventory-clone-reduction` |
+| `W50-S02` | done | close the wave with docs and full gate alignment | `scripts/check-wave.sh --wave W50-inventory-clone-reduction` |
 
 ## Language impact
 
