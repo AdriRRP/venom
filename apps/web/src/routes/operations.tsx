@@ -18,6 +18,25 @@ import {
 	requestScan,
 } from "../lib/api";
 
+function describeCollectionSchedule(
+	cadenceMinutes: number,
+	freshness: string,
+	dueNow: boolean,
+	lastMaterializedAtUnixMs: number | null,
+	lastEnqueuedCommands: number | null,
+): string {
+	const lastRunLabel =
+		lastMaterializedAtUnixMs === null
+			? "last run never"
+			: `last run ${lastMaterializedAtUnixMs}`;
+	const lastEnqueuedLabel =
+		lastEnqueuedCommands === null
+			? "last enqueued none"
+			: `last enqueued ${lastEnqueuedCommands}`;
+
+	return `${dueNow ? "due now" : "due later"} - every ${cadenceMinutes} minutes (${freshness}) - ${lastRunLabel} - ${lastEnqueuedLabel}`;
+}
+
 export function OperationsPage() {
 	const queryClient = useQueryClient();
 	const [operatorState, setOperatorState] = useState({
@@ -394,7 +413,13 @@ export function OperationsPage() {
 										{collection.collection_key} ({collection.name}) -{" "}
 										{collection.members} members -{" "}
 										{collection.scan_schedule
-											? `${collection.due_now ? "due now" : "due later"} - every ${collection.scan_schedule.cadence_minutes} minutes (${collection.scan_schedule.freshness})`
+											? describeCollectionSchedule(
+													collection.scan_schedule.cadence_minutes,
+													collection.scan_schedule.freshness,
+													collection.due_now,
+													collection.scan_schedule.last_materialized_at_unix_ms,
+													collection.scan_schedule.last_enqueued_commands,
+												)
 											: "manual only"}
 									</li>
 								))}
@@ -408,18 +433,29 @@ export function OperationsPage() {
 						{collectionDetailQuery.data ? (
 							<>
 								{collectionDetailQuery.data.scan_schedule ? (
-									<p>
-										Schedule: every{" "}
-										{collectionDetailQuery.data.scan_schedule.cadence_minutes}{" "}
-										minutes (
-										{collectionDetailQuery.data.scan_schedule.freshness}). Next
-										due at{" "}
-										{
-											collectionDetailQuery.data.scan_schedule
-												.next_due_at_unix_ms
-										}
-										.
-									</p>
+									<>
+										<p>
+											Schedule: every{" "}
+											{collectionDetailQuery.data.scan_schedule.cadence_minutes}{" "}
+											minutes (
+											{collectionDetailQuery.data.scan_schedule.freshness}).
+											Next due at{" "}
+											{
+												collectionDetailQuery.data.scan_schedule
+													.next_due_at_unix_ms
+											}
+											.
+										</p>
+										<p>
+											Last run at{" "}
+											{collectionDetailQuery.data.scan_schedule
+												.last_materialized_at_unix_ms ?? "never"}
+											. Last enqueued commands:{" "}
+											{collectionDetailQuery.data.scan_schedule
+												.last_enqueued_commands ?? "none"}
+											.
+										</p>
+									</>
 								) : (
 									<p>No schedule configured.</p>
 								)}

@@ -167,8 +167,10 @@ describe("OperationsPage", () => {
 									cadence_minutes: 60,
 									freshness: "deterministic",
 									next_due_at_unix_ms: 1000,
+									last_materialized_at_unix_ms: 1500,
+									last_enqueued_commands: 1,
 								},
-								due_now: true,
+								due_now: false,
 							},
 						],
 					}),
@@ -184,6 +186,8 @@ describe("OperationsPage", () => {
 							cadence_minutes: 60,
 							freshness: "deterministic",
 							next_due_at_unix_ms: 1000,
+							last_materialized_at_unix_ms: 1500,
+							last_enqueued_commands: 1,
 						},
 						members: [{ component_key: "component:payments-api" }],
 					}),
@@ -227,10 +231,17 @@ describe("OperationsPage", () => {
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/Scheduled: 1\. Due now: 1\./i),
+			await screen.findByText(/Scheduled: 1\. Due now: 0\./i),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/due now - every 60 minutes/i),
+			await screen.findByText(
+				/due later - every 60 minutes \(deterministic\) - last run 1500 - last enqueued 1/i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/Last run at 1500\. Last enqueued commands: 1\./i,
+			),
 		).toBeInTheDocument();
 	});
 

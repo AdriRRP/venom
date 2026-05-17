@@ -83,6 +83,8 @@ export type CollectionScanSchedule = {
 	cadence_minutes: number;
 	freshness: string;
 	next_due_at_unix_ms: number;
+	last_materialized_at_unix_ms: number | null;
+	last_enqueued_commands: number | null;
 };
 
 export type BindArtifactRequest = {

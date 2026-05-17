@@ -32,6 +32,10 @@ test("operator flow registers, targets one collection, scans, and queries one ac
 	await expect(
 		page.getByText(/Processed collections: 1\. Enqueued commands: 1\./i),
 	).toBeVisible();
+	await expect(page.getByText(/last run \d+ - last enqueued 1/i)).toBeVisible();
+	await expect(
+		page.getByText(/Last run at \d+\. Last enqueued commands: 1\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();
