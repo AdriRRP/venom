@@ -281,6 +281,21 @@ pub struct ManagedCollection {
     pub scan_schedule: Option<CollectionScanSchedule>,
 }
 
+/// Operator-facing summary of one managed collection in the release operations view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedCollectionOperationsSummary {
+    /// Stable collection identity inside VENOM.
+    pub collection_key: Box<str>,
+    /// Human-readable collection name.
+    pub name: Box<str>,
+    /// Total number of managed members currently in the collection.
+    pub members: usize,
+    /// Optional periodic collection scan schedule.
+    pub scan_schedule: Option<CollectionScanSchedule>,
+    /// Whether the collection is due for one scheduler pass now.
+    pub due_now: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ComponentRecord {
     registration: ComponentRegistration,
@@ -646,6 +661,54 @@ impl ComponentInventory {
             })
             .collect()
     }
+
+    #[must_use]
+    pub fn collection_operations_summaries(
+        &self,
+        now_unix_ms: u64,
+    ) -> Vec<ManagedCollectionOperationsSummary> {
+        let mut summaries = self
+            .collections
+            .values()
+            .map(|record| {
+                let scan_schedule = record.scan_schedule;
+                let due_now = scan_schedule
+                    .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms);
+
+                ManagedCollectionOperationsSummary {
+                    collection_key: record.registration.collection_key.clone(),
+                    name: record.registration.name.clone(),
+                    members: record.component_keys.len(),
+                    scan_schedule,
+                    due_now,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        summaries.sort_by(|left, right| {
+            let left_due = left
+                .scan_schedule
+                .map(|schedule| schedule.next_due_at_unix_ms);
+            let right_due = right
+                .scan_schedule
+                .map(|schedule| schedule.next_due_at_unix_ms);
+            match (left_due, right_due) {
+                (Some(left_due), Some(right_due)) => left_due.cmp(&right_due).then_with(|| {
+                    left.collection_key
+                        .as_ref()
+                        .cmp(right.collection_key.as_ref())
+                }),
+                (Some(_), None) => core::cmp::Ordering::Less,
+                (None, Some(_)) => core::cmp::Ordering::Greater,
+                (None, None) => left
+                    .collection_key
+                    .as_ref()
+                    .cmp(right.collection_key.as_ref()),
+            }
+        });
+
+        summaries
+    }
 }
 
 #[cfg(test)]
@@ -925,6 +988,56 @@ mod tests {
                 Box::<str>::from("release:2026.05"),
             ]
         );
+    }
+
+    #[test]
+    fn collection_operations_summaries_are_ordered_by_schedule_then_key() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:billing-api",
+            "Billing API",
+        ));
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.06",
+            "June Release",
+        ));
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.05",
+            "May Release",
+        ));
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.07",
+            "July Release",
+        ));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+        let _ = inventory.add_component_to_collection("release:2026.06", "component:billing-api");
+        let _ = inventory.configure_collection_scan_schedule(
+            "release:2026.06",
+            120,
+            EvidenceFreshness::Deterministic,
+            2_000,
+        );
+        let _ = inventory.configure_collection_scan_schedule(
+            "release:2026.05",
+            60,
+            EvidenceFreshness::Deterministic,
+            1_000,
+        );
+
+        let summaries = inventory.collection_operations_summaries(1_500);
+
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries[0].collection_key.as_ref(), "release:2026.05");
+        assert_eq!(summaries[0].members, 1);
+        assert!(summaries[0].due_now);
+        assert_eq!(summaries[1].collection_key.as_ref(), "release:2026.06");
+        assert!(!summaries[1].due_now);
+        assert_eq!(summaries[2].collection_key.as_ref(), "release:2026.07");
+        assert!(summaries[2].scan_schedule.is_none());
     }
 
     #[test]

@@ -10,9 +10,10 @@ use venom_domain::{
     CollectionScanPlanningError, CollectionScanScheduler, ComponentRegistration,
     ConfigureCollectionScanScheduleResult, DueCollectionScan, DurableScanRuntime, DurableState,
     EvidenceFreshness, FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
-    RegisterCollectionResult, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanExecutionResult, ScanPlanner, ScanPlanningError, ScanRequest, Severity, execute_scan,
+    FindingProviderError, FindingProviderErrorKind, ManagedCollectionOperationsSummary,
+    PackageCoordinate, ProviderScanReport, RegisterCollectionResult, RegisterComponentResult,
+    ReportedFinding, RunNextScanResult, ScanExecutionResult, ScanPlanner, ScanPlanningError,
+    ScanRequest, Severity, execute_scan,
 };
 
 #[derive(Debug, Default, cucumber::World)]
@@ -31,6 +32,7 @@ struct AcceptanceWorld {
     last_collection_scan_batch: Option<CollectionScanBatch>,
     last_collection_scan_planning_error: Option<CollectionScanPlanningError>,
     last_due_collection_scans: Vec<DueCollectionScan>,
+    last_collection_operations_summaries: Vec<ManagedCollectionOperationsSummary>,
     provider_failure: Option<FindingProviderError>,
     last_scan_execution: Option<ScanExecutionResult>,
     last_scan_execution_error: Option<String>,
@@ -60,6 +62,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_collection_scan_batch = None;
     world.last_collection_scan_planning_error = None;
     world.last_due_collection_scans.clear();
+    world.last_collection_operations_summaries.clear();
     world.provider_failure = None;
     world.last_scan_execution = None;
     world.last_scan_execution_error = None;
@@ -542,6 +545,25 @@ async fn venom_materializes_due_collection_scans(
     );
 }
 
+#[when(expr = "VENOM lists collection schedules at unix ms {int}")]
+async fn venom_lists_collection_schedules(world: &mut AcceptanceWorld, now_unix_ms: usize) {
+    world.last_collection_operations_summaries =
+        world.ingestion.inventory().collection_operations_summaries(
+            u64::try_from(now_unix_ms).expect("current time should fit u64"),
+        );
+}
+
+#[when(expr = "VENOM lists durable collection schedules at unix ms {int}")]
+async fn venom_lists_durable_collection_schedules(world: &mut AcceptanceWorld, now_unix_ms: usize) {
+    world.last_collection_operations_summaries = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .collection_operations_summaries(
+            u64::try_from(now_unix_ms).expect("current time should fit u64"),
+        );
+}
+
 #[when(
     expr = "VENOM durably plans a deterministic scan for component {string} and artifact {string}"
 )]
@@ -973,6 +995,119 @@ async fn the_collection_scan_batch_has_requests(world: &mut AcceptanceWorld, exp
 #[then(expr = "{int} due collection scans are materialized")]
 async fn due_collection_scans_are_materialized(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(world.last_due_collection_scans.len(), expected);
+}
+
+#[then(expr = "{int} collection schedules are visible")]
+async fn collection_schedules_are_visible(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(world.last_collection_operations_summaries.len(), expected);
+}
+
+#[then(expr = "{int} collection schedules are due now")]
+async fn collection_schedules_are_due_now(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .iter()
+            .filter(|summary| summary.due_now)
+            .count(),
+        expected
+    );
+}
+
+#[then(expr = "the first collection schedule targets collection {string}")]
+async fn the_first_collection_schedule_targets_collection(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .first()
+            .expect("a collection schedule summary must exist")
+            .collection_key
+            .as_ref(),
+        expected
+    );
+}
+
+#[then(expr = "the second collection schedule targets collection {string}")]
+async fn the_second_collection_schedule_targets_collection(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .get(1)
+            .expect("a second collection schedule summary must exist")
+            .collection_key
+            .as_ref(),
+        expected
+    );
+}
+
+#[then(expr = "the third collection schedule targets collection {string}")]
+async fn the_third_collection_schedule_targets_collection(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .get(2)
+            .expect("a third collection schedule summary must exist")
+            .collection_key
+            .as_ref(),
+        expected
+    );
+}
+
+#[then(expr = "the first collection schedule members are {int}")]
+async fn the_first_collection_schedule_members_are(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .first()
+            .expect("a collection schedule summary must exist")
+            .members,
+        expected
+    );
+}
+
+#[then(expr = "the first collection schedule is due {string}")]
+async fn the_first_collection_schedule_is_due(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .first()
+            .expect("a collection schedule summary must exist")
+            .due_now,
+        expected == "true"
+    );
+}
+
+#[then(expr = "the second collection schedule is due {string}")]
+async fn the_second_collection_schedule_is_due(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_operations_summaries
+            .get(1)
+            .expect("a second collection schedule summary must exist")
+            .due_now,
+        expected == "true"
+    );
+}
+
+#[then(expr = "the third collection schedule has no periodic cadence")]
+async fn the_third_collection_schedule_has_no_periodic_cadence(world: &mut AcceptanceWorld) {
+    assert!(
+        world
+            .last_collection_operations_summaries
+            .get(2)
+            .expect("a third collection schedule summary must exist")
+            .scan_schedule
+            .is_none()
+    );
 }
 
 #[then(expr = "the first due collection scan targets collection {string}")]
@@ -1472,6 +1607,7 @@ async fn main() {
         "schedule-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
+        "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {
         AcceptanceWorld::run(format!("{base}/{feature}")).await;
