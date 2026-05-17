@@ -6,12 +6,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+use venom_domain::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
+};
+use venom_domain::scanning::syft_grype::{
+    FixtureSyftGrypeProvider, artifact_identity_from_syft_json,
+};
 use venom_domain::{
     ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime, DurableState,
-    EvidenceFreshness, FindingProvider, FixtureSyftGrypeProvider, IntegrationEventPublishError,
-    IntegrationEventPublisher, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanPlanner,
-    ScanRequest, artifact_identity_from_syft_json, as_provider_error,
-    validate_provider_scan_report,
+    EvidenceFreshness, FindingProvider, IntegrationEventPublishError, IntegrationEventPublisher,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, ScanPlanner, ScanRequest,
 };
 
 #[tokio::main]

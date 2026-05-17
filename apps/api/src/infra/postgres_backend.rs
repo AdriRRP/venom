@@ -1,6 +1,9 @@
 use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use venom_domain::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
+};
 use venom_domain::{
     ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
     CollectionScanScheduler, CompletedScanCommand, ComponentInventory, ComponentRegistration,
@@ -12,7 +15,7 @@ use venom_domain::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
     PublishIntegrationEventsResult, RegisterCollectionChange, RegisterCollectionResult,
     RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
-    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
+    ScanCommandStatus, ScanPlanner, ScanRequest,
 };
 
 #[derive(Debug)]

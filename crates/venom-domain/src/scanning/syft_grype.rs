@@ -1,7 +1,10 @@
+use crate::findings::finding_provider_contract::{
+    as_provider_error, validate_provider_scan_report,
+};
 use crate::{
     ArtifactKind, EvidenceFreshness, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, PackageCoordinate, ProviderScanReport, ReportedFinding, ScanRequest,
-    Severity, as_provider_error, validate_provider_scan_report,
+    Severity,
 };
 use serde::Deserialize;
 use std::{
@@ -709,9 +712,9 @@ mod tests {
         MAX_ERROR_TEXT_BYTES, OFFICIAL_GRYPE_IMAGE, OFFICIAL_SYFT_IMAGE,
         artifact_identity_from_syft_json, bounded_error_text, run_command,
     };
+    use crate::findings::finding_provider_contract::validate_provider_scan_report;
     use crate::{
         ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider, FindingProviderErrorKind,
-        validate_provider_scan_report,
     };
     use std::{fs, path::PathBuf, process::Stdio, time::Duration};
     use tokio::process::Command;

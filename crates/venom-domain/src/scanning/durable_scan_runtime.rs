@@ -1,7 +1,8 @@
+use crate::findings::finding_provider_contract::validate_provider_scan_report;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, PendingIntegrationEvent,
-    PublishIntegrationEventsResult, ScanRequest, validate_provider_scan_report,
+    PublishIntegrationEventsResult, ScanRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -209,7 +210,7 @@ impl DurableScanRuntime {
                         command_id: command_id.clone(),
                         error_code: "provider-error".into(),
                         retryable: false,
-                        detail: violation.message().into(),
+                        detail: violation.message().to_owned().into_boxed_str(),
                     })
                 } else {
                     match state.record_scan_report(&report) {
