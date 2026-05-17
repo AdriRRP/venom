@@ -4,15 +4,15 @@ use venom_domain::{
     IntegrationEventPublishError, IntegrationEventPublisher, PendingIntegrationEvent,
 };
 
-pub const HTTP_INTEGRATION_PUBLISHER_KEY: &str = "http-publisher";
+pub const HTTP_EVENT_PUBLISHER_KEY: &str = "http-publisher";
 
 #[derive(Debug, Clone)]
-pub struct HttpIntegrationPublisher {
+pub struct HttpEventPublisher {
     client: Client,
     endpoint_url: Box<str>,
 }
 
-impl HttpIntegrationPublisher {
+impl HttpEventPublisher {
     /// Build one bounded HTTP integration publisher.
     ///
     /// # Errors
@@ -37,9 +37,9 @@ impl HttpIntegrationPublisher {
     }
 }
 
-impl IntegrationEventPublisher for HttpIntegrationPublisher {
+impl IntegrationEventPublisher for HttpEventPublisher {
     fn publisher_key(&self) -> &'static str {
-        HTTP_INTEGRATION_PUBLISHER_KEY
+        HTTP_EVENT_PUBLISHER_KEY
     }
 
     async fn publish<'a>(

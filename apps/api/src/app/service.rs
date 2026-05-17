@@ -1,7 +1,5 @@
-use crate::infra::http_integration_publisher::{
-    HTTP_INTEGRATION_PUBLISHER_KEY, HttpIntegrationPublisher,
-};
-use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresBackend};
+use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
+use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,13 +15,13 @@ use venom_domain::{
 };
 
 #[derive(Debug)]
-pub enum AppServiceError {
+pub enum ApiApplicationError {
     InvalidRequest(String),
     NotFound(String),
     State(String),
 }
 
-impl core::fmt::Display for AppServiceError {
+impl core::fmt::Display for ApiApplicationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidRequest(message) | Self::NotFound(message) | Self::State(message) => {
@@ -33,15 +31,15 @@ impl core::fmt::Display for AppServiceError {
     }
 }
 
-impl std::error::Error for AppServiceError {}
+impl std::error::Error for ApiApplicationError {}
 
 #[derive(Debug, Clone)]
-pub struct AppReadSnapshot {
+pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
 }
 
-impl AppReadSnapshot {
+impl ApiReadSnapshot {
     #[must_use]
     pub fn new(inventory: ComponentInventory, read_model: FindingReadModel) -> Self {
         Self {
@@ -70,11 +68,11 @@ impl AppReadSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request contains an unsupported artifact kind.
+    /// Returns [`ApiApplicationError`] when the request contains an unsupported artifact kind.
     pub fn list_active_findings(
         &self,
         request: ActiveFindingsRequest,
-    ) -> Result<ActiveFindingsResponse, AppServiceError> {
+    ) -> Result<ActiveFindingsResponse, ApiApplicationError> {
         let artifact = ArtifactRef::new(
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity.clone(),
@@ -110,8 +108,8 @@ impl AppReadSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the current system time cannot be read.
-    pub fn list_collections(&self) -> Result<ListCollectionsResponse, AppServiceError> {
+    /// Returns [`ApiApplicationError`] when the current system time cannot be read.
+    pub fn list_collections(&self) -> Result<ListCollectionsResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
         let collections = self
             .inventory
@@ -138,18 +136,18 @@ impl AppReadSnapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError::NotFound`] when the collection is unknown.
+    /// Returns [`ApiApplicationError::NotFound`] when the collection is unknown.
     pub fn collection_detail(
         &self,
         collection_key: &str,
-    ) -> Result<CollectionDetailResponse, AppServiceError> {
+    ) -> Result<CollectionDetailResponse, ApiApplicationError> {
         let collection = self
             .inventory
             .collections()
             .into_iter()
             .find(|collection| collection.collection_key.as_ref() == collection_key)
             .ok_or_else(|| {
-                AppServiceError::NotFound(format!("unknown collection: {collection_key}"))
+                ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
             })?;
 
         Ok(CollectionDetailResponse {
@@ -169,36 +167,36 @@ impl AppReadSnapshot {
     }
 }
 
-pub struct AppService {
-    backend: AppBackend,
+pub struct ApiApplication {
+    backend: ApiStore,
 }
 
-enum AppBackend {
-    Local(LocalBackend),
-    Postgres(PostgresBackend),
+enum ApiStore {
+    Local(LocalStore),
+    Postgres(PostgresStore),
 }
 
-struct LocalBackend {
+struct LocalStore {
     state: DurableState,
     runtime: ScanCommandQueue,
 }
 
-impl AppService {
+impl ApiApplication {
     /// Open the application service over one local durable state path.
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state or durable runtime cannot be opened.
+    /// Returns [`ApiApplicationError`] when the durable state or durable runtime cannot be opened.
     pub fn open_local(
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
-    ) -> Result<Self, AppServiceError> {
+    ) -> Result<Self, ApiApplicationError> {
         let state = DurableState::open(state_path)
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+            .map_err(|error| ApiApplicationError::State(error.to_string()))?;
         let runtime = ScanCommandQueue::open(runtime_path)
-            .map_err(|error| AppServiceError::State(error.to_string()))?;
+            .map_err(|error| ApiApplicationError::State(error.to_string()))?;
         Ok(Self {
-            backend: AppBackend::Local(LocalBackend { state, runtime }),
+            backend: ApiStore::Local(LocalStore { state, runtime }),
         })
     }
 
@@ -206,24 +204,27 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the Postgres durable backend cannot be opened.
-    pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, AppServiceError> {
-        let backend = PostgresBackend::open(database_url, schema)
+    /// Returns [`ApiApplicationError`] when the Postgres durable backend cannot be opened.
+    pub async fn open_postgres(
+        database_url: &str,
+        schema: &str,
+    ) -> Result<Self, ApiApplicationError> {
+        let backend = PostgresStore::open(database_url, schema)
             .await
-            .map_err(AppServiceError::State)?;
+            .map_err(ApiApplicationError::State)?;
         Ok(Self {
-            backend: AppBackend::Postgres(backend),
+            backend: ApiStore::Postgres(backend),
         })
     }
 
     #[must_use]
-    pub fn read_snapshot(&self) -> AppReadSnapshot {
+    pub fn read_snapshot(&self) -> ApiReadSnapshot {
         match &self.backend {
-            AppBackend::Local(local) => AppReadSnapshot::new(
+            ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.ingestion().inventory().clone(),
                 local.state.read_model().clone(),
             ),
-            AppBackend::Postgres(postgres) => AppReadSnapshot::new(
+            ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot(),
                 postgres.read_model_snapshot(),
             ),
@@ -233,16 +234,16 @@ impl AppService {
     #[must_use]
     pub fn inventory_snapshot(&self) -> ComponentInventory {
         match &self.backend {
-            AppBackend::Local(local) => local.state.ingestion().inventory().clone(),
-            AppBackend::Postgres(postgres) => postgres.inventory_snapshot(),
+            ApiStore::Local(local) => local.state.ingestion().inventory().clone(),
+            ApiStore::Postgres(postgres) => postgres.inventory_snapshot(),
         }
     }
 
     #[must_use]
     pub fn read_model_snapshot(&self) -> FindingReadModel {
         match &self.backend {
-            AppBackend::Local(local) => local.state.read_model().clone(),
-            AppBackend::Postgres(postgres) => postgres.read_model_snapshot(),
+            ApiStore::Local(local) => local.state.read_model().clone(),
+            ApiStore::Postgres(postgres) => postgres.read_model_snapshot(),
         }
     }
 
@@ -250,16 +251,18 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
+    /// Returns [`ApiApplicationError::NotFound`] when the command is unknown.
     pub fn scan_command_status(
         &self,
         command_id: &str,
-    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
+    ) -> Result<ScanCommandStatusResponse, ApiApplicationError> {
         let status = match &self.backend {
-            AppBackend::Local(local) => local.runtime.command_status(command_id),
-            AppBackend::Postgres(postgres) => postgres.command_status(command_id),
+            ApiStore::Local(local) => local.runtime.command_status(command_id),
+            ApiStore::Postgres(postgres) => postgres.command_status(command_id),
         }
-        .ok_or_else(|| AppServiceError::NotFound(format!("unknown scan command: {command_id}")))?;
+        .ok_or_else(|| {
+            ApiApplicationError::NotFound(format!("unknown scan command: {command_id}"))
+        })?;
 
         Ok(ScanCommandStatusResponse {
             command_id: command_id.to_owned(),
@@ -271,21 +274,21 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
     pub async fn register_component(
         &mut self,
         request: ComponentRegistrationRequest,
-    ) -> Result<RegisterComponentResponse, AppServiceError> {
+    ) -> Result<RegisterComponentResponse, ApiApplicationError> {
         let registration = ComponentRegistration::new(request.component_key, request.name);
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .register_component(registration)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .register_component(registration)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(RegisterComponentResponse {
@@ -298,25 +301,25 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the request is invalid or the durable state write fails.
     pub async fn bind_artifact(
         &mut self,
         component_key: &str,
         request: BindArtifactRequest,
-    ) -> Result<BindArtifactResponse, AppServiceError> {
+    ) -> Result<BindArtifactResponse, ApiApplicationError> {
         let artifact = ArtifactRef::new(
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity,
         );
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .bind_artifact(component_key, artifact)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .bind_artifact(component_key, artifact)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(BindArtifactResponse {
@@ -329,21 +332,21 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
     pub async fn register_collection(
         &mut self,
         request: CollectionRegistrationRequest,
-    ) -> Result<RegisterCollectionResponse, AppServiceError> {
+    ) -> Result<RegisterCollectionResponse, ApiApplicationError> {
         let registration = CollectionRegistration::new(request.collection_key, request.name);
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .register_collection(registration)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .register_collection(registration)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(RegisterCollectionResponse {
@@ -356,21 +359,21 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
     pub async fn add_component_to_collection(
         &mut self,
         collection_key: &str,
         request: CollectionMembershipRequest,
-    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+    ) -> Result<CollectionMembershipResponse, ApiApplicationError> {
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .add_component_to_collection(collection_key, &request.component_key)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .add_component_to_collection(collection_key, &request.component_key)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(CollectionMembershipResponse {
@@ -383,21 +386,21 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
     pub async fn remove_component_from_collection(
         &mut self,
         collection_key: &str,
         component_key: &str,
-    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+    ) -> Result<CollectionMembershipResponse, ApiApplicationError> {
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .remove_component_from_collection(collection_key, component_key)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .remove_component_from_collection(collection_key, component_key)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(CollectionMembershipResponse {
@@ -410,22 +413,22 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or the durable write fails.
+    /// Returns [`ApiApplicationError`] when the request is invalid or the durable write fails.
     pub async fn configure_collection_scan_schedule(
         &mut self,
         collection_key: &str,
         request: ConfigureCollectionScanScheduleRequest,
-    ) -> Result<ConfigureCollectionScanScheduleResponse, AppServiceError> {
+    ) -> Result<ConfigureCollectionScanScheduleResponse, ApiApplicationError> {
         let freshness = parse_freshness(&request.freshness)?;
         if request.cadence_minutes == 0 {
-            return Err(AppServiceError::InvalidRequest(
+            return Err(ApiApplicationError::InvalidRequest(
                 "cadence_minutes must be greater than zero".to_owned(),
             ));
         }
         let next_due_at_unix_ms = current_unix_millis()?;
 
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .configure_collection_scan_schedule(
                     collection_key,
@@ -433,8 +436,8 @@ impl AppService {
                     freshness,
                     next_due_at_unix_ms,
                 )
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .configure_collection_scan_schedule(
                     collection_key,
                     request.cadence_minutes,
@@ -442,11 +445,11 @@ impl AppService {
                     next_due_at_unix_ms,
                 )
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         let Some(schedule) = result.schedule else {
-            return Err(AppServiceError::InvalidRequest(format!(
+            return Err(ApiApplicationError::InvalidRequest(format!(
                 "unknown collection: {collection_key}"
             )));
         };
@@ -464,22 +467,22 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the provider key is unsupported or the durable write fails.
+    /// Returns [`ApiApplicationError`] when the provider key is unsupported or the durable write fails.
     pub async fn configure_provider(
         &mut self,
         component_key: &str,
         request: ConfigureProviderRequest,
-    ) -> Result<ConfigureProviderResponse, AppServiceError> {
+    ) -> Result<ConfigureProviderResponse, ApiApplicationError> {
         let provider_key = resolve_supported_provider_key(&request.provider_key)?;
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .configure_provider(component_key, provider_key)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .configure_provider(component_key, provider_key)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(ConfigureProviderResponse {
@@ -492,21 +495,21 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or the durable write fails.
+    /// Returns [`ApiApplicationError`] when the request is invalid or the durable write fails.
     pub async fn configure_integration_runtime(
         &mut self,
         request: ConfigureIntegrationRuntimeRequest,
-    ) -> Result<ConfigureIntegrationRuntimeResponse, AppServiceError> {
+    ) -> Result<ConfigureIntegrationRuntimeResponse, ApiApplicationError> {
         let config = parse_integration_runtime_config(request)?;
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .configure_integration_runtime(config)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .configure_integration_runtime(config)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(ConfigureIntegrationRuntimeResponse::from(
@@ -519,11 +522,11 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or the durable state write fails.
+    /// Returns [`ApiApplicationError`] when the request is invalid or the durable state write fails.
     pub async fn record_provider_report(
         &mut self,
         request: ProviderScanReportRequest,
-    ) -> Result<RecordProviderReportResponse, AppServiceError> {
+    ) -> Result<RecordProviderReportResponse, ApiApplicationError> {
         let mut report = ProviderScanReport::new(
             request.provider_key,
             request.component_key,
@@ -542,14 +545,14 @@ impl AppService {
         report.knowledge_revision = request.knowledge_revision.map(String::into_boxed_str);
 
         let result = match &mut self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .record_scan_report(&report)
-                .map_err(|error| AppServiceError::State(error.to_string()))?,
-            AppBackend::Postgres(postgres) => postgres
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
                 .record_scan_report(&report)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(RecordProviderReportResponse {
@@ -564,32 +567,34 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid, ownership is unmanaged,
+    /// Returns [`ApiApplicationError`] when the request is invalid, ownership is unmanaged,
     /// or the durable runtime cannot append the command.
     pub async fn request_scan(
         &mut self,
         request: RequestScanCommand,
-    ) -> Result<RequestScanResponse, AppServiceError> {
+    ) -> Result<RequestScanResponse, ApiApplicationError> {
         let artifact = ArtifactRef::new(
             parse_artifact_kind(&request.artifact_kind)?,
             request.artifact_identity.clone(),
         );
         let freshness = parse_freshness(&request.freshness)?;
         let command_id = match &mut self.backend {
-            AppBackend::Local(local) => {
+            ApiStore::Local(local) => {
                 let scan_request = ScanPlanner::new(local.state.ingestion().inventory())
                     .plan(&request.component_key, artifact, freshness)
-                    .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+                    .map_err(|error| {
+                        ApiApplicationError::InvalidRequest(error.as_str().to_owned())
+                    })?;
                 local
                     .runtime
                     .enqueue(scan_request)
-                    .map_err(|error| AppServiceError::State(error.to_string()))?
+                    .map_err(|error| ApiApplicationError::State(error.to_string()))?
                     .command_id
             }
-            AppBackend::Postgres(postgres) => postgres
+            ApiStore::Postgres(postgres) => postgres
                 .request_scan(&request.component_key, artifact, freshness)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         Ok(RequestScanResponse {
@@ -606,33 +611,35 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid, the collection is unmanaged,
+    /// Returns [`ApiApplicationError`] when the request is invalid, the collection is unmanaged,
     /// or the durable runtime cannot append the commands.
     pub async fn request_collection_scan(
         &mut self,
         collection_key: &str,
         request: RequestCollectionScanCommand,
-    ) -> Result<RequestCollectionScanResponse, AppServiceError> {
+    ) -> Result<RequestCollectionScanResponse, ApiApplicationError> {
         let freshness = parse_freshness(&request.freshness)?;
         let command_ids = match &mut self.backend {
-            AppBackend::Local(local) => {
+            ApiStore::Local(local) => {
                 let batch = ScanPlanner::new(local.state.ingestion().inventory())
                     .plan_collection(collection_key, freshness)
-                    .map_err(|error| AppServiceError::InvalidRequest(error.as_str().to_owned()))?;
+                    .map_err(|error| {
+                        ApiApplicationError::InvalidRequest(error.as_str().to_owned())
+                    })?;
                 let mut command_ids = Vec::with_capacity(batch.requests.len());
                 for scan_request in batch.requests {
                     let command = local
                         .runtime
                         .enqueue(scan_request)
-                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
                     command_ids.push(command.command_id.into());
                 }
                 command_ids
             }
-            AppBackend::Postgres(postgres) => postgres
+            ApiStore::Postgres(postgres) => postgres
                 .request_collection_scan(collection_key, freshness)
                 .await
-                .map_err(AppServiceError::State)?
+                .map_err(ApiApplicationError::State)?
                 .into_iter()
                 .map(Into::into)
                 .collect(),
@@ -650,23 +657,23 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or the durable state fails.
+    /// Returns [`ApiApplicationError`] when the request is invalid or the durable state fails.
     pub async fn run_collection_scan_worker_until_idle(
         &mut self,
         request: DrainCollectionScanWorkerCommand,
-    ) -> Result<DrainCollectionScanWorkerResponse, AppServiceError> {
+    ) -> Result<DrainCollectionScanWorkerResponse, ApiApplicationError> {
         let max_collections = request.max_collections.ok_or_else(|| {
-            AppServiceError::InvalidRequest("max_collections is required".to_owned())
+            ApiApplicationError::InvalidRequest("max_collections is required".to_owned())
         })?;
         if max_collections == 0 {
-            return Err(AppServiceError::InvalidRequest(
+            return Err(ApiApplicationError::InvalidRequest(
                 "max_collections must be greater than zero".to_owned(),
             ));
         }
 
         let now_unix_ms = current_unix_millis()?;
         match &mut self.backend {
-            AppBackend::Local(local) => {
+            ApiStore::Local(local) => {
                 let mut inventory = local.state.ingestion().inventory().clone();
                 let due_scans = CollectionScanScheduler::new(&mut inventory)
                     .collect_due(now_unix_ms, max_collections);
@@ -679,12 +686,12 @@ impl AppService {
                             due_scan.next_due_at_unix_ms,
                             now_unix_ms,
                             u32::try_from(due_scan.requests.len()).map_err(|_| {
-                                AppServiceError::State(
+                                ApiApplicationError::State(
                                     "collection scheduler command count overflow".to_owned(),
                                 )
                             })?,
                         )
-                        .map_err(|error| AppServiceError::State(error.to_string()))?;
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
                 }
 
                 let processed_collections = due_scans.len();
@@ -697,7 +704,7 @@ impl AppService {
                         let _ = local
                             .runtime
                             .enqueue(scan_request)
-                            .map_err(|error| AppServiceError::State(error.to_string()))?;
+                            .map_err(|error| ApiApplicationError::State(error.to_string()))?;
                     }
                 }
 
@@ -719,11 +726,11 @@ impl AppService {
                     last_collection_key,
                 })
             }
-            AppBackend::Postgres(postgres) => {
+            ApiStore::Postgres(postgres) => {
                 let result = postgres
                     .drain_due_collection_scans(max_collections, now_unix_ms)
                     .await
-                    .map_err(AppServiceError::State)?;
+                    .map_err(ApiApplicationError::State)?;
                 Ok(DrainCollectionScanWorkerResponse::from(result))
             }
         }
@@ -733,17 +740,17 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the provider input or the worker limit is invalid,
+    /// Returns [`ApiApplicationError`] when the provider input or the worker limit is invalid,
     /// or when the durable runtime/state fails.
     pub async fn run_worker_until_idle(
         &mut self,
         request: DrainWorkerCommand,
-    ) -> Result<DrainWorkerResponse, AppServiceError> {
+    ) -> Result<DrainWorkerResponse, ApiApplicationError> {
         let max_commands = request.max_commands.ok_or_else(|| {
-            AppServiceError::InvalidRequest("max_commands is required".to_owned())
+            ApiApplicationError::InvalidRequest("max_commands is required".to_owned())
         })?;
         if max_commands == 0 {
-            return Err(AppServiceError::InvalidRequest(
+            return Err(ApiApplicationError::InvalidRequest(
                 "max_commands must be greater than zero".to_owned(),
             ));
         }
@@ -762,15 +769,15 @@ impl AppService {
             };
             let provider = ApiExecutionProvider::new(provider_key, request.provider.clone())?;
             let outcome = match &mut self.backend {
-                AppBackend::Local(local) => local
+                ApiStore::Local(local) => local
                     .runtime
                     .run_next(&mut local.state, &provider)
                     .await
-                    .map_err(|error| AppServiceError::State(error.to_string()))?,
-                AppBackend::Postgres(postgres) => postgres
+                    .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+                ApiStore::Postgres(postgres) => postgres
                     .run_next(&provider)
                     .await
-                    .map_err(AppServiceError::State)?,
+                    .map_err(ApiApplicationError::State)?,
             };
 
             match outcome {
@@ -795,8 +802,8 @@ impl AppService {
         }
 
         let pending_remaining = match &self.backend {
-            AppBackend::Local(local) => local.runtime.pending_commands(),
-            AppBackend::Postgres(postgres) => postgres.pending_commands(),
+            ApiStore::Local(local) => local.runtime.pending_commands(),
+            ApiStore::Postgres(postgres) => postgres.pending_commands(),
         };
 
         let outcome = if processed == 0 {
@@ -824,23 +831,23 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the request is invalid or publication outcome
+    /// Returns [`ApiApplicationError`] when the request is invalid or publication outcome
     /// persistence fails.
     pub async fn publish_integration_events_until_idle(
         &mut self,
         request: DrainIntegrationWorkerCommand,
-    ) -> Result<DrainIntegrationWorkerResponse, AppServiceError> {
-        let max_events = request
-            .max_events
-            .ok_or_else(|| AppServiceError::InvalidRequest("max_events is required".to_owned()))?;
+    ) -> Result<DrainIntegrationWorkerResponse, ApiApplicationError> {
+        let max_events = request.max_events.ok_or_else(|| {
+            ApiApplicationError::InvalidRequest("max_events is required".to_owned())
+        })?;
         if max_events == 0 {
-            return Err(AppServiceError::InvalidRequest(
+            return Err(ApiApplicationError::InvalidRequest(
                 "max_events must be greater than zero".to_owned(),
             ));
         }
 
         let config = self.integration_runtime_config().cloned().ok_or_else(|| {
-            AppServiceError::State("missing integration runtime configuration".to_owned())
+            ApiApplicationError::State("missing integration runtime configuration".to_owned())
         })?;
         let publisher = ApiIntegrationPublisher::new(&config, request)?;
         let attempted_events = self
@@ -850,15 +857,15 @@ impl AppService {
             .collect::<Vec<_>>();
 
         let result = match &mut self.backend {
-            AppBackend::Local(local) => {
+            ApiStore::Local(local) => {
                 publish_pending_local_integration_events(local, max_events, &publisher)
                     .await
-                    .map_err(AppServiceError::State)?
+                    .map_err(ApiApplicationError::State)?
             }
-            AppBackend::Postgres(postgres) => postgres
+            ApiStore::Postgres(postgres) => postgres
                 .publish_pending_integration_events(max_events, &publisher)
                 .await
-                .map_err(AppServiceError::State)?,
+                .map_err(ApiApplicationError::State)?,
         };
 
         let last_attempted = attempted_events.get(result.attempted.saturating_sub(1));
@@ -892,11 +899,11 @@ impl AppService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppServiceError`] when the provider input is invalid or the durable runtime/state fails.
+    /// Returns [`ApiApplicationError`] when the provider input is invalid or the durable runtime/state fails.
     pub async fn run_next_scan(
         &mut self,
         request: RunNextScanCommand,
-    ) -> Result<RunNextScanResponse, AppServiceError> {
+    ) -> Result<RunNextScanResponse, ApiApplicationError> {
         let Some(provider_key) = self.next_pending_provider_key()? else {
             return Ok(RunNextScanResponse {
                 outcome: "idle".to_owned(),
@@ -912,18 +919,17 @@ impl AppService {
             });
         };
         let provider = ApiExecutionProvider::new(provider_key, request)?;
-        let outcome =
-            match &mut self.backend {
-                AppBackend::Local(local) => local
-                    .runtime
-                    .run_next(&mut local.state, &provider)
-                    .await
-                    .map_err(|error| AppServiceError::State(error.to_string()))?,
-                AppBackend::Postgres(postgres) => postgres
-                    .run_next(&provider)
-                    .await
-                    .map_err(AppServiceError::State)?,
-            };
+        let outcome = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .runtime
+                .run_next(&mut local.state, &provider)
+                .await
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .run_next(&provider)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
 
         Ok(match outcome {
             RunNextScanResult::Idle => RunNextScanResponse {
@@ -965,12 +971,12 @@ impl AppService {
         })
     }
 
-    fn next_pending_provider_key(&self) -> Result<Option<&'static str>, AppServiceError> {
+    fn next_pending_provider_key(&self) -> Result<Option<&'static str>, ApiApplicationError> {
         let Some(component_key) = self.next_pending_component_key() else {
             return Ok(None);
         };
         let Some(provider_key) = self.configured_provider(component_key) else {
-            return Err(AppServiceError::State(format!(
+            return Err(ApiApplicationError::State(format!(
                 "missing provider runtime configuration for component: {component_key}"
             )));
         };
@@ -979,39 +985,39 @@ impl AppService {
 
     fn next_pending_component_key(&self) -> Option<&str> {
         match &self.backend {
-            AppBackend::Local(local) => local.runtime.next_pending_component_key(),
-            AppBackend::Postgres(postgres) => postgres.next_pending_component_key(),
+            ApiStore::Local(local) => local.runtime.next_pending_component_key(),
+            ApiStore::Postgres(postgres) => postgres.next_pending_component_key(),
         }
     }
 
     fn configured_provider(&self, component_key: &str) -> Option<&str> {
         match &self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .ingestion()
                 .inventory()
                 .configured_provider(component_key),
-            AppBackend::Postgres(postgres) => postgres.configured_provider(component_key),
+            ApiStore::Postgres(postgres) => postgres.configured_provider(component_key),
         }
     }
 
     fn pending_integration_events_snapshot(&self) -> Vec<PendingIntegrationEvent> {
         match &self.backend {
-            AppBackend::Local(local) => local
+            ApiStore::Local(local) => local
                 .state
                 .pending_integration_events()
                 .iter()
                 .chain(local.runtime.pending_integration_events().iter())
                 .cloned()
                 .collect(),
-            AppBackend::Postgres(postgres) => postgres.pending_integration_events().to_vec(),
+            ApiStore::Postgres(postgres) => postgres.pending_integration_events().to_vec(),
         }
     }
 
     const fn integration_runtime_config(&self) -> Option<&IntegrationRuntimeConfig> {
         match &self.backend {
-            AppBackend::Local(local) => local.state.integration_runtime_config(),
-            AppBackend::Postgres(postgres) => postgres.integration_runtime_config(),
+            ApiStore::Local(local) => local.state.integration_runtime_config(),
+            ApiStore::Postgres(postgres) => postgres.integration_runtime_config(),
         }
     }
 }
@@ -1184,7 +1190,7 @@ pub struct ProviderReportFindingRequest {
 }
 
 impl ProviderReportFindingRequest {
-    fn into_domain(self) -> Result<ReportedFinding, AppServiceError> {
+    fn into_domain(self) -> Result<ReportedFinding, ApiApplicationError> {
         Ok(ReportedFinding::new(
             self.vulnerability_id,
             PackageCoordinate::new(self.package_name, self.package_version),
@@ -1359,21 +1365,21 @@ pub struct DrainIntegrationWorkerResponse {
     pub last_retryable: Option<bool>,
 }
 
-fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, AppServiceError> {
+fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, ApiApplicationError> {
     match value {
         "container-image" => Ok(ArtifactKind::ContainerImage),
         "sbom-document" => Ok(ArtifactKind::SbomDocument),
-        _ => Err(AppServiceError::InvalidRequest(format!(
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported artifact kind: {value}"
         ))),
     }
 }
 
-fn parse_freshness(value: &str) -> Result<EvidenceFreshness, AppServiceError> {
+fn parse_freshness(value: &str) -> Result<EvidenceFreshness, ApiApplicationError> {
     match value {
         "deterministic" => Ok(EvidenceFreshness::Deterministic),
         "live" => Ok(EvidenceFreshness::Live),
-        _ => Err(AppServiceError::InvalidRequest(format!(
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported freshness: {value}"
         ))),
     }
@@ -1386,15 +1392,15 @@ const fn freshness_name(value: EvidenceFreshness) -> &'static str {
     }
 }
 
-fn current_unix_millis() -> Result<u64, AppServiceError> {
+fn current_unix_millis() -> Result<u64, ApiApplicationError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| AppServiceError::State(error.to_string()))?;
+        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
     u64::try_from(duration.as_millis())
-        .map_err(|_| AppServiceError::State("current unix millis overflow".to_owned()))
+        .map_err(|_| ApiApplicationError::State("current unix millis overflow".to_owned()))
 }
 
-fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
+fn parse_severity(value: &str) -> Result<Severity, ApiApplicationError> {
     match value {
         "unknown" => Ok(Severity::Unknown),
         "none" => Ok(Severity::None),
@@ -1402,7 +1408,7 @@ fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
         "medium" => Ok(Severity::Medium),
         "high" => Ok(Severity::High),
         "critical" => Ok(Severity::Critical),
-        _ => Err(AppServiceError::InvalidRequest(format!(
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported severity: {value}"
         ))),
     }
@@ -1410,23 +1416,25 @@ fn parse_severity(value: &str) -> Result<Severity, AppServiceError> {
 
 fn parse_integration_runtime_config(
     request: ConfigureIntegrationRuntimeRequest,
-) -> Result<IntegrationRuntimeConfig, AppServiceError> {
+) -> Result<IntegrationRuntimeConfig, ApiApplicationError> {
     match request.publisher_key.as_str() {
         API_INTEGRATION_PUBLISHER_KEY => {
             if request.endpoint_url.is_some() || request.timeout_ms.is_some() {
-                return Err(AppServiceError::InvalidRequest(
+                return Err(ApiApplicationError::InvalidRequest(
                     "fixture publisher does not accept endpoint_url or timeout_ms".to_owned(),
                 ));
             }
             Ok(IntegrationRuntimeConfig::Fixture)
         }
-        HTTP_INTEGRATION_PUBLISHER_KEY => {
+        HTTP_EVENT_PUBLISHER_KEY => {
             let endpoint_url = request.endpoint_url.ok_or_else(|| {
-                AppServiceError::InvalidRequest("http publisher requires endpoint_url".to_owned())
+                ApiApplicationError::InvalidRequest(
+                    "http publisher requires endpoint_url".to_owned(),
+                )
             })?;
             let timeout_ms = request.timeout_ms.unwrap_or(3_000);
             if timeout_ms == 0 {
-                return Err(AppServiceError::InvalidRequest(
+                return Err(ApiApplicationError::InvalidRequest(
                     "http publisher timeout_ms must be greater than zero".to_owned(),
                 ));
             }
@@ -1435,7 +1443,7 @@ fn parse_integration_runtime_config(
                 timeout_ms,
             })
         }
-        value => Err(AppServiceError::InvalidRequest(format!(
+        value => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported publisher key: {value}"
         ))),
     }
@@ -1444,7 +1452,7 @@ fn parse_integration_runtime_config(
 fn build_active_findings_query(
     request: &ActiveFindingsRequest,
     artifact: ArtifactRef,
-) -> Result<ActiveFindingsQuery, AppServiceError> {
+) -> Result<ActiveFindingsQuery, ApiApplicationError> {
     let mut query = ActiveFindingsQuery::new(request.component_key.clone(), artifact);
     if let Some(min_severity) = request.min_severity.as_deref() {
         query = query.with_min_severity(parse_severity(min_severity)?);
@@ -1491,7 +1499,7 @@ impl ApiExecutionProvider {
     fn new(
         provider_key: &'static str,
         request: RunNextScanCommand,
-    ) -> Result<Self, AppServiceError> {
+    ) -> Result<Self, ApiApplicationError> {
         let RunNextScanCommand {
             knowledge_revision,
             findings,
@@ -1561,23 +1569,23 @@ impl FindingProvider for ApiExecutionProvider {
 const API_WORKER_PROVIDER_KEY: &str = "fixture-provider";
 const API_INTEGRATION_PUBLISHER_KEY: &str = "fixture-publisher";
 
-fn resolve_supported_provider_key(value: &str) -> Result<&'static str, AppServiceError> {
+fn resolve_supported_provider_key(value: &str) -> Result<&'static str, ApiApplicationError> {
     match value {
         API_WORKER_PROVIDER_KEY => Ok(API_WORKER_PROVIDER_KEY),
-        _ => Err(AppServiceError::InvalidRequest(format!(
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported provider key: {value}"
         ))),
     }
 }
 
-fn parse_error_kind(value: &str) -> Result<FindingProviderErrorKind, AppServiceError> {
+fn parse_error_kind(value: &str) -> Result<FindingProviderErrorKind, ApiApplicationError> {
     match value {
         "invalid-request" => Ok(FindingProviderErrorKind::InvalidRequest),
         "unavailable" => Ok(FindingProviderErrorKind::Unavailable),
         "unauthorized" => Ok(FindingProviderErrorKind::Unauthorized),
         "corrupt-response" => Ok(FindingProviderErrorKind::CorruptResponse),
         "rate-limited" => Ok(FindingProviderErrorKind::RateLimited),
-        _ => Err(AppServiceError::InvalidRequest(format!(
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
             "unsupported provider error kind: {value}"
         ))),
     }
@@ -1592,14 +1600,14 @@ struct ApiIntegrationPublisher {
 enum ApiIntegrationPublisherMode {
     Success,
     Failure(IntegrationEventPublishError),
-    Http(HttpIntegrationPublisher),
+    Http(HttpEventPublisher),
 }
 
 impl ApiIntegrationPublisher {
     fn new(
         config: &IntegrationRuntimeConfig,
         request: DrainIntegrationWorkerCommand,
-    ) -> Result<Self, AppServiceError> {
+    ) -> Result<Self, ApiApplicationError> {
         Ok(match config {
             IntegrationRuntimeConfig::Fixture => {
                 if let Some(message) = request.error_message {
@@ -1622,14 +1630,14 @@ impl ApiIntegrationPublisher {
                 timeout_ms,
             } => {
                 if request.error_message.is_some() || request.retryable.is_some() {
-                    return Err(AppServiceError::InvalidRequest(
+                    return Err(ApiApplicationError::InvalidRequest(
                         "http publisher does not accept fixture failure controls".to_owned(),
                     ));
                 }
                 Self {
                     mode: ApiIntegrationPublisherMode::Http(
-                        HttpIntegrationPublisher::new(endpoint_url.clone(), *timeout_ms)
-                            .map_err(AppServiceError::State)?,
+                        HttpEventPublisher::new(endpoint_url.clone(), *timeout_ms)
+                            .map_err(ApiApplicationError::State)?,
                     ),
                 }
             }
@@ -1660,7 +1668,7 @@ impl IntegrationEventPublisher for ApiIntegrationPublisher {
 }
 
 async fn publish_pending_local_integration_events(
-    local: &mut LocalBackend,
+    local: &mut LocalStore,
     max_events: usize,
     publisher: &(impl IntegrationEventPublisher + Sync),
 ) -> Result<PublishIntegrationEventsResult, String> {

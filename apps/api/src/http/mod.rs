@@ -1,5 +1,5 @@
 use crate::app::service::{
-    self, ActiveFindingsResponse, AppReadSnapshot, AppService, BindArtifactRequest,
+    self, ActiveFindingsResponse, ApiApplication, ApiReadSnapshot, BindArtifactRequest,
     BindArtifactResponse, CollectionDetailResponse, CollectionMembershipRequest,
     CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
@@ -29,9 +29,9 @@ pub struct ApiState {
 }
 
 struct ApiStateInner {
-    service: Mutex<AppService>,
-    read_snapshot_tx: watch::Sender<Arc<AppReadSnapshot>>,
-    read_snapshot_rx: watch::Receiver<Arc<AppReadSnapshot>>,
+    service: Mutex<ApiApplication>,
+    read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
+    read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
 }
 
 impl ApiState {
@@ -44,8 +44,8 @@ impl ApiState {
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, String> {
-        let service =
-            AppService::open_local(state_path, runtime_path).map_err(|error| error.to_string())?;
+        let service = ApiApplication::open_local(state_path, runtime_path)
+            .map_err(|error| error.to_string())?;
         Ok(Self::new(service))
     }
 
@@ -55,13 +55,13 @@ impl ApiState {
     ///
     /// Returns an error string when the Postgres durable backend cannot be opened.
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
-        let service = AppService::open_postgres(database_url, schema)
+        let service = ApiApplication::open_postgres(database_url, schema)
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self::new(service))
     }
 
-    fn new(service: AppService) -> Self {
+    fn new(service: ApiApplication) -> Self {
         let snapshot = Arc::new(service.read_snapshot());
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
@@ -73,18 +73,18 @@ impl ApiState {
         }
     }
 
-    fn read_snapshot(&self) -> Arc<AppReadSnapshot> {
+    fn read_snapshot(&self) -> Arc<ApiReadSnapshot> {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
-    fn refresh_inventory_snapshot(&self, service: &AppService) {
+    fn refresh_inventory_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
             .with_inventory(service.inventory_snapshot());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 
-    fn refresh_read_model_snapshot(&self, service: &AppService) {
+    fn refresh_read_model_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
             .with_read_model(service.read_model_snapshot());
@@ -493,15 +493,15 @@ impl ApiError {
     }
 }
 
-impl From<service::AppServiceError> for ApiError {
-    fn from(value: service::AppServiceError) -> Self {
+impl From<service::ApiApplicationError> for ApiError {
+    fn from(value: service::ApiApplicationError) -> Self {
         match value {
-            service::AppServiceError::InvalidRequest(message) => Self::bad_request(message),
-            service::AppServiceError::NotFound(message) => Self {
+            service::ApiApplicationError::InvalidRequest(message) => Self::bad_request(message),
+            service::ApiApplicationError::NotFound(message) => Self {
                 status: StatusCode::NOT_FOUND,
                 message,
             },
-            service::AppServiceError::State(message) => Self::internal(message),
+            service::ApiApplicationError::State(message) => Self::internal(message),
         }
     }
 }
