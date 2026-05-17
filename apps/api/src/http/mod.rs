@@ -1,11 +1,13 @@
 use crate::app::service::{
     self, ActiveFindingsResponse, AppReadSnapshot, AppService, BindArtifactRequest,
-    BindArtifactResponse, ComponentRegistrationRequest, ConfigureIntegrationRuntimeRequest,
-    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
-    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
-    DrainWorkerResponse, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterComponentResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
-    RunNextScanResponse, ScanCommandStatusResponse,
+    BindArtifactResponse, CollectionDetailResponse, CollectionMembershipRequest,
+    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
+    ConfigureProviderRequest, ConfigureProviderResponse, DrainIntegrationWorkerCommand,
+    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
+    ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RequestScanCommand, RequestScanResponse,
+    RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
 };
 use axum::{
     Json, Router,
@@ -83,6 +85,19 @@ pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/components", post(register_component))
+        .route(
+            "/collections",
+            post(register_collection).get(list_collections),
+        )
+        .route("/collections/{collection_key}", get(collection_detail))
+        .route(
+            "/collections/{collection_key}/components",
+            post(add_component_to_collection),
+        )
+        .route(
+            "/collections/{collection_key}/components/{component_key}",
+            axum::routing::delete(remove_component_from_collection),
+        )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
             "/components/{component_key}/provider-runtime",
@@ -111,6 +126,75 @@ async fn register_component(
         let mut service = state.inner.service.lock().await;
         let response = service
             .register_component(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn register_collection(
+    State(state): State<ApiState>,
+    Json(request): Json<CollectionRegistrationRequest>,
+) -> Result<Json<RegisterCollectionResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .register_collection(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn list_collections(
+    State(state): State<ApiState>,
+) -> Result<Json<ListCollectionsResponse>, ApiError> {
+    Ok(Json(state.read_snapshot().list_collections()))
+}
+
+async fn collection_detail(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+) -> Result<Json<CollectionDetailResponse>, ApiError> {
+    let response = state
+        .read_snapshot()
+        .collection_detail(&collection_key)
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn add_component_to_collection(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<CollectionMembershipRequest>,
+) -> Result<Json<CollectionMembershipResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .add_component_to_collection(&collection_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn remove_component_from_collection(
+    State(state): State<ApiState>,
+    Path((collection_key, component_key)): Path<(String, String)>,
+) -> Result<Json<CollectionMembershipResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .remove_component_from_collection(&collection_key, &component_key)
             .await
             .map_err(ApiError::from)?;
         state.refresh_snapshot(&service);
@@ -483,6 +567,69 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["vulnerability_id"],
             "CVE-2026-0001"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_creates_release_collections_and_tracks_membership() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collections", "state"),
+                temp_path("collections", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/collections")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("list collections request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["managed_collections"], 1);
+        assert_eq!(
+            payload["collections"][0]["collection_key"],
+            "release:2026.05"
+        );
+        assert_eq!(payload["collections"][0]["members"], 1);
+
+        let response = router
+            .oneshot(
+                Request::get("/collections/release%3A2026.05")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection detail request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(
+            payload["members"][0]["component_key"],
+            "component:payments-api"
         );
     }
 
@@ -1076,6 +1223,43 @@ mod tests {
             )
             .await
             .expect("register request should succeed")
+    }
+
+    async fn register_release_collection(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collections")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "collection_key": "release:2026.05",
+                            "name": "May Release"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register collection request should succeed")
+    }
+
+    async fn add_payments_component_to_collection(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection membership request should succeed")
     }
 
     async fn configure_fixture_provider(router: axum::Router) -> axum::response::Response {

@@ -2,15 +2,16 @@ use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::{
-    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CompletedScanCommand,
-    ComponentRegistration, ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
-    ConfigureProviderChange, ConfigureProviderResult, EvidenceFreshness, FailedScanCommand,
-    FindingChangeSet, FindingIngestion, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublicationFailure,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, PendingIntegrationEvent,
-    ProviderScanReport, PublishIntegrationEventsResult, RegisterComponentChange,
-    RegisterComponentResult, ReportedFinding, RunNextScanResult, ScanCommandStatus, ScanPlanner,
-    ScanRequest, as_provider_error, validate_provider_scan_report,
+    ArtifactKind, ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
+    CompletedScanCommand, ComponentInventory, ComponentRegistration,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, EvidenceFreshness, FailedScanCommand, FindingChangeSet,
+    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, PendingIntegrationEvent, ProviderScanReport,
+    PublishIntegrationEventsResult, RegisterCollectionChange, RegisterCollectionResult,
+    RegisterComponentChange, RegisterComponentResult, ReportedFinding, RunNextScanResult,
+    ScanCommandStatus, ScanPlanner, ScanRequest, as_provider_error, validate_provider_scan_report,
 };
 
 #[derive(Debug)]
@@ -80,6 +81,34 @@ impl PostgresBackend {
         Ok(result)
     }
 
+    /// Durably create one closed release collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn register_collection(
+        &mut self,
+        registration: CollectionRegistration,
+    ) -> Result<RegisterCollectionResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .register_collection(registration.clone());
+        if result.change == RegisterCollectionChange::Created {
+            sqlx::query(&format!(
+                "INSERT INTO {} (collection_key, name) VALUES ($1, $2)",
+                self.names.collections
+            ))
+            .bind(registration.collection_key.as_ref())
+            .bind(registration.name.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
     /// Durably bind one immutable artifact to one managed component in Postgres.
     ///
     /// # Errors
@@ -105,6 +134,64 @@ impl PostgresBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres artifact binding insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably add one managed component to one collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<venom_domain::AddCollectionComponentResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .add_component_to_collection(collection_key, component_key);
+        if result.change == venom_domain::AddCollectionComponentChange::Added {
+            sqlx::query(&format!(
+                concat!("INSERT INTO {} (collection_key, component_key) VALUES ($1, $2)"),
+                self.names.collection_memberships
+            ))
+            .bind(collection_key)
+            .bind(component_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
+            self.ingestion = candidate;
+        }
+        Ok(result)
+    }
+
+    /// Durably remove one managed component from one collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<venom_domain::RemoveCollectionComponentResult, String> {
+        let mut candidate = self.ingestion.clone();
+        let result = candidate
+            .inventory_mut()
+            .remove_component_from_collection(collection_key, component_key);
+        if result.change == venom_domain::RemoveCollectionComponentChange::Removed {
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE collection_key = $1 AND component_key = $2",
+                self.names.collection_memberships
+            ))
+            .bind(collection_key)
+            .bind(component_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
             self.ingestion = candidate;
         }
         Ok(result)
@@ -253,6 +340,11 @@ impl PostgresBackend {
     #[must_use]
     pub fn read_model_snapshot(&self) -> FindingReadModel {
         self.read_model.clone()
+    }
+
+    #[must_use]
+    pub fn inventory_snapshot(&self) -> ComponentInventory {
+        self.ingestion.inventory().clone()
     }
 
     #[must_use]
@@ -658,6 +750,8 @@ impl PostgresBackend {
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
         self.create_components_table().await?;
+        self.create_collections_table().await?;
+        self.create_collection_memberships_table().await?;
         self.create_artifact_bindings_table().await?;
         self.create_provider_runtime_configs_table().await?;
         self.create_integration_runtime_config_table().await?;
@@ -682,6 +776,41 @@ impl PostgresBackend {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres components table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collections_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT PRIMARY KEY, ",
+                "name TEXT NOT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collection_memberships_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT NOT NULL REFERENCES {}(collection_key) ON DELETE CASCADE, ",
+                "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "PRIMARY KEY (collection_key, component_key)",
+                ")"
+            ),
+            self.names.collection_memberships, self.names.collections, self.names.components
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection memberships table create failed: {error}"))?;
         Ok(())
     }
 
@@ -826,6 +955,8 @@ impl PostgresBackend {
         self.pending_integration_events.clear();
 
         self.load_components().await?;
+        self.load_collections().await?;
+        self.load_collection_memberships().await?;
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
         self.load_integration_runtime_config().await?;
@@ -854,6 +985,49 @@ impl PostgresBackend {
             }
         }
 
+        Ok(())
+    }
+
+    async fn load_collections(&mut self) -> Result<(), String> {
+        let collections = sqlx::query_as::<_, (String, String)>(&format!(
+            "SELECT collection_key, name FROM {} ORDER BY created_at, collection_key",
+            self.names.collections
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections load failed: {error}"))?;
+        for (collection_key, name) in collections {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .register_collection(CollectionRegistration::new(collection_key, name));
+            if result.change == RegisterCollectionChange::Rejected {
+                return Err("postgres collections contain conflicting registration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_collection_memberships(&mut self) -> Result<(), String> {
+        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT collection_key, component_key FROM {} ",
+                "ORDER BY created_at, collection_key, component_key"
+            ),
+            self.names.collection_memberships
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection memberships load failed: {error}"))?;
+        for (collection_key, component_key) in memberships {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .add_component_to_collection(&collection_key, &component_key);
+            if result.change == venom_domain::AddCollectionComponentChange::Rejected {
+                return Err("postgres collection memberships contain invalid ownership".to_owned());
+            }
+        }
         Ok(())
     }
 
@@ -1049,6 +1223,8 @@ struct ScanCommandRecord {
 struct TableNames {
     schema: Box<str>,
     components: Box<str>,
+    collections: Box<str>,
+    collection_memberships: Box<str>,
     artifact_bindings: Box<str>,
     provider_runtime_configs: Box<str>,
     integration_runtime_config: Box<str>,
@@ -1062,6 +1238,8 @@ impl TableNames {
         let schema = validate_schema_name(schema)?;
         Ok(Self {
             components: format!("{schema}.components").into_boxed_str(),
+            collections: format!("{schema}.collections").into_boxed_str(),
+            collection_memberships: format!("{schema}.collection_memberships").into_boxed_str(),
             artifact_bindings: format!("{schema}.artifact_bindings").into_boxed_str(),
             provider_runtime_configs: format!("{schema}.provider_runtime_configs").into_boxed_str(),
             integration_runtime_config: format!("{schema}.integration_runtime_config")
@@ -1193,10 +1371,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
-        ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, FindingProvider,
-        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-        ReportedFinding, RunNextScanResult, ScanCommandStatus,
+        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
+        EvidenceFreshness, FindingProvider, FindingProviderError, IntegrationEvent,
+        IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RunNextScanResult,
+        ScanCommandStatus,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -1329,6 +1508,45 @@ mod tests {
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_rebuilds_release_collections() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collections");
+        let mut backend = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+
+        let reopened = PostgresBackend::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert_eq!(
+            reopened
+                .inventory_snapshot()
+                .collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
     }
 
     #[tokio::test]

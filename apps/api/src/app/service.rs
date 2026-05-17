@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use venom_domain::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ComponentRegistration, DurableScanRuntime,
-    DurableState, EvidenceFreshness, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionRegistration, ComponentInventory,
+    ComponentRegistration, DurableScanRuntime, DurableState, EvidenceFreshness, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, IntegrationEventPublishError,
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult, ReportedFinding,
     RunNextScanResult, ScanCommandStatus, ScanPlanner, ScanRequest, Severity,
@@ -36,6 +36,7 @@ impl std::error::Error for AppServiceError {}
 
 #[derive(Debug, Clone)]
 pub struct AppReadSnapshot {
+    inventory: ComponentInventory,
     read_model: FindingReadModel,
     command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
 }
@@ -103,6 +104,56 @@ impl AppReadSnapshot {
             status: status.as_str().to_owned(),
         })
     }
+
+    #[must_use]
+    pub fn list_collections(&self) -> ListCollectionsResponse {
+        let collections = self
+            .inventory
+            .collections()
+            .into_iter()
+            .map(|collection| CollectionSummary {
+                collection_key: collection.collection_key.into(),
+                name: collection.name.into(),
+                members: collection.component_keys.len(),
+            })
+            .collect::<Vec<_>>();
+        let managed_collections = collections.len();
+        ListCollectionsResponse {
+            managed_collections,
+            collections,
+        }
+    }
+
+    /// Query one managed collection detail by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError::NotFound`] when the collection is unknown.
+    pub fn collection_detail(
+        &self,
+        collection_key: &str,
+    ) -> Result<CollectionDetailResponse, AppServiceError> {
+        let collection = self
+            .inventory
+            .collections()
+            .into_iter()
+            .find(|collection| collection.collection_key.as_ref() == collection_key)
+            .ok_or_else(|| {
+                AppServiceError::NotFound(format!("unknown collection: {collection_key}"))
+            })?;
+
+        Ok(CollectionDetailResponse {
+            collection_key: collection.collection_key.into(),
+            name: collection.name.into(),
+            members: collection
+                .component_keys
+                .into_iter()
+                .map(|component_key| CollectionMemberItem {
+                    component_key: component_key.into(),
+                })
+                .collect(),
+        })
+    }
 }
 
 pub struct AppService {
@@ -156,10 +207,12 @@ impl AppService {
     pub fn read_snapshot(&self) -> AppReadSnapshot {
         match &self.backend {
             AppBackend::Local(local) => AppReadSnapshot {
+                inventory: local.state.ingestion().inventory().clone(),
                 read_model: local.state.read_model().clone(),
                 command_statuses: local.runtime.command_statuses_snapshot(),
             },
             AppBackend::Postgres(postgres) => AppReadSnapshot {
+                inventory: postgres.inventory_snapshot(),
                 read_model: postgres.read_model_snapshot(),
                 command_statuses: postgres.command_statuses_snapshot(),
             },
@@ -221,6 +274,87 @@ impl AppService {
         Ok(BindArtifactResponse {
             change: result.change.as_str().to_owned(),
             bound_artifacts: result.bound_artifacts,
+        })
+    }
+
+    /// Create one closed release collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn register_collection(
+        &mut self,
+        request: CollectionRegistrationRequest,
+    ) -> Result<RegisterCollectionResponse, AppServiceError> {
+        let registration = CollectionRegistration::new(request.collection_key, request.name);
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .register_collection(registration)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .register_collection(registration)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(RegisterCollectionResponse {
+            change: result.change.as_str().to_owned(),
+            managed_collections: result.managed_collections,
+        })
+    }
+
+    /// Add one managed component to one closed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn add_component_to_collection(
+        &mut self,
+        collection_key: &str,
+        request: CollectionMembershipRequest,
+    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .add_component_to_collection(collection_key, &request.component_key)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .add_component_to_collection(collection_key, &request.component_key)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(CollectionMembershipResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
+        })
+    }
+
+    /// Remove one managed component from one closed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError`] when the durable state write fails.
+    pub async fn remove_component_from_collection(
+        &mut self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Result<CollectionMembershipResponse, AppServiceError> {
+        let result = match &mut self.backend {
+            AppBackend::Local(local) => local
+                .state
+                .remove_component_from_collection(collection_key, component_key)
+                .map_err(|error| AppServiceError::State(error.to_string()))?,
+            AppBackend::Postgres(postgres) => postgres
+                .remove_component_from_collection(collection_key, component_key)
+                .await
+                .map_err(AppServiceError::State)?,
+        };
+
+        Ok(CollectionMembershipResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
         })
     }
 
@@ -663,6 +797,54 @@ pub struct ComponentRegistrationRequest {
 pub struct RegisterComponentResponse {
     pub change: String,
     pub managed_components: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CollectionRegistrationRequest {
+    pub collection_key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterCollectionResponse {
+    pub change: String,
+    pub managed_collections: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CollectionMembershipRequest {
+    pub component_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionMembershipResponse {
+    pub change: String,
+    pub members: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListCollectionsResponse {
+    pub managed_collections: usize,
+    pub collections: Vec<CollectionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionSummary {
+    pub collection_key: String,
+    pub name: String,
+    pub members: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionDetailResponse {
+    pub collection_key: String,
+    pub name: String,
+    pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionMemberItem {
+    pub component_key: String,
 }
 
 #[derive(Debug, Deserialize)]

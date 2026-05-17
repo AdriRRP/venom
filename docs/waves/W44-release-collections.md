@@ -41,8 +41,8 @@ Let operators define one closed release collection over managed components, expo
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W44-S01` | done | define closed release collections in the domain and durable state | `scripts/check-slice.sh --wave W44-release-collections --slice W44-S01 --lane acceptance --path crates/venom-domain/src/inventory crates/venom-domain/src/durable_state.rs features/manage-collections.feature` |
-| `W44-S02` | in_progress | expose release collection commands and queries through the API and Postgres backend | `scripts/check-slice.sh --wave W44-release-collections --slice W44-S02 --lane integration --path apps/api/src/app apps/api/src/http apps/api/src/infra/postgres_backend.rs` |
-| `W44-S03` | planned | let operators manage release collections from the UI | `scripts/check-slice.sh --wave W44-release-collections --slice W44-S03 --lane e2e --path apps/web/src apps/web/e2e` |
+| `W44-S02` | done | expose release collection commands and queries through the API and Postgres backend | `scripts/check-slice.sh --wave W44-release-collections --slice W44-S02 --lane integration --path apps/api/src/app apps/api/src/http apps/api/src/infra/postgres_backend.rs` |
+| `W44-S03` | in_progress | let operators manage release collections from the UI | `scripts/check-slice.sh --wave W44-release-collections --slice W44-S03 --lane e2e --path apps/web/src apps/web/e2e` |
 | `W44-S04` | planned | close the wave with full docs and gate alignment | `scripts/check-wave.sh --wave W44-release-collections` |
 
 ## Language impact
