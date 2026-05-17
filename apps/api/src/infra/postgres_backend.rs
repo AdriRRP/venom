@@ -715,14 +715,6 @@ impl PostgresBackend {
     }
 
     #[must_use]
-    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
-        self.commands
-            .iter()
-            .map(|(command_id, record)| (command_id.clone(), record.status))
-            .collect()
-    }
-
-    #[must_use]
     pub fn pending_integration_events(&self) -> &[PendingIntegrationEvent] {
         &self.pending_integration_events
     }

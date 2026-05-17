@@ -90,29 +90,6 @@ impl ApiState {
             .with_read_model(service.read_model_snapshot());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
-
-    fn refresh_command_statuses_snapshot(&self, service: &AppService) {
-        let next = self
-            .read_snapshot()
-            .with_command_statuses(service.command_statuses_snapshot());
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
-    }
-
-    fn refresh_inventory_and_command_statuses_snapshot(&self, service: &AppService) {
-        let next = self.read_snapshot().with_inventory_and_command_statuses(
-            service.inventory_snapshot(),
-            service.command_statuses_snapshot(),
-        );
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
-    }
-
-    fn refresh_read_model_and_command_statuses_snapshot(&self, service: &AppService) {
-        let next = self.read_snapshot().with_read_model_and_command_statuses(
-            service.read_model_snapshot(),
-            service.command_statuses_snapshot(),
-        );
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
-    }
 }
 
 pub fn build_router(state: ApiState) -> Router {
@@ -351,7 +328,6 @@ async fn request_scan(
             .request_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -369,7 +345,6 @@ async fn request_collection_scan(
             .request_collection_scan(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_command_statuses_snapshot(&service);
         drop(service);
         response
     };
@@ -380,10 +355,12 @@ async fn scan_command_status(
     State(state): State<ApiState>,
     Path(command_id): Path<String>,
 ) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
-    let response = state
-        .read_snapshot()
-        .scan_command_status(&command_id)
-        .map_err(ApiError::from)?;
+    let response = {
+        let service = state.inner.service.lock().await;
+        service
+            .scan_command_status(&command_id)
+            .map_err(ApiError::from)?
+    };
     Ok(Json(response))
 }
 
@@ -397,7 +374,7 @@ async fn drain_collection_scan_worker(
             .run_collection_scan_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_inventory_and_command_statuses_snapshot(&service);
+        state.refresh_inventory_snapshot(&service);
         drop(service);
         response
     };
@@ -414,7 +391,7 @@ async fn run_next_scan(
             .run_next_scan(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_read_model_and_command_statuses_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };
@@ -431,7 +408,7 @@ async fn drain_worker(
             .run_worker_until_idle(request)
             .await
             .map_err(ApiError::from)?;
-        state.refresh_read_model_and_command_statuses_snapshot(&service);
+        state.refresh_read_model_snapshot(&service);
         drop(service);
         response
     };

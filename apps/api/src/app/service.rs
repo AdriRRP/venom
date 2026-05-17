@@ -3,7 +3,6 @@ use crate::infra::http_integration_publisher::{
 };
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresBackend};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,20 +39,14 @@ impl std::error::Error for AppServiceError {}
 pub struct AppReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
-    command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
 
 impl AppReadSnapshot {
     #[must_use]
-    pub fn new(
-        inventory: ComponentInventory,
-        read_model: FindingReadModel,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
-    ) -> Self {
+    pub fn new(inventory: ComponentInventory, read_model: FindingReadModel) -> Self {
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::new(read_model),
-            command_statuses: Arc::new(command_statuses),
         }
     }
 
@@ -62,7 +55,6 @@ impl AppReadSnapshot {
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::clone(&self.read_model),
-            command_statuses: Arc::clone(&self.command_statuses),
         }
     }
 
@@ -71,45 +63,6 @@ impl AppReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::new(read_model),
-            command_statuses: Arc::clone(&self.command_statuses),
-        }
-    }
-
-    #[must_use]
-    pub fn with_command_statuses(
-        &self,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
-    ) -> Self {
-        Self {
-            inventory: Arc::clone(&self.inventory),
-            read_model: Arc::clone(&self.read_model),
-            command_statuses: Arc::new(command_statuses),
-        }
-    }
-
-    #[must_use]
-    pub fn with_inventory_and_command_statuses(
-        &self,
-        inventory: ComponentInventory,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
-    ) -> Self {
-        Self {
-            inventory: Arc::new(inventory),
-            read_model: Arc::clone(&self.read_model),
-            command_statuses: Arc::new(command_statuses),
-        }
-    }
-
-    #[must_use]
-    pub fn with_read_model_and_command_statuses(
-        &self,
-        read_model: FindingReadModel,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
-    ) -> Self {
-        Self {
-            inventory: Arc::clone(&self.inventory),
-            read_model: Arc::new(read_model),
-            command_statuses: Arc::new(command_statuses),
         }
     }
 
@@ -150,29 +103,6 @@ impl AppReadSnapshot {
             offset: page.offset,
             limit: page.limit,
             active_findings: findings,
-        })
-    }
-
-    /// Query the durable status of one scan command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
-    pub fn scan_command_status(
-        &self,
-        command_id: &str,
-    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
-        let status = self
-            .command_statuses
-            .get(command_id)
-            .copied()
-            .ok_or_else(|| {
-                AppServiceError::NotFound(format!("unknown scan command: {command_id}"))
-            })?;
-
-        Ok(ScanCommandStatusResponse {
-            command_id: command_id.to_owned(),
-            status: status.as_str().to_owned(),
         })
     }
 
@@ -289,15 +219,13 @@ impl AppService {
     #[must_use]
     pub fn read_snapshot(&self) -> AppReadSnapshot {
         match &self.backend {
-            AppBackend::Local(local) => AppReadSnapshot {
-                inventory: Arc::new(local.state.ingestion().inventory().clone()),
-                read_model: Arc::new(local.state.read_model().clone()),
-                command_statuses: Arc::new(local.runtime.command_statuses_snapshot()),
-            },
+            AppBackend::Local(local) => AppReadSnapshot::new(
+                local.state.ingestion().inventory().clone(),
+                local.state.read_model().clone(),
+            ),
             AppBackend::Postgres(postgres) => AppReadSnapshot::new(
                 postgres.inventory_snapshot(),
                 postgres.read_model_snapshot(),
-                postgres.command_statuses_snapshot(),
             ),
         }
     }
@@ -318,12 +246,25 @@ impl AppService {
         }
     }
 
-    #[must_use]
-    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
-        match &self.backend {
-            AppBackend::Local(local) => local.runtime.command_statuses_snapshot(),
-            AppBackend::Postgres(postgres) => postgres.command_statuses_snapshot(),
+    /// Query the durable status of one scan command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppServiceError::NotFound`] when the command is unknown.
+    pub fn scan_command_status(
+        &self,
+        command_id: &str,
+    ) -> Result<ScanCommandStatusResponse, AppServiceError> {
+        let status = match &self.backend {
+            AppBackend::Local(local) => local.runtime.command_status(command_id),
+            AppBackend::Postgres(postgres) => postgres.command_status(command_id),
         }
+        .ok_or_else(|| AppServiceError::NotFound(format!("unknown scan command: {command_id}")))?;
+
+        Ok(ScanCommandStatusResponse {
+            command_id: command_id.to_owned(),
+            status: status.as_str().to_owned(),
+        })
     }
 
     /// Register one managed component through the application boundary.
