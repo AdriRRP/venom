@@ -1,7 +1,7 @@
 # W75. Collection governance workbench
 
 Wave: `W75-collection-governance-workbench`
-Status: `in_progress`
+Status: `done`
 BDD impact: `create`
 Agentic impact: `none`
 Infra profile: `db`
@@ -42,9 +42,9 @@ the same read-side projection.
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W75-S01` | in_progress | compose one collection governance overview from release-scoped findings and collection health | unit and acceptance checks |
-| `W75-S02` | pending | expose collection governance overview through the collection findings API | integration checks |
-| `W75-S03` | pending | show the collection governance workbench on the findings screen with quick filters | web and e2e checks |
+| `W75-S01` | done | compose one collection governance overview from release-scoped findings and collection health | unit and acceptance checks |
+| `W75-S02` | done | expose collection governance overview through the collection findings API | integration checks |
+| `W75-S03` | done | show the collection governance workbench on the findings screen with quick filters | web and e2e checks |
 
 ## Language impact
 
