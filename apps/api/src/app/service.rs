@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingGovernanceState, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
+    EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
     ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
     SuppressFindingResult, Suppression,
 };
@@ -1807,9 +1807,7 @@ fn build_scoped_active_findings_query(
     Ok(query)
 }
 
-fn parse_governance_state(
-    value: &str,
-) -> Result<FindingGovernanceState, ApiApplicationError> {
+fn parse_governance_state(value: &str) -> Result<FindingGovernanceState, ApiApplicationError> {
     match value {
         "open" => Ok(FindingGovernanceState::Open),
         "risk-accepted" => Ok(FindingGovernanceState::RiskAccepted),

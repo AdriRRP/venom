@@ -8,9 +8,9 @@ use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
     FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
-    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity, Suppression,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery, Severity, Suppression,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,

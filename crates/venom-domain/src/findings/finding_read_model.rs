@@ -51,10 +51,7 @@ impl ActiveFindingsQuery {
     }
 
     #[must_use]
-    pub const fn with_governance_state(
-        mut self,
-        governance_state: FindingGovernanceState,
-    ) -> Self {
+    pub const fn with_governance_state(mut self, governance_state: FindingGovernanceState) -> Self {
         self.governance_state = Some(governance_state);
         self
     }
@@ -115,10 +112,7 @@ impl ScopedActiveFindingsQuery {
     }
 
     #[must_use]
-    pub const fn with_governance_state(
-        mut self,
-        governance_state: FindingGovernanceState,
-    ) -> Self {
+    pub const fn with_governance_state(mut self, governance_state: FindingGovernanceState) -> Self {
         self.governance_state = Some(governance_state);
         self
     }
