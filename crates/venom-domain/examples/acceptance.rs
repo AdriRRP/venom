@@ -239,6 +239,37 @@ async fn a_provider_scan_report_with_critical_and_low_findings(
 }
 
 #[given(
+    expr = "a provider scan report with a medium vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+#[when(
+    expr = "a provider scan report with a medium vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+async fn a_provider_scan_report_with_medium_and_low_findings(
+    world: &mut AcceptanceWorld,
+    medium_vulnerability_id: String,
+    medium_package_name: String,
+    medium_package_version: String,
+    low_vulnerability_id: String,
+    low_package_name: String,
+    low_package_version: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(
+                medium_vulnerability_id,
+                medium_package_name,
+                medium_package_version,
+            )
+            .with_severity(Severity::Medium),
+            build_finding(low_vulnerability_id, low_package_name, low_package_version)
+                .with_severity(Severity::Low),
+        ],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
     expr = "a recorded provider scan report with vulnerability {string} in package {string} version {string}"
 )]
 async fn a_recorded_provider_scan_report(

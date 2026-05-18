@@ -197,13 +197,19 @@ export function OperationsPage() {
 
 	const drainWorkerMutation = useMutation({
 		mutationFn: drainScanWorker,
-		onSuccess: (data) => {
+		onSuccess: async (data) => {
 			if (data.last_command_id) {
 				setOperatorState((current) => ({
 					...current,
 					commandId: data.last_command_id ?? current.commandId,
 				}));
 			}
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: ["collections"] }),
+				queryClient.invalidateQueries({
+					queryKey: ["collection-detail", operatorState.collectionKey],
+				}),
+			]);
 		},
 	});
 
