@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	type ColumnDef,
 	flexRender,
@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
 	type ActiveFinding,
+	acceptFindingRisk,
 	type CollectionActiveFinding,
 	fetchActiveFindings,
 	fetchApiHealth,
@@ -84,13 +85,37 @@ function findingsWindowLabel(total: number, returned: number, offset: number) {
 	return `Showing ${start}-${end} of ${total}`;
 }
 
+function governanceLabel(finding: {
+	governance_state: string;
+	governance_reason: string | null;
+	governance_until_unix_ms: number | null;
+}) {
+	if (finding.governance_state === "risk-accepted") {
+		const until =
+			finding.governance_until_unix_ms == null
+				? ""
+				: ` until ${finding.governance_until_unix_ms}`;
+		const reason =
+			finding.governance_reason == null ? "" : `: ${finding.governance_reason}`;
+		return `risk-accepted${until}${reason}`;
+	}
+
+	return finding.governance_state;
+}
+
 export function FindingsPage() {
+	const queryClient = useQueryClient();
 	const [collectionRequest, setCollectionRequest] = useState(
 		defaultCollectionRequest,
 	);
 	const [artifactRequest, setArtifactRequest] = useState(
 		defaultArtifactRequest,
 	);
+	const [selectedFinding, setSelectedFinding] =
+		useState<CollectionActiveFinding | null>(null);
+	const [riskReason, setRiskReason] = useState("");
+	const [riskUntilUnixMs, setRiskUntilUnixMs] = useState("");
+	const [riskFeedback, setRiskFeedback] = useState<string | null>(null);
 
 	const healthQuery = useQuery({
 		queryKey: ["api-health"],
@@ -106,6 +131,31 @@ export function FindingsPage() {
 	const artifactFindingsQuery = useQuery({
 		queryKey: ["active-findings", artifactRequest],
 		queryFn: () => fetchActiveFindings(artifactRequest),
+	});
+
+	const acceptRiskMutation = useMutation({
+		mutationFn: acceptFindingRisk,
+		onSuccess: async (response) => {
+			setRiskFeedback(
+				`Governance: ${response.governance_state} (${response.change}).`,
+			);
+			setSelectedFinding(null);
+			setRiskReason("");
+			setRiskUntilUnixMs("");
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: ["collection-active-findings", collectionRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["active-findings", artifactRequest],
+				}),
+			]);
+		},
+		onError: (error) => {
+			setRiskFeedback(
+				error instanceof Error ? error.message : "risk acceptance failed",
+			);
+		},
 	});
 
 	const collectionTable = useReactTable({
@@ -309,13 +359,15 @@ export function FindingsPage() {
 													)}
 										</th>
 									))}
+									<th>Governance</th>
+									<th>Actions</th>
 								</tr>
 							))}
 						</thead>
 						<tbody>
 							{collectionTable.getRowModel().rows.length === 0 ? (
 								<tr>
-									<td colSpan={collectionColumns.length}>
+									<td colSpan={collectionColumns.length + 2}>
 										No active findings for this collection yet.
 									</td>
 								</tr>
@@ -330,12 +382,95 @@ export function FindingsPage() {
 												)}
 											</td>
 										))}
+										<td>{governanceLabel(row.original)}</td>
+										<td>
+											<button
+												className="secondary-button"
+												onClick={() => {
+													setSelectedFinding(row.original);
+													setRiskReason(row.original.governance_reason ?? "");
+													setRiskUntilUnixMs(
+														row.original.governance_until_unix_ms == null
+															? ""
+															: String(row.original.governance_until_unix_ms),
+													);
+													setRiskFeedback(null);
+												}}
+												type="button"
+											>
+												Accept Risk
+											</button>
+										</td>
 									</tr>
 								))
 							)}
 						</tbody>
 					</table>
 				</div>
+
+				{selectedFinding ? (
+					<form
+						className="filters"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void acceptRiskMutation.mutate({
+								componentKey: selectedFinding.component_key,
+								artifactKind: selectedFinding.artifact_kind,
+								artifactIdentity: selectedFinding.artifact_identity,
+								vulnerabilityId: selectedFinding.vulnerability_id,
+								packageName: selectedFinding.package_name,
+								packageVersion: selectedFinding.package_version,
+								packagePurl: selectedFinding.package_purl,
+								reason: riskReason,
+								untilUnixMs:
+									riskUntilUnixMs.trim() === ""
+										? null
+										: Number(riskUntilUnixMs),
+							});
+						}}
+					>
+						<label>
+							Selected finding
+							<input
+								readOnly
+								value={`${selectedFinding.vulnerability_id} on ${selectedFinding.component_key}`}
+							/>
+						</label>
+						<label>
+							Reason
+							<input
+								name="riskReason"
+								onChange={(event) => setRiskReason(event.target.value)}
+								value={riskReason}
+							/>
+						</label>
+						<label>
+							Until unix ms
+							<input
+								name="riskUntilUnixMs"
+								onChange={(event) => setRiskUntilUnixMs(event.target.value)}
+								placeholder="optional"
+								type="number"
+								value={riskUntilUnixMs}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Submit Risk Acceptance
+						</button>
+						<button
+							className="secondary-button"
+							onClick={() => {
+								setSelectedFinding(null);
+								setRiskFeedback(null);
+							}}
+							type="button"
+						>
+							Cancel
+						</button>
+					</form>
+				) : null}
+
+				{riskFeedback ? <p className="results-meta">{riskFeedback}</p> : null}
 			</section>
 
 			<section className="panel">
@@ -486,13 +621,14 @@ export function FindingsPage() {
 													)}
 										</th>
 									))}
+									<th>Governance</th>
 								</tr>
 							))}
 						</thead>
 						<tbody>
 							{artifactTable.getRowModel().rows.length === 0 ? (
 								<tr>
-									<td colSpan={artifactColumns.length}>
+									<td colSpan={artifactColumns.length + 1}>
 										No active findings yet.
 									</td>
 								</tr>
@@ -507,6 +643,7 @@ export function FindingsPage() {
 												)}
 											</td>
 										))}
+										<td>{governanceLabel(row.original)}</td>
 									</tr>
 								))
 							)}

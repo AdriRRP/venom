@@ -5,9 +5,10 @@ use venom_domain::findings::finding_provider_contract::{
     as_provider_error, validate_provider_scan_report,
 };
 use venom_domain::findings::{
-    ArtifactKind, ArtifactRef, EvidenceFreshness, FindingChangeSet, FindingIngestion,
-    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingReadModel,
-    ProviderScanReport, ReportedFinding, ScanRequest,
+    AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, EvidenceFreshness,
+    FindingChangeSet, FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -31,6 +32,7 @@ pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
     ingestion: FindingIngestion,
+    governance: FindingGovernance,
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
@@ -65,6 +67,7 @@ impl PostgresStore {
             pool,
             names,
             ingestion: FindingIngestion::new(),
+            governance: FindingGovernance::new(),
             read_model: FindingReadModel::new(),
             integration_runtime_config: None,
             commands: BTreeMap::new(),
@@ -386,6 +389,62 @@ impl PostgresStore {
         self.pending_integration_events
             .push(pending_integration_event);
         Ok(change_set)
+    }
+
+    /// Durably accept the risk of one currently active finding in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the finding is not active or the durable
+    /// write fails.
+    pub async fn accept_risk(
+        &mut self,
+        finding: FindingRef,
+        acceptance: RiskAcceptance,
+    ) -> Result<AcceptRiskResult, String> {
+        if !self.read_model.has_active_finding(&finding) {
+            return Err("cannot accept risk for an inactive finding".to_owned());
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
+        if result.change == AcceptRiskChange::Accepted {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} ",
+                    "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+                    "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                    "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
+                ),
+                self.names.finding_risk_acceptances
+            ))
+            .bind(finding.component_key.as_ref())
+            .bind(artifact_kind_name(finding.artifact.kind))
+            .bind(finding.artifact.identity.as_ref())
+            .bind(finding.vulnerability_id.as_ref())
+            .bind(finding.package.name.as_ref())
+            .bind(finding.package.version.as_ref())
+            .bind(finding.package.purl.as_deref().unwrap_or(""))
+            .bind(acceptance.reason.as_ref())
+            .bind(
+                acceptance
+                    .until_unix_ms
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| "risk acceptance until overflow".to_owned())?,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres finding risk acceptance upsert failed: {error}"))?;
+
+            candidate_read_model.accept_risk(finding, acceptance);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(result)
     }
 
     #[must_use]
@@ -1047,6 +1106,7 @@ impl PostgresStore {
         self.create_provider_runtime_configs_table().await?;
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
+        self.create_finding_risk_acceptances_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
 
@@ -1228,6 +1288,32 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_finding_risk_acceptances_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT NOT NULL, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "vulnerability_id TEXT NOT NULL, ",
+                "package_name TEXT NOT NULL, ",
+                "package_version TEXT NOT NULL, ",
+                "package_purl TEXT NOT NULL DEFAULT '', ",
+                "reason TEXT NOT NULL, ",
+                "until_unix_ms BIGINT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "PRIMARY KEY (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
+                ")"
+            ),
+            self.names.finding_risk_acceptances
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres finding risk acceptances table create failed: {error}"))?;
+        Ok(())
+    }
+
     async fn create_scan_commands_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -1280,6 +1366,7 @@ impl PostgresStore {
 
     async fn rebuild(&mut self) -> Result<(), String> {
         self.ingestion = FindingIngestion::new();
+        self.governance = FindingGovernance::new();
         self.read_model = FindingReadModel::new();
         self.integration_runtime_config = None;
         self.commands.clear();
@@ -1294,6 +1381,7 @@ impl PostgresStore {
         self.load_provider_runtime_configs().await?;
         self.load_integration_runtime_config().await?;
         self.load_provider_reports().await?;
+        self.load_finding_risk_acceptances().await?;
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
 
@@ -1506,6 +1594,59 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn load_finding_risk_acceptances(&mut self) -> Result<(), String> {
+        let rows = sqlx::query_as::<
+            _,
+            (String, String, String, String, String, String, String, String, Option<i64>),
+        >(&format!(
+            concat!(
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, reason, until_unix_ms ",
+                "FROM {} ORDER BY created_at"
+            ),
+            self.names.finding_risk_acceptances
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres finding risk acceptances load failed: {error}"))?;
+
+        for (
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            vulnerability_id,
+            package_name,
+            package_version,
+            package_purl,
+            reason,
+            until_unix_ms,
+        ) in rows
+        {
+            let finding = FindingRef::new(
+                component_key,
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                vulnerability_id,
+                venom_domain::PackageCoordinate {
+                    name: package_name.into_boxed_str(),
+                    version: package_version.into_boxed_str(),
+                    purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+                },
+            );
+            let acceptance = match until_unix_ms {
+                Some(until_unix_ms) => RiskAcceptance::new(reason)
+                    .until_unix_ms(u64::try_from(until_unix_ms).map_err(|_| {
+                        "postgres finding risk acceptance until must be positive".to_owned()
+                    })?),
+                None => RiskAcceptance::new(reason),
+            };
+            self.governance
+                .replay_risk_acceptance(finding.clone(), acceptance.clone());
+            self.read_model.replay_risk_acceptance(finding, acceptance);
+        }
+
+        Ok(())
+    }
+
     async fn load_provider_runtime_configs(&mut self) -> Result<(), String> {
         let configs = sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT component_key, provider_key FROM {} ORDER BY component_key",
@@ -1626,6 +1767,7 @@ struct TableNames {
     provider_runtime_configs: Box<str>,
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
+    finding_risk_acceptances: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
 }
@@ -1644,6 +1786,8 @@ impl TableNames {
             integration_runtime_config: format!("{schema}.integration_runtime_config")
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
+            finding_risk_acceptances: format!("{schema}.finding_risk_acceptances")
+                .into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
             schema,

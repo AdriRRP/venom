@@ -83,7 +83,7 @@ impl ScanRequest {
 ///
 /// Providers disagree on package metadata shape, but package name, version, and
 /// optional PURL are the minimum useful common denominator for correlation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PackageCoordinate {
     /// Package name reported by the provider after canonicalization.
     pub name: Box<str>,

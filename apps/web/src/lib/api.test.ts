@@ -1,4 +1,5 @@
 import {
+	acceptFindingRisk,
 	addCollectionComponent,
 	bindArtifact,
 	configureCollectionScanSchedule,
@@ -165,6 +166,44 @@ describe("fetchApiHealth", () => {
 		);
 		expect(calls[6]?.input).toContain("min_severity=high");
 		expect(calls[6]?.input).toContain("package_name=openssl");
+	});
+
+	it("serializes risk acceptance over the canonical finding identity", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(
+					JSON.stringify({
+						change: "accepted",
+						governance_state: "risk-accepted",
+						governance_reason: "Compensating control in place",
+						governance_until_unix_ms: 1760000000000,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		await acceptFindingRisk({
+			componentKey: "component:payments-api",
+			artifactKind: "container-image",
+			artifactIdentity: "registry.example/payments@sha256:111",
+			vulnerabilityId: "CVE-2026-0001",
+			packageName: "openssl",
+			packageVersion: "3.0.0",
+			reason: "Compensating control in place",
+			untilUnixMs: 1760000000000,
+		});
+
+		expect(calls[0]?.input).toBe("/api/findings/risk-acceptance");
+		expect(calls[0]?.init?.body).toContain(
+			'"vulnerability_id":"CVE-2026-0001"',
+		);
+		expect(calls[0]?.init?.body).toContain(
+			'"reason":"Compensating control in place"',
+		);
+		expect(calls[0]?.init?.body).toContain('"until_unix_ms":1760000000000');
 	});
 
 	it("serializes scan command lookup and worker drain payloads", async () => {

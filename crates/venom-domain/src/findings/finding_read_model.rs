@@ -1,4 +1,7 @@
-use crate::{ArtifactRef, CollectionScopedArtifact, ProviderScanReport, ReportedFinding, Severity};
+use crate::{
+    ArtifactRef, CollectionScopedArtifact, FindingDecision, FindingGovernanceState, FindingRef,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
+};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
@@ -13,6 +16,7 @@ pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
 #[derive(Debug, Clone, Default)]
 pub struct FindingReadModel {
     active: BTreeMap<TrackedArtifactKey, Vec<ActiveFindingRecord>>,
+    decisions: BTreeMap<FindingRef, FindingDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +73,7 @@ pub struct ActiveFindingsPage {
     pub returned: usize,
     pub offset: usize,
     pub limit: usize,
-    pub findings: Vec<ReportedFinding>,
+    pub findings: Vec<ActiveFindingProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,11 +136,15 @@ pub struct ScopedActiveFindingsPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopedActiveFinding {
-    pub component_key: Box<str>,
-    pub artifact: ArtifactRef,
-    pub finding: ReportedFinding,
+pub struct ActiveFindingProjection {
+    pub finding: FindingRef,
+    pub severity: Severity,
+    pub governance_state: FindingGovernanceState,
+    pub governance_reason: Option<Box<str>>,
+    pub governance_until_unix_ms: Option<u64>,
 }
+
+pub type ScopedActiveFinding = ActiveFindingProjection;
 
 impl FindingReadModel {
     #[must_use]
@@ -161,6 +169,15 @@ impl FindingReadModel {
         let key = TrackedArtifactKey::new(component_key, artifact);
         self.active
             .insert(key, canonicalize_findings(canonical_findings));
+    }
+
+    pub fn accept_risk(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
+        self.decisions
+            .insert(finding, FindingDecision::RiskAccepted(acceptance));
+    }
+
+    pub fn replay_risk_acceptance(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
+        self.accept_risk(finding, acceptance);
     }
 
     #[must_use]
@@ -193,23 +210,13 @@ impl FindingReadModel {
     }
 
     #[must_use]
-    pub fn active_findings(
-        &self,
-        component_key: &str,
-        artifact: &ArtifactRef,
-    ) -> Vec<ReportedFinding> {
+    pub fn has_active_finding(&self, finding: &FindingRef) -> bool {
         self.active
             .get(&TrackedArtifactKey::new(
-                component_key.into(),
-                artifact.clone(),
+                finding.component_key.clone(),
+                finding.artifact.clone(),
             ))
-            .map(|findings| {
-                findings
-                    .iter()
-                    .map(ActiveFindingRecord::to_reported_finding)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+            .is_some_and(|findings| findings.iter().any(|candidate| candidate.matches(finding)))
     }
 
     #[must_use]
@@ -248,7 +255,13 @@ impl FindingReadModel {
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(ActiveFindingRecord::to_reported_finding)
+            .map(|finding| {
+                self.project_active_finding(
+                    query.component_key.clone(),
+                    query.artifact.clone(),
+                    finding,
+                )
+            })
             .collect::<Vec<_>>();
 
         ActiveFindingsPage {
@@ -307,10 +320,12 @@ impl FindingReadModel {
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(|(scope_item, finding)| ScopedActiveFinding {
-                component_key: scope_item.component_key.clone(),
-                artifact: scope_item.artifact.clone(),
-                finding: finding.to_reported_finding(),
+            .map(|(scope_item, finding)| {
+                self.project_active_finding(
+                    scope_item.component_key.clone(),
+                    scope_item.artifact.clone(),
+                    finding,
+                )
             })
             .collect::<Vec<_>>();
 
@@ -320,6 +335,37 @@ impl FindingReadModel {
             offset,
             limit,
             findings: page,
+        }
+    }
+
+    fn project_active_finding(
+        &self,
+        component_key: Box<str>,
+        artifact: ArtifactRef,
+        finding: &ActiveFindingRecord,
+    ) -> ActiveFindingProjection {
+        let finding_ref = finding.finding_ref(component_key, artifact);
+        let (governance_state, governance_reason, governance_until_unix_ms) = self
+            .decisions
+            .get(&finding_ref)
+            .map_or((FindingGovernanceState::Open, None, None), |decision| {
+                (
+                    decision.state(),
+                    decision
+                        .risk_acceptance()
+                        .map(|acceptance| acceptance.reason.clone()),
+                    decision
+                        .risk_acceptance()
+                        .and_then(|acceptance| acceptance.until_unix_ms),
+                )
+            });
+
+        ActiveFindingProjection {
+            finding: finding_ref,
+            severity: finding.severity,
+            governance_state,
+            governance_reason,
+            governance_until_unix_ms,
         }
     }
 }
@@ -349,17 +395,36 @@ struct ActiveFindingRecord {
 }
 
 impl ActiveFindingRecord {
-    fn to_reported_finding(&self) -> ReportedFinding {
-        let mut finding = ReportedFinding::new(
+    fn finding_ref(&self, component_key: Box<str>, artifact: ArtifactRef) -> FindingRef {
+        FindingRef::new(
+            component_key,
+            artifact,
             self.vulnerability_id.clone(),
-            crate::PackageCoordinate {
+            PackageCoordinate {
                 name: self.package_name.clone(),
                 version: self.package_version.clone(),
                 purl: self.package_purl.clone(),
             },
-        );
-        finding.severity = self.severity;
-        finding
+        )
+    }
+
+    fn to_reported_finding(&self) -> ReportedFinding {
+        ReportedFinding::new(
+            self.vulnerability_id.clone(),
+            PackageCoordinate {
+                name: self.package_name.clone(),
+                version: self.package_version.clone(),
+                purl: self.package_purl.clone(),
+            },
+        )
+        .with_severity(self.severity)
+    }
+
+    fn matches(&self, finding: &FindingRef) -> bool {
+        self.vulnerability_id == finding.vulnerability_id
+            && self.package_name == finding.package.name
+            && self.package_version == finding.package.version
+            && self.package_purl == finding.package.purl
     }
 }
 
@@ -441,8 +506,8 @@ mod tests {
         MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFindingsQuery,
     };
     use crate::{
-        ArtifactKind, ArtifactRef, CollectionScopedArtifact, EvidenceFreshness, PackageCoordinate,
-        ProviderScanReport, ReportedFinding, Severity,
+        ArtifactKind, ArtifactRef, CollectionScopedArtifact, EvidenceFreshness, FindingRef,
+        PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
     };
     use std::time::SystemTime;
 
@@ -527,7 +592,10 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.returned, 1);
         assert_eq!(page.limit, 1);
-        assert_eq!(page.findings[0].vulnerability_id.as_ref(), "CVE-2026-0001");
+        assert_eq!(
+            page.findings[0].finding.vulnerability_id.as_ref(),
+            "CVE-2026-0001"
+        );
     }
 
     #[test]
@@ -598,7 +666,7 @@ mod tests {
         assert_eq!(page.total, 2);
         assert_eq!(page.returned, 2);
         assert_eq!(
-            page.findings[0].component_key.as_ref(),
+            page.findings[0].finding.component_key.as_ref(),
             "component:payments-api"
         );
         assert_eq!(
@@ -606,12 +674,43 @@ mod tests {
             "CVE-2026-0001"
         );
         assert_eq!(
-            page.findings[1].component_key.as_ref(),
+            page.findings[1].finding.component_key.as_ref(),
             "component:billing-api"
         );
         assert_eq!(
             page.findings[1].finding.vulnerability_id.as_ref(),
             "CVE-2026-0003"
         );
+    }
+
+    #[test]
+    fn accepted_risk_is_projected_on_active_findings() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![ReportedFinding::new(
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        )
+        .with_severity(Severity::High)]));
+
+        read_model.accept_risk(
+            FindingRef::new(
+                "component:payments-api",
+                artifact(),
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            ),
+            RiskAcceptance::new("Compensating control in place").until_unix_ms(1_760_000_000_000),
+        );
+
+        let page = read_model.query_active_findings(
+            &ActiveFindingsQuery::new("component:payments-api", artifact()),
+        );
+
+        assert_eq!(page.findings[0].governance_state.as_str(), "risk-accepted");
+        assert_eq!(
+            page.findings[0].governance_reason.as_deref(),
+            Some("Compensating control in place")
+        );
+        assert_eq!(page.findings[0].governance_until_unix_ms, Some(1_760_000_000_000));
     }
 }

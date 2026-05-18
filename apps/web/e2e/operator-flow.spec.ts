@@ -137,4 +137,12 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByRole("cell", { name: "openssl@3.0.0" }),
 	).toBeVisible();
+	await collectionPanel.getByRole("button", { name: "Accept Risk" }).click();
+	await page
+		.getByRole("textbox", { name: "Reason" })
+		.fill("Compensating control in place");
+	await page.getByRole("button", { name: "Submit Risk Acceptance" }).click();
+	await expect(
+		collectionPanel.getByText("risk-accepted: Compensating control in place"),
+	).toBeVisible();
 });

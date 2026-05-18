@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScanRequest, ScopedActiveFindingsQuery, Severity,
+    AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -87,12 +88,7 @@ impl ApiReadSnapshot {
         let findings = page
             .findings
             .into_iter()
-            .map(|finding| ActiveFindingItem {
-                vulnerability_id: finding.vulnerability_id.into(),
-                package_name: finding.package.name.into(),
-                package_version: finding.package.version.into(),
-                severity: severity_name(finding.severity).to_owned(),
-            })
+            .map(ActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
 
         Ok(ActiveFindingsResponse {
@@ -193,15 +189,7 @@ impl ApiReadSnapshot {
         let findings = page
             .findings
             .into_iter()
-            .map(|item| CollectionActiveFindingItem {
-                component_key: item.component_key.into(),
-                artifact_kind: artifact_kind_name(item.artifact.kind).to_owned(),
-                artifact_identity: item.artifact.identity.into(),
-                vulnerability_id: item.finding.vulnerability_id.into(),
-                package_name: item.finding.package.name.into(),
-                package_version: item.finding.package.version.into(),
-                severity: severity_name(item.finding.severity).to_owned(),
-            })
+            .map(CollectionActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
 
         Ok(CollectionActiveFindingsResponse {
@@ -610,6 +598,67 @@ impl ApiApplication {
             repeated: result.repeated,
             withdrawn: result.withdrawn,
             active: result.active,
+        })
+    }
+
+    /// Accept the risk of one currently active finding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the finding
+    /// is not active, or the durable write fails.
+    pub async fn accept_risk(
+        &mut self,
+        request: AcceptRiskRequest,
+    ) -> Result<AcceptRiskResponse, ApiApplicationError> {
+        let finding = build_finding_ref(
+            &request.component_key,
+            &request.artifact_kind,
+            &request.artifact_identity,
+            &request.vulnerability_id,
+            &request.package_name,
+            &request.package_version,
+            request.package_purl.as_deref(),
+        )?;
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "risk acceptance reason must not be empty".to_owned(),
+            ));
+        }
+        let acceptance = request
+            .until_unix_ms
+            .map_or_else(
+                || RiskAcceptance::new(request.reason.clone()),
+                |until_unix_ms| RiskAcceptance::new(request.reason.clone()).until_unix_ms(until_unix_ms),
+            );
+
+        let result: AcceptRiskResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .accept_risk(finding, acceptance.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingFinding(_) => {
+                        ApiApplicationError::NotFound(error.to_string())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .accept_risk(finding, acceptance.clone())
+                .await
+                .map_err(|error| {
+                    if error == "cannot accept risk for an inactive finding" {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(AcceptRiskResponse {
+            change: result.change.as_str().to_owned(),
+            governance_state: "risk-accepted".to_owned(),
+            governance_reason: result.acceptance.reason.into(),
+            governance_until_unix_ms: result.acceptance.until_unix_ms,
         })
     }
 
@@ -1257,6 +1306,27 @@ pub struct RecordProviderReportResponse {
     pub active: usize,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AcceptRiskRequest {
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
+    pub vulnerability_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub package_purl: Option<String>,
+    pub reason: String,
+    pub until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AcceptRiskResponse {
+    pub change: String,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct ActiveFindingsRequest {
     pub component_key: String,
@@ -1284,10 +1354,35 @@ pub struct ActiveFindingsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ActiveFindingItem {
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
     pub vulnerability_id: String,
     pub package_name: String,
     pub package_version: String,
+    pub package_purl: Option<String>,
     pub severity: String,
+    pub governance_state: String,
+    pub governance_reason: Option<String>,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+impl ActiveFindingItem {
+    fn from_projection(value: ActiveFindingProjection) -> Self {
+        Self {
+            component_key: value.finding.component_key.into(),
+            artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
+            artifact_identity: value.finding.artifact.identity.into(),
+            vulnerability_id: value.finding.vulnerability_id.into(),
+            package_name: value.finding.package.name.into(),
+            package_version: value.finding.package.version.into(),
+            package_purl: value.finding.package.purl.map(Into::into),
+            severity: severity_name(value.severity).to_owned(),
+            governance_state: value.governance_state.as_str().to_owned(),
+            governance_reason: value.governance_reason.map(Into::into),
+            governance_until_unix_ms: value.governance_until_unix_ms,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1318,7 +1413,29 @@ pub struct CollectionActiveFindingItem {
     pub vulnerability_id: String,
     pub package_name: String,
     pub package_version: String,
+    pub package_purl: Option<String>,
     pub severity: String,
+    pub governance_state: String,
+    pub governance_reason: Option<String>,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+impl CollectionActiveFindingItem {
+    fn from_projection(value: ActiveFindingProjection) -> Self {
+        Self {
+            component_key: value.finding.component_key.into(),
+            artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
+            artifact_identity: value.finding.artifact.identity.into(),
+            vulnerability_id: value.finding.vulnerability_id.into(),
+            package_name: value.finding.package.name.into(),
+            package_version: value.finding.package.version.into(),
+            package_purl: value.finding.package.purl.map(Into::into),
+            severity: severity_name(value.severity).to_owned(),
+            governance_state: value.governance_state.as_str().to_owned(),
+            governance_reason: value.governance_reason.map(Into::into),
+            governance_until_unix_ms: value.governance_until_unix_ms,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1555,6 +1672,31 @@ fn build_active_findings_query(
         query = query.with_limit(limit);
     }
     Ok(query)
+}
+
+fn build_finding_ref(
+    component_key: &str,
+    artifact_kind: &str,
+    artifact_identity: &str,
+    vulnerability_id: &str,
+    package_name: &str,
+    package_version: &str,
+    package_purl: Option<&str>,
+) -> Result<FindingRef, ApiApplicationError> {
+    let mut package = PackageCoordinate::new(package_name.to_owned(), package_version.to_owned());
+    if let Some(package_purl) = package_purl.filter(|value| !value.is_empty()) {
+        package = package.with_purl(package_purl.to_owned());
+    }
+
+    Ok(FindingRef::new(
+        component_key.to_owned(),
+        ArtifactRef::new(
+            parse_artifact_kind(artifact_kind)?,
+            artifact_identity.to_owned(),
+        ),
+        vulnerability_id.to_owned(),
+        package,
+    ))
 }
 
 fn build_scoped_active_findings_query(

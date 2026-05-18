@@ -1,6 +1,6 @@
 use crate::{
-    AddCollectionComponentChange, AddCollectionComponentResult, ArtifactRef, BindArtifactChange,
-    BindArtifactResult, CollectionRegistration, ComponentRegistration,
+    AcceptRiskChange, AcceptRiskResult, ArtifactRef, FindingGovernance, FindingRef, RiskAcceptance,
+    AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange, BindArtifactResult, CollectionRegistration, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, EvidenceFreshness, FindingChangeSet, FindingIngestion,
@@ -29,6 +29,7 @@ use time::format_description::well_known::Rfc3339;
 pub struct DurableState {
     history_path: PathBuf,
     ingestion: FindingIngestion,
+    governance: FindingGovernance,
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
@@ -55,6 +56,7 @@ impl DurableState {
         let mut state = Self {
             history_path,
             ingestion: FindingIngestion::default(),
+            governance: FindingGovernance::default(),
             read_model: FindingReadModel::default(),
             integration_runtime_config: None,
             pending_integration_events: VecDeque::new(),
@@ -71,6 +73,11 @@ impl DurableState {
     #[must_use]
     pub const fn read_model(&self) -> &FindingReadModel {
         &self.read_model
+    }
+
+    #[must_use]
+    pub const fn governance(&self) -> &FindingGovernance {
+        &self.governance
     }
 
     #[must_use]
@@ -387,10 +394,45 @@ impl DurableState {
         Ok(change_set)
     }
 
+    /// Durably accept the risk of one currently active finding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingFinding`] when the finding is not
+    /// currently active, or another [`DurableStateError`] when the durable
+    /// append fails.
+    pub fn accept_risk(
+        &mut self,
+        finding: FindingRef,
+        acceptance: RiskAcceptance,
+    ) -> Result<AcceptRiskResult, DurableStateError> {
+        if !self.read_model.has_active_finding(&finding) {
+            return Err(DurableStateError::MissingFinding(
+                "cannot accept risk for an inactive finding".into(),
+            ));
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
+        if result.change == AcceptRiskChange::Accepted {
+            self.append_event(&DurableEvent::FindingRiskAccepted {
+                finding: StoredFindingRef::from(finding.clone()),
+                acceptance: acceptance.clone(),
+            })?;
+            candidate_read_model.accept_risk(finding, acceptance);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(result)
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
         let file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
         let reader = BufReader::new(file);
         self.ingestion = FindingIngestion::default();
+        self.governance = FindingGovernance::default();
         self.read_model = FindingReadModel::default();
         self.integration_runtime_config = None;
         self.pending_integration_events.clear();
@@ -432,6 +474,9 @@ impl DurableState {
                 report,
                 pending_integration_event,
             } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
+            DurableEvent::FindingRiskAccepted { finding, acceptance } => {
+                self.apply_finding_risk_accepted(finding, acceptance)
+            }
             DurableEvent::IntegrationEventPublished { event_id } => {
                 self.remove_pending_integration_event(event_id.as_ref());
                 Ok(())
@@ -504,6 +549,7 @@ impl DurableState {
             ),
             DurableEvent::IntegrationRuntimeConfigured { .. }
             | DurableEvent::ProviderScanRecorded { .. }
+            | DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::IntegrationEventPublished { .. }
             | DurableEvent::IntegrationEventPublicationFailed { .. } => {
                 unreachable!("non-inventory durable event routed to inventory replay")
@@ -712,6 +758,18 @@ impl DurableState {
         Ok(())
     }
 
+    fn apply_finding_risk_accepted(
+        &mut self,
+        finding: StoredFindingRef,
+        acceptance: RiskAcceptance,
+    ) -> Result<(), DurableStateError> {
+        let finding = finding.into_domain();
+        self.governance
+            .replay_risk_acceptance(finding.clone(), acceptance.clone());
+        self.read_model.replay_risk_acceptance(finding, acceptance);
+        Ok(())
+    }
+
     fn remove_pending_integration_event(&mut self, event_id: &str) {
         if self
             .pending_integration_events
@@ -751,6 +809,7 @@ pub enum DurableStateError {
     Serialize(serde_json::Error),
     CorruptHistory { line: usize, reason: Box<str> },
     Ingestion(FindingIngestionError),
+    MissingFinding(Box<str>),
     Time(String),
 }
 
@@ -763,6 +822,7 @@ impl DurableStateError {
             Self::CorruptHistory { .. } => "corrupt-history",
             Self::Ingestion(FindingIngestionError::UnmanagedComponent) => "unmanaged-component",
             Self::Ingestion(FindingIngestionError::UnmanagedArtifact) => "unmanaged-artifact",
+            Self::MissingFinding(_) => "missing-finding",
             Self::Time(_) => "invalid-time",
         }
     }
@@ -777,6 +837,7 @@ impl core::fmt::Display for DurableStateError {
                 write!(f, "corrupt history at line {line}: {reason}")
             }
             Self::Ingestion(error) => write!(f, "ingestion error: {}", error.as_str()),
+            Self::MissingFinding(error) => write!(f, "missing finding: {error}"),
             Self::Time(error) => write!(f, "time error: {error}"),
         }
     }
@@ -828,6 +889,10 @@ enum DurableEvent {
         report: StoredProviderScanReport,
         #[serde(default)]
         pending_integration_event: Box<Option<PendingIntegrationEvent>>,
+    },
+    FindingRiskAccepted {
+        finding: StoredFindingRef,
+        acceptance: RiskAcceptance,
     },
     IntegrationEventPublished {
         event_id: Box<str>,
@@ -968,6 +1033,36 @@ struct StoredReportedFinding {
     fix_version: Option<Box<str>>,
     severity: Severity,
     aliases: Vec<Box<str>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredFindingRef {
+    component_key: Box<str>,
+    artifact: ArtifactRef,
+    vulnerability_id: Box<str>,
+    package: StoredPackageCoordinate,
+}
+
+impl From<FindingRef> for StoredFindingRef {
+    fn from(value: FindingRef) -> Self {
+        Self {
+            component_key: value.component_key,
+            artifact: value.artifact,
+            vulnerability_id: value.vulnerability_id,
+            package: StoredPackageCoordinate::from(value.package),
+        }
+    }
+}
+
+impl StoredFindingRef {
+    fn into_domain(self) -> FindingRef {
+        FindingRef::new(
+            self.component_key,
+            self.artifact,
+            self.vulnerability_id,
+            self.package.into_domain(),
+        )
+    }
 }
 
 impl From<ReportedFinding> for StoredReportedFinding {

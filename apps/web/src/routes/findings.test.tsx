@@ -109,7 +109,11 @@ describe("FindingsPage", () => {
 								vulnerability_id: "CVE-2026-0001",
 								package_name: "openssl",
 								package_version: "3.0.0",
+								package_purl: null,
 								severity: "high",
+								governance_state: "open",
+								governance_reason: null,
+								governance_until_unix_ms: null,
 							},
 						],
 					}),
@@ -203,10 +207,17 @@ describe("FindingsPage", () => {
 						limit: 1,
 						active_findings: [
 							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
 								vulnerability_id: "CVE-2026-0002",
 								package_name: "zlib",
 								package_version: "1.3.1",
+								package_purl: null,
 								severity: "medium",
+								governance_state: "open",
+								governance_reason: null,
+								governance_until_unix_ms: null,
 							},
 						],
 					}),
@@ -226,10 +237,17 @@ describe("FindingsPage", () => {
 					limit: 1,
 					active_findings: [
 						{
+							component_key: "component:payments-api",
+							artifact_kind: "container-image",
+							artifact_identity: "registry.example/payments@sha256:111",
 							vulnerability_id: "CVE-2026-0001",
 							package_name: "openssl",
 							package_version: "3.0.0",
+							package_purl: null,
 							severity: "high",
+							governance_state: "open",
+							governance_reason: null,
+							governance_until_unix_ms: null,
 						},
 					],
 				}),
@@ -263,5 +281,117 @@ describe("FindingsPage", () => {
 			screen.getByRole("button", { name: "Previous Artifact Page" }),
 		);
 		expect(await screen.findByText("openssl@3.0.0")).toBeInTheDocument();
+	});
+
+	it("accepts risk for one collection finding and refreshes governance state", async () => {
+		let accepted = false;
+		const methods: string[] = [];
+
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				methods.push(init?.method ?? "GET");
+				if (url.includes("/health")) {
+					return new Response("ok", { status: 200 });
+				}
+				if (url === "/api/findings/risk-acceptance") {
+					accepted = true;
+					return new Response(
+						JSON.stringify({
+							change: "accepted",
+							governance_state: "risk-accepted",
+							governance_reason: "Compensating control in place",
+							governance_until_unix_ms: null,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/collections/")) {
+					return new Response(
+						JSON.stringify({
+							collection_key: "release:2026.05",
+							min_severity: null,
+							package_name: null,
+							total_active_findings: 1,
+							returned: 1,
+							offset: 0,
+							limit: 50,
+							active_findings: [
+								{
+									component_key: "component:payments-api",
+									artifact_kind: "container-image",
+									artifact_identity: "registry.example/payments@sha256:111",
+									vulnerability_id: "CVE-2026-0001",
+									package_name: "openssl",
+									package_version: "3.0.0",
+									package_purl: null,
+									severity: "high",
+									governance_state: accepted ? "risk-accepted" : "open",
+									governance_reason: accepted
+										? "Compensating control in place"
+										: null,
+									governance_until_unix_ms: null,
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						component_key: "component:payments-api",
+						artifact_kind: "container-image",
+						artifact_identity: "registry.example/payments@sha256:111",
+						min_severity: null,
+						package_name: null,
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
+						limit: 50,
+						active_findings: [
+							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
+								vulnerability_id: "CVE-2026-0001",
+								package_name: "openssl",
+								package_version: "3.0.0",
+								package_purl: null,
+								severity: "high",
+								governance_state: accepted ? "risk-accepted" : "open",
+								governance_reason: accepted
+									? "Compensating control in place"
+									: null,
+								governance_until_unix_ms: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<FindingsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(await screen.findByRole("button", { name: "Accept Risk" }));
+		fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), {
+			target: { value: "Compensating control in place" },
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "Submit Risk Acceptance" }),
+		);
+
+		expect(
+			await screen.findByText("Governance: risk-accepted (accepted)."),
+		).toBeInTheDocument();
+		const governedFindings = await screen.findAllByText(
+			"risk-accepted: Compensating control in place",
+		);
+		expect(governedFindings).toHaveLength(2);
+		expect(methods).toContain("POST");
 	});
 });

@@ -1,10 +1,17 @@
 export type ApiHealthState = "healthy" | "unhealthy";
 
 export type ActiveFinding = {
+	component_key: string;
+	artifact_kind: string;
+	artifact_identity: string;
 	vulnerability_id: string;
 	package_name: string;
 	package_version: string;
+	package_purl: string | null;
 	severity: string;
+	governance_state: string;
+	governance_reason: string | null;
+	governance_until_unix_ms: number | null;
 };
 
 export type ActiveFindingsResponse = {
@@ -20,11 +27,7 @@ export type ActiveFindingsResponse = {
 	active_findings: ActiveFinding[];
 };
 
-export type CollectionActiveFinding = ActiveFinding & {
-	component_key: string;
-	artifact_kind: string;
-	artifact_identity: string;
-};
+export type CollectionActiveFinding = ActiveFinding;
 
 export type CollectionActiveFindingsResponse = {
 	collection_key: string;
@@ -173,6 +176,25 @@ export type RequestCollectionScanResponse = {
 	command_ids: string[];
 };
 
+export type AcceptRiskPayload = {
+	componentKey: string;
+	artifactKind: string;
+	artifactIdentity: string;
+	vulnerabilityId: string;
+	packageName: string;
+	packageVersion: string;
+	packagePurl?: string | null;
+	reason: string;
+	untilUnixMs?: number | null;
+};
+
+export type AcceptRiskResponse = {
+	change: string;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
+};
+
 export type ScanCommandStatusResponse = {
 	command_id: string;
 	status: string;
@@ -278,6 +300,31 @@ export async function fetchCollectionActiveFindings(
 	}
 
 	return (await response.json()) as CollectionActiveFindingsResponse;
+}
+
+export async function acceptFindingRisk(
+	request: AcceptRiskPayload,
+): Promise<AcceptRiskResponse> {
+	const response = await fetch("/api/findings/risk-acceptance", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			component_key: request.componentKey,
+			artifact_kind: request.artifactKind,
+			artifact_identity: request.artifactIdentity,
+			vulnerability_id: request.vulnerabilityId,
+			package_name: request.packageName,
+			package_version: request.packageVersion,
+			package_purl: request.packagePurl ?? null,
+			reason: request.reason,
+			until_unix_ms: request.untilUnixMs ?? null,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(`risk acceptance failed with status ${response.status}`);
+	}
+
+	return (await response.json()) as AcceptRiskResponse;
 }
 
 export async function registerComponent(

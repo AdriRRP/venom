@@ -1,7 +1,7 @@
 use crate::app::service::{
-    self, ActiveFindingsResponse, ApiApplication, ApiReadSnapshot, BindArtifactRequest,
-    BindArtifactResponse, CollectionActiveFindingsResponse, CollectionDetailResponse,
-    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
+    self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
+    ApiReadSnapshot, BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
+    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
     ComponentRegistrationRequest, ConfigureCollectionScanScheduleRequest,
     ConfigureCollectionScanScheduleResponse, ConfigureIntegrationRuntimeRequest,
     ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
@@ -127,6 +127,7 @@ pub fn build_router(state: ApiState) -> Router {
             post(configure_provider),
         )
         .route("/integration-runtime", post(configure_integration_runtime))
+        .route("/findings/risk-acceptance", post(accept_risk))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route(
@@ -315,6 +316,20 @@ async fn record_provider_report(
             .record_provider_report(request)
             .await
             .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn accept_risk(
+    State(state): State<ApiState>,
+    Json(request): Json<AcceptRiskRequest>,
+) -> Result<Json<AcceptRiskResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service.accept_risk(request).await.map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
         drop(service);
         response
