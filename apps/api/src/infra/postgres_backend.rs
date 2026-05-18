@@ -1,5 +1,6 @@
 use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
     as_provider_error, validate_provider_scan_report,
@@ -2194,11 +2195,13 @@ const fn provider_error_code(value: FindingProviderErrorKind) -> &'static str {
 }
 
 fn next_command_id() -> Box<str> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("current time should be after unix epoch")
         .as_nanos();
-    format!("scan-command-{nanos}").into_boxed_str()
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("scan-command-{nanos}-{counter}").into_boxed_str()
 }
 
 fn system_time_to_micros(value: SystemTime) -> Result<i64, String> {
