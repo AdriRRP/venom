@@ -1597,7 +1597,17 @@ impl PostgresStore {
     async fn load_finding_risk_acceptances(&mut self) -> Result<(), String> {
         let rows = sqlx::query_as::<
             _,
-            (String, String, String, String, String, String, String, String, Option<i64>),
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<i64>,
+            ),
         >(&format!(
             concat!(
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
@@ -1633,10 +1643,11 @@ impl PostgresStore {
                 },
             );
             let acceptance = match until_unix_ms {
-                Some(until_unix_ms) => RiskAcceptance::new(reason)
-                    .until_unix_ms(u64::try_from(until_unix_ms).map_err(|_| {
+                Some(until_unix_ms) => RiskAcceptance::new(reason).until_unix_ms(
+                    u64::try_from(until_unix_ms).map_err(|_| {
                         "postgres finding risk acceptance until must be positive".to_owned()
-                    })?),
+                    })?,
+                ),
                 None => RiskAcceptance::new(reason),
             };
             self.governance
@@ -1786,8 +1797,7 @@ impl TableNames {
             integration_runtime_config: format!("{schema}.integration_runtime_config")
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
-            finding_risk_acceptances: format!("{schema}.finding_risk_acceptances")
-                .into_boxed_str(),
+            finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
             schema,

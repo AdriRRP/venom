@@ -7,9 +7,9 @@ use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
-    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider, FindingRef,
-    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
+    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity,
 };
 use venom_domain::inventory::{
@@ -655,7 +655,9 @@ async fn venom_durably_records_the_provider_scan_report(world: &mut AcceptanceWo
     }
 }
 
-#[when(expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}")]
+#[when(
+    expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
+)]
 async fn venom_durably_accepts_risk(
     world: &mut AcceptanceWorld,
     vulnerability_id: String,
@@ -680,7 +682,9 @@ async fn venom_durably_accepts_risk(
     }
 }
 
-#[when(expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string} until unix ms {int}")]
+#[when(
+    expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string} until unix ms {int}"
+)]
 async fn venom_durably_accepts_risk_until(
     world: &mut AcceptanceWorld,
     vulnerability_id: String,

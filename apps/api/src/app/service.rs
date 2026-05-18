@@ -625,12 +625,12 @@ impl ApiApplication {
                 "risk acceptance reason must not be empty".to_owned(),
             ));
         }
-        let acceptance = request
-            .until_unix_ms
-            .map_or_else(
-                || RiskAcceptance::new(request.reason.clone()),
-                |until_unix_ms| RiskAcceptance::new(request.reason.clone()).until_unix_ms(until_unix_ms),
-            );
+        let acceptance = request.until_unix_ms.map_or_else(
+            || RiskAcceptance::new(request.reason.clone()),
+            |until_unix_ms| {
+                RiskAcceptance::new(request.reason.clone()).until_unix_ms(until_unix_ms)
+            },
+        );
 
         let result: AcceptRiskResult = match &mut self.backend {
             ApiStore::Local(local) => local

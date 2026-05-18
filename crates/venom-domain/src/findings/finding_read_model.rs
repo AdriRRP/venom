@@ -686,11 +686,10 @@ mod tests {
     #[test]
     fn accepted_risk_is_projected_on_active_findings() {
         let mut read_model = FindingReadModel::new();
-        read_model.record_scan_report(&report(vec![ReportedFinding::new(
-            "CVE-2026-0001",
-            PackageCoordinate::new("openssl", "3.0.0"),
-        )
-        .with_severity(Severity::High)]));
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::High),
+        ]));
 
         read_model.accept_risk(
             FindingRef::new(
@@ -702,15 +701,19 @@ mod tests {
             RiskAcceptance::new("Compensating control in place").until_unix_ms(1_760_000_000_000),
         );
 
-        let page = read_model.query_active_findings(
-            &ActiveFindingsQuery::new("component:payments-api", artifact()),
-        );
+        let page = read_model.query_active_findings(&ActiveFindingsQuery::new(
+            "component:payments-api",
+            artifact(),
+        ));
 
         assert_eq!(page.findings[0].governance_state.as_str(), "risk-accepted");
         assert_eq!(
             page.findings[0].governance_reason.as_deref(),
             Some("Compensating control in place")
         );
-        assert_eq!(page.findings[0].governance_until_unix_ms, Some(1_760_000_000_000));
+        assert_eq!(
+            page.findings[0].governance_until_unix_ms,
+            Some(1_760_000_000_000)
+        );
     }
 }

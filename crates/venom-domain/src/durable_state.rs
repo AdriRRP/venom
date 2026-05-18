@@ -1,15 +1,17 @@
 use crate::{
-    AcceptRiskChange, AcceptRiskResult, ArtifactRef, FindingGovernance, FindingRef, RiskAcceptance,
-    AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange, BindArtifactResult, CollectionRegistration, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, EvidenceFreshness, FindingChangeSet, FindingIngestion,
-    FindingIngestionError, FindingReadModel, IntegrationEventPublicationFailure,
+    AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
+    ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureIntegrationRuntimeChange,
+    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
+    EvidenceFreshness, FindingChangeSet, FindingGovernance, FindingIngestion,
+    FindingIngestionError, FindingReadModel, FindingRef, IntegrationEventPublicationFailure,
     IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
-    ReportedFinding, Severity, findings::finding_read_model::canonicalize_reported_findings,
+    ReportedFinding, RiskAcceptance, Severity,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -474,9 +476,10 @@ impl DurableState {
                 report,
                 pending_integration_event,
             } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
-            DurableEvent::FindingRiskAccepted { finding, acceptance } => {
-                self.apply_finding_risk_accepted(finding, acceptance)
-            }
+            DurableEvent::FindingRiskAccepted {
+                finding,
+                acceptance,
+            } => self.apply_finding_risk_accepted(finding, acceptance),
             DurableEvent::IntegrationEventPublished { event_id } => {
                 self.remove_pending_integration_event(event_id.as_ref());
                 Ok(())

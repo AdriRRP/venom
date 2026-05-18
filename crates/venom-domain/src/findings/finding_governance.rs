@@ -126,11 +126,7 @@ impl FindingGovernance {
         AcceptRiskResult { change, acceptance }
     }
 
-    pub fn replay_risk_acceptance(
-        &mut self,
-        finding: FindingRef,
-        acceptance: RiskAcceptance,
-    ) {
+    pub fn replay_risk_acceptance(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
         self.decisions
             .insert(finding, FindingDecision::RiskAccepted(acceptance));
     }
