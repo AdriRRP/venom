@@ -16,11 +16,12 @@ use venom_domain::integration::{
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
-    BindArtifactChange, BindArtifactResult, CollectionRegistration, ComponentInventory,
-    ComponentRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
+    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
+    BindArtifactResult, CollectionRegistration, ComponentInventory, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
-    RegisterComponentResult,
+    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
 };
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, FailedScanCommand, RunNextScanResult,
@@ -100,6 +101,38 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component insert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably register one reusable execution-context profile in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn register_context_profile(
+        &mut self,
+        registration: ContextProfileRegistration,
+    ) -> Result<RegisterContextProfileResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_context_profile(registration.clone());
+        if result.change == RegisterContextProfileChange::Registered {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (profile_key, name, internet_exposed, production, mission_critical) ",
+                    "VALUES ($1, $2, $3, $4, $5)"
+                ),
+                self.names.context_profiles
+            ))
+            .bind(registration.profile_key.as_ref())
+            .bind(registration.name.as_ref())
+            .bind(registration.internet_exposed)
+            .bind(registration.production)
+            .bind(registration.mission_critical)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres context profile insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -278,6 +311,36 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres provider config upsert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one context profile to one managed component in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn assign_context_profile(
+        &mut self,
+        component_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignContextProfileResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_context_profile(component_key, profile_key);
+        if result.change == AssignContextProfileChange::Assigned {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (component_key, profile_key) VALUES ($1, $2) ",
+                    "ON CONFLICT (component_key) DO UPDATE SET profile_key = EXCLUDED.profile_key, updated_at = NOW()"
+                ),
+                self.names.component_context_profiles
+            ))
+            .bind(component_key)
+            .bind(profile_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres component context profile upsert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -1148,6 +1211,8 @@ impl PostgresStore {
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
         self.create_components_table().await?;
+        self.create_context_profiles_table().await?;
+        self.create_component_context_profiles_table().await?;
         self.create_collections_table().await?;
         self.create_collection_memberships_table().await?;
         self.create_collection_scan_schedules_table().await?;
@@ -1177,6 +1242,45 @@ impl PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres components table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_context_profiles_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "profile_key TEXT PRIMARY KEY, ",
+                "name TEXT NOT NULL, ",
+                "internet_exposed BOOLEAN NOT NULL, ",
+                "production BOOLEAN NOT NULL, ",
+                "mission_critical BOOLEAN NOT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.context_profiles
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres context profiles table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_component_context_profiles_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT PRIMARY KEY REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "profile_key TEXT NOT NULL REFERENCES {}(profile_key) ON DELETE CASCADE, ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.component_context_profiles, self.names.components, self.names.context_profiles
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres component context profiles table create failed: {error}")
+        })?;
         Ok(())
     }
 
@@ -1449,6 +1553,8 @@ impl PostgresStore {
         self.pending_integration_events.clear();
 
         self.load_components().await?;
+        self.load_context_profiles().await?;
+        self.load_component_context_profiles().await?;
         self.load_collections().await?;
         self.load_collection_memberships().await?;
         self.load_collection_scan_schedules().await?;
@@ -1500,6 +1606,59 @@ impl PostgresStore {
                 .register_collection(CollectionRegistration::new(collection_key, name));
             if result.change == RegisterCollectionChange::Rejected {
                 return Err("postgres collections contain conflicting registration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_context_profiles(&mut self) -> Result<(), String> {
+        let profiles = sqlx::query_as::<_, (String, String, bool, bool, bool)>(&format!(
+            concat!(
+                "SELECT profile_key, name, internet_exposed, production, mission_critical ",
+                "FROM {} ORDER BY created_at, profile_key"
+            ),
+            self.names.context_profiles
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres context profiles load failed: {error}"))?;
+        for (profile_key, name, internet_exposed, production, mission_critical) in profiles {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .register_context_profile(ContextProfileRegistration::new(
+                    profile_key,
+                    name,
+                    internet_exposed,
+                    production,
+                    mission_critical,
+                ));
+            if result.change == RegisterContextProfileChange::Rejected {
+                return Err("postgres context profiles contain conflicting registration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_component_context_profiles(&mut self) -> Result<(), String> {
+        let assignments = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT component_key, profile_key FROM {} ORDER BY component_key"
+            ),
+            self.names.component_context_profiles
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component context profiles load failed: {error}"))?;
+        for (component_key, profile_key) in assignments {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .assign_context_profile(&component_key, &profile_key);
+            if result.change == AssignContextProfileChange::Rejected {
+                return Err(
+                    "postgres component context profiles contain invalid assignment".to_owned(),
+                );
             }
         }
         Ok(())
@@ -1902,6 +2061,8 @@ struct ScanCommandRecord {
 struct TableNames {
     schema: Box<str>,
     components: Box<str>,
+    context_profiles: Box<str>,
+    component_context_profiles: Box<str>,
     collections: Box<str>,
     collection_memberships: Box<str>,
     collection_scan_schedules: Box<str>,
@@ -1920,6 +2081,9 @@ impl TableNames {
         let schema = validate_schema_name(schema)?;
         Ok(Self {
             components: format!("{schema}.components").into_boxed_str(),
+            context_profiles: format!("{schema}.context_profiles").into_boxed_str(),
+            component_context_profiles: format!("{schema}.component_context_profiles")
+                .into_boxed_str(),
             collections: format!("{schema}.collections").into_boxed_str(),
             collection_memberships: format!("{schema}.collection_memberships").into_boxed_str(),
             collection_scan_schedules: format!("{schema}.collection_scan_schedules")

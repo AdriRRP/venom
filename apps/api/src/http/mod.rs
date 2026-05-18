@@ -1,15 +1,17 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
-    ApiReadSnapshot, BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
+    ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
+    BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
     CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
     CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
-    ConfigureProviderRequest, ConfigureProviderResponse, DrainCollectionScanWorkerCommand,
-    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
-    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
-    ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterCollectionResponse, RegisterComponentResponse, RequestCollectionScanCommand,
+    ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
+    DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
+    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
+    DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
+    ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
+    RegisterComponentResponse, RegisterContextProfileResponse, RequestCollectionScanCommand,
     RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
     RunNextScanResponse, ScanCommandStatusResponse, SuppressFindingRequest,
     SuppressFindingResponse,
@@ -98,6 +100,7 @@ pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/components", post(register_component))
+        .route("/context-profiles", post(register_context_profile).get(list_context_profiles))
         .route(
             "/collections",
             post(register_collection).get(list_collections),
@@ -124,6 +127,10 @@ pub fn build_router(state: ApiState) -> Router {
             get(list_collection_active_findings),
         )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
+        .route(
+            "/components/{component_key}/context-profile",
+            post(assign_context_profile),
+        )
         .route(
             "/components/{component_key}/provider-runtime",
             post(configure_provider),
@@ -164,6 +171,29 @@ async fn register_component(
         response
     };
     Ok(Json(response))
+}
+
+async fn register_context_profile(
+    State(state): State<ApiState>,
+    Json(request): Json<ContextProfileRegistrationRequest>,
+) -> Result<Json<RegisterContextProfileResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .register_context_profile(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn list_context_profiles(
+    State(state): State<ApiState>,
+) -> Result<Json<ListContextProfilesResponse>, ApiError> {
+    Ok(Json(state.read_snapshot().list_context_profiles()))
 }
 
 async fn register_collection(
@@ -266,6 +296,24 @@ async fn bind_artifact(
         let mut service = state.inner.service.lock().await;
         let response = service
             .bind_artifact(&component_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn assign_context_profile(
+    State(state): State<ApiState>,
+    Path(component_key): Path<String>,
+    Json(request): Json<AssignContextProfileRequest>,
+) -> Result<Json<AssignContextProfileResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .assign_context_profile(&component_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_inventory_snapshot(&service);
@@ -917,6 +965,55 @@ mod tests {
             payload["members"][0]["component_key"],
             "component:payments-api"
         );
+    }
+
+    #[tokio::test]
+    async fn api_registers_context_profiles_and_assigns_one_to_one_component() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("context-profiles", "state"),
+                temp_path("context-profiles", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["change"], "assigned");
+        assert_eq!(payload["profile_key"], "context:internet-prod");
+
+        let response = router
+            .oneshot(
+                Request::get("/context-profiles")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("context profiles request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["managed_context_profiles"], 1);
+        assert_eq!(payload["profiles"][0]["profile_key"], "context:internet-prod");
+        assert_eq!(payload["profiles"][0]["internet_exposed"], true);
+        assert_eq!(payload["profiles"][0]["production"], true);
+        assert_eq!(payload["profiles"][0]["mission_critical"], true);
     }
 
     #[tokio::test]
@@ -1600,6 +1697,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_backend_reloads_component_context_profiles() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("context_profile_reload");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = reloaded
+            .oneshot(
+                Request::get("/context-profiles")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("context profiles request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["managed_context_profiles"], 1);
+        assert_eq!(payload["profiles"][0]["profile_key"], "context:internet-prod");
+        assert_eq!(payload["profiles"][0]["internet_exposed"], true);
+        assert_eq!(payload["profiles"][0]["production"], true);
+        assert_eq!(payload["profiles"][0]["mission_critical"], true);
+    }
+
+    #[tokio::test]
     async fn postgres_worker_loop_drains_until_idle() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -1943,6 +2089,48 @@ mod tests {
             )
             .await
             .expect("configure provider request should succeed")
+    }
+
+    async fn register_internet_prod_context_profile(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/context-profiles")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:internet-prod",
+                            "name": "Internet Production",
+                            "internet_exposed": true,
+                            "production": true,
+                            "mission_critical": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("register context profile request should succeed")
+    }
+
+    async fn assign_internet_prod_context_profile(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/components/component:payments-api/context-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:internet-prod"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("assign context profile request should succeed")
     }
 
     async fn configure_collection_schedule(router: axum::Router) -> axum::response::Response {

@@ -17,6 +17,7 @@ use venom_domain::integration::{
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
+use venom_domain::inventory::{ContextProfileRegistration, ManagedContextProfile};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -167,6 +168,21 @@ impl ApiReadSnapshot {
                 })
                 .collect(),
         })
+    }
+
+    /// Query the operator-facing catalog of managed execution-context profiles.
+    #[must_use]
+    pub fn list_context_profiles(&self) -> ListContextProfilesResponse {
+        let profiles = self
+            .inventory
+            .context_profiles()
+            .into_iter()
+            .map(ContextProfileItem::from)
+            .collect::<Vec<_>>();
+        ListContextProfilesResponse {
+            managed_context_profiles: profiles.len(),
+            profiles,
+        }
     }
 
     /// Query active findings over one closed managed collection scope.
@@ -335,6 +351,39 @@ impl ApiApplication {
         Ok(RegisterComponentResponse {
             change: result.change.as_str().to_owned(),
             managed_components: result.managed_components,
+        })
+    }
+
+    /// Register one reusable execution-context profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
+    pub async fn register_context_profile(
+        &mut self,
+        request: ContextProfileRegistrationRequest,
+    ) -> Result<RegisterContextProfileResponse, ApiApplicationError> {
+        let registration = ContextProfileRegistration::new(
+            request.profile_key,
+            request.name,
+            request.internet_exposed,
+            request.production,
+            request.mission_critical,
+        );
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .register_context_profile(registration)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .register_context_profile(registration)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(RegisterContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            managed_context_profiles: result.managed_context_profiles,
         })
     }
 
@@ -529,6 +578,33 @@ impl ApiApplication {
         Ok(ConfigureProviderResponse {
             change: result.change.as_str().to_owned(),
             provider_key: result.provider_key.map(Into::into),
+        })
+    }
+
+    /// Assign one managed execution-context profile to one managed component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable write fails.
+    pub async fn assign_context_profile(
+        &mut self,
+        component_key: &str,
+        request: AssignContextProfileRequest,
+    ) -> Result<AssignContextProfileResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_context_profile(component_key, &request.profile_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_context_profile(component_key, &request.profile_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(AssignContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            profile_key: result.profile_key.map(Into::into),
         })
     }
 
@@ -1193,6 +1269,48 @@ pub struct RegisterComponentResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ContextProfileRegistrationRequest {
+    pub profile_key: String,
+    pub name: String,
+    pub internet_exposed: bool,
+    pub production: bool,
+    pub mission_critical: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterContextProfileResponse {
+    pub change: String,
+    pub managed_context_profiles: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextProfileItem {
+    pub profile_key: String,
+    pub name: String,
+    pub internet_exposed: bool,
+    pub production: bool,
+    pub mission_critical: bool,
+}
+
+impl From<ManagedContextProfile> for ContextProfileItem {
+    fn from(value: ManagedContextProfile) -> Self {
+        Self {
+            profile_key: value.profile_key.into(),
+            name: value.name.into(),
+            internet_exposed: value.internet_exposed,
+            production: value.production,
+            mission_critical: value.mission_critical,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListContextProfilesResponse {
+    pub managed_context_profiles: usize,
+    pub profiles: Vec<ContextProfileItem>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CollectionRegistrationRequest {
     pub collection_key: String,
     pub name: String,
@@ -1285,6 +1403,17 @@ pub struct ConfigureProviderRequest {
 pub struct ConfigureProviderResponse {
     pub change: String,
     pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignContextProfileRequest {
+    pub profile_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssignContextProfileResponse {
+    pub change: String,
+    pub profile_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
