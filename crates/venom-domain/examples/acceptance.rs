@@ -14,9 +14,9 @@ use venom_domain::findings::{
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
-    ComponentRegistration, ConfigureCollectionScanScheduleResult,
+    ComponentRegistration, ConfigureCollectionScanScheduleResult, ContextProfileRegistration,
     ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
-};
+    };
 use venom_domain::scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
     RunNextScanResult, ScanCommandQueue, ScanExecutionResult, ScanPlanner, ScanPlanningError,
@@ -339,6 +339,47 @@ async fn venom_durably_registers_component(
     }
 }
 
+#[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed, production, and mission critical"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed, production, and mission critical"
+)]
+async fn venom_durably_registers_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world
+        .durable_state_mut()
+        .register_context_profile(ContextProfileRegistration::new(
+            profile_key, name, true, true, true,
+        )) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(
+    expr = "VENOM durably assigns context profile {string} to component {string}"
+)]
+#[when(
+    expr = "VENOM durably assigns context profile {string} to component {string}"
+)]
+async fn venom_durably_assigns_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    component_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .assign_context_profile(&component_key, &profile_key)
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[given(expr = "VENOM durably creates collection {string} named {string}")]
 #[when(expr = "VENOM durably creates collection {string} named {string}")]
 async fn venom_durably_creates_collection(
@@ -572,6 +613,71 @@ async fn venom_lists_durable_collection_schedules(world: &mut AcceptanceWorld, n
         .collection_operations_summaries(
             u64::try_from(now_unix_ms).expect("current time should fit u64"),
         );
+}
+
+#[then(expr = "the durable state shows {int} managed context profile")]
+#[then(expr = "the durable state shows {int} managed context profiles")]
+async fn the_durable_state_shows_managed_context_profiles(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .managed_context_profiles(),
+        expected
+    );
+}
+
+#[then(expr = "the durable state shows context profile {string} is named {string}")]
+async fn the_durable_state_shows_context_profile_name(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    expected_name: String,
+) {
+    let profile = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .context_profile(&profile_key)
+        .expect("context profile should exist");
+    assert_eq!(profile.name.as_ref(), expected_name.as_str());
+}
+
+#[then(expr = "the durable state shows component {string} uses context profile {string}")]
+async fn the_durable_state_shows_component_context_profile(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    profile_key: String,
+) {
+    assert_eq!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .assigned_context_profile(&component_key),
+        Some(profile_key.as_str())
+    );
+}
+
+#[then(
+    expr = "the durable state shows context profile {string} is internet exposed, production, and mission critical"
+)]
+async fn the_durable_state_shows_context_profile_flags(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+) {
+    let profile = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .context_profile(&profile_key)
+        .expect("context profile should exist");
+    assert!(profile.internet_exposed);
+    assert!(profile.production);
+    assert!(profile.mission_critical);
 }
 
 #[when(
@@ -1970,6 +2076,7 @@ async fn main() {
         "report-finding.feature",
         "suppress-finding.feature",
         "filter-governed-findings.feature",
+        "manage-context-profiles.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {

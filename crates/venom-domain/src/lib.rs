@@ -25,9 +25,11 @@ pub use inventory::{
     BindArtifactResult, CollectionRegistration, CollectionScanSchedule, CollectionScopedArtifact,
     ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
     ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
-    ManagedCollection, ManagedCollectionOperationsSummary, RegisterCollectionChange,
-    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
-    RemoveCollectionComponentChange, RemoveCollectionComponentResult,
+    ContextProfileRegistration, ManagedCollection, ManagedCollectionOperationsSummary,
+    ManagedContextProfile, RegisterCollectionChange, RegisterCollectionResult,
+    RegisterComponentChange, RegisterComponentResult, RegisterContextProfileChange,
+    RegisterContextProfileResult, RemoveCollectionComponentChange,
+    RemoveCollectionComponentResult, AssignContextProfileChange, AssignContextProfileResult,
 };
 pub use scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,
