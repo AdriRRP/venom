@@ -103,18 +103,34 @@ pub fn contextual_risk_level(
         + u8::from(context_profile.production)
         + u8::from(context_profile.mission_critical);
 
-    match severity {
-        Severity::Unknown => ContextualRiskLevel::Unknown,
-        Severity::None => ContextualRiskLevel::None,
-        Severity::Critical => ContextualRiskLevel::Critical,
-        Severity::High if context_pressure == 0 => ContextualRiskLevel::High,
-        Severity::High => ContextualRiskLevel::Critical,
-        Severity::Medium if context_pressure == 0 => ContextualRiskLevel::Medium,
-        Severity::Medium if context_pressure == 1 => ContextualRiskLevel::High,
-        Severity::Medium => ContextualRiskLevel::Critical,
-        Severity::Low if context_pressure == 0 => ContextualRiskLevel::Low,
-        Severity::Low if context_pressure <= 2 => ContextualRiskLevel::Medium,
-        Severity::Low => ContextualRiskLevel::High,
+    if severity == Severity::Unknown {
+        return ContextualRiskLevel::Unknown;
+    }
+    if severity == Severity::None {
+        return ContextualRiskLevel::None;
+    }
+    if severity == Severity::Critical {
+        return ContextualRiskLevel::Critical;
+    }
+    if severity == Severity::High {
+        return if context_pressure == 0 {
+            ContextualRiskLevel::High
+        } else {
+            ContextualRiskLevel::Critical
+        };
+    }
+    if severity == Severity::Medium {
+        return match context_pressure {
+            0 => ContextualRiskLevel::Medium,
+            1 => ContextualRiskLevel::High,
+            _ => ContextualRiskLevel::Critical,
+        };
+    }
+
+    match context_pressure {
+        0 => ContextualRiskLevel::Low,
+        1 | 2 => ContextualRiskLevel::Medium,
+        _ => ContextualRiskLevel::High,
     }
 }
 
