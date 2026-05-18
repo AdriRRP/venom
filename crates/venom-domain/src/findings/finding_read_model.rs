@@ -1,7 +1,6 @@
 use crate::{
     ArtifactRef, CollectionScopedArtifact, FindingDecision, FindingGovernanceState, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
-    Suppression,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity, Suppression,
 };
 use std::collections::BTreeMap;
 

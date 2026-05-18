@@ -1737,7 +1737,16 @@ impl PostgresStore {
     async fn load_finding_suppressions(&mut self) -> Result<(), String> {
         let rows = sqlx::query_as::<
             _,
-            (String, String, String, String, String, String, String, String),
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+            ),
         >(&format!(
             concat!(
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",

@@ -11,8 +11,7 @@ use crate::{
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
     ReportedFinding, RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult,
-    Suppression,
-    findings::finding_read_model::canonicalize_reported_findings,
+    Suppression, findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

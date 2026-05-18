@@ -6,9 +6,8 @@ pub mod finding_read_model;
 pub mod finding_tracker;
 
 pub use finding_governance::{
-    AcceptRiskChange, AcceptRiskResult, FindingDecision, FindingGovernance,
-    FindingGovernanceState, FindingRef, RiskAcceptance, SuppressFindingChange,
-    SuppressFindingResult, Suppression,
+    AcceptRiskChange, AcceptRiskResult, FindingDecision, FindingGovernance, FindingGovernanceState,
+    FindingRef, RiskAcceptance, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 pub use finding_ingestion::{FindingIngestion, FindingIngestionError};
 pub use finding_provider::{
