@@ -188,6 +188,7 @@ Every wave must explicitly assess:
 3. Did canonical executable behavior change?
 4. Did we repeat a workflow enough to justify a script or skill?
 5. Did we find overlapping guidance that should be compacted?
+6. Did the change widen, replace, or add one read model or operator projection?
 
 Use this threshold for "repeated enough":
 
@@ -198,6 +199,10 @@ Expected action:
 
 - if the answer is yes and the improvement is stable and low-risk, make it in the same wave
 - if it is not yet stable, record `Agentic impact: docs` or `Agentic impact: compact` in the wave doc and keep the guidance minimal until the pattern hardens
+
+For question `6`, use this rule:
+
+- if a new operator-facing shape appears, prefer a dedicated rebuildable projection or explicit read snapshot over widening the write side ad hoc
 
 ## Frontend visual discipline
 

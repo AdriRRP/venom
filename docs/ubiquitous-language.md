@@ -32,6 +32,7 @@ flowchart LR
 | Artifact | value object | An immutable scan subject identity, such as an image digest or SBOM digest, that a provider observed. | mutable tags as the primary identity |
 | API Read Snapshot | value object | A refreshed read-only snapshot that serves operator-facing API queries without borrowing the mutable write service directly. | read endpoints coupled to the write lock path |
 | Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
+| Read Model | model role | A rebuildable query-oriented model shaped for one operator or integration view rather than for durable business mutation. | directly reusing mutable write state as the default query shape |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A closed explicit grouping of managed components operated as one release or platform scope. | "group", "universe" as the default term |
 | Collection Scan | process | The act of expanding one closed collection into canonical scan requests for each currently owned immutable artifact of each collection member. | implicit ad hoc loops over components |
@@ -56,6 +57,7 @@ flowchart LR
 | Scan | process | The act of asking a finding provider for the current findings of a component or artifact scope. | "sync" when scan semantics are intended |
 | Suppression | decision | A classification outcome that hides a finding from normal operational attention under explicit rationale. | "mute" |
 | Vulnerability | entity | The canonical vulnerability or advisory that may be observed across many findings. | "CVE" as a universal synonym |
+| Write Model | model role | The durable business state and mutation logic that owns correctness, invariants, and explicit command outcomes. | using projection or UI convenience shape as the source of truth |
 
 ## Update rule
 
