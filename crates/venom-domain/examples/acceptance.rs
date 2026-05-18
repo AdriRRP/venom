@@ -7,10 +7,10 @@ use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
-    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression,
+    FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity, Suppression,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -819,6 +819,31 @@ async fn venom_queries_active_findings_for_component_and_artifact(
 }
 
 #[when(
+    expr = "VENOM queries active findings for component {string} and artifact {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_component_and_artifact_with_governance(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    artifact_identity: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    let query = ActiveFindingsQuery::new(component_key, artifact)
+        .with_governance_state(parse_governance_state(&governance_state))
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_active_findings(&query);
+    world.last_active_findings_page = Some(page);
+}
+
+#[when(
     expr = "VENOM queries active findings for collection {string} with minimum severity {string}, offset {int}, and limit {int}"
 )]
 async fn venom_queries_active_findings_for_collection(
@@ -835,6 +860,35 @@ async fn venom_queries_active_findings_for_collection(
         .collection_scoped_artifacts(&collection_key)
         .expect("collection scope must exist before scoped finding query");
     let query = ScopedActiveFindingsQuery::new()
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_scoped_active_findings(&scope, &query);
+    world.last_scoped_active_findings_page = Some(page);
+}
+
+#[when(
+    expr = "VENOM queries active findings for collection {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_collection_with_governance(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let scope = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before scoped finding query");
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(parse_governance_state(&governance_state))
         .with_min_severity(parse_severity(&min_severity))
         .with_offset(offset)
         .with_limit(limit);
@@ -1895,6 +1949,15 @@ fn parse_severity(value: &str) -> Severity {
     }
 }
 
+fn parse_governance_state(value: &str) -> FindingGovernanceState {
+    match value {
+        "open" => FindingGovernanceState::Open,
+        "risk-accepted" => FindingGovernanceState::RiskAccepted,
+        "suppressed" => FindingGovernanceState::Suppressed,
+        _ => panic!("unsupported governance state in acceptance step: {value}"),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let base = format!("{}/../../features", env!("CARGO_MANIFEST_DIR"));
@@ -1905,6 +1968,8 @@ async fn main() {
         "schedule-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
+        "suppress-finding.feature",
+        "filter-governed-findings.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {

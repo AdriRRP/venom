@@ -24,6 +24,7 @@ pub struct ActiveFindingsQuery {
     pub component_key: Box<str>,
     pub artifact: ArtifactRef,
     pub min_severity: Option<Severity>,
+    pub governance_state: Option<FindingGovernanceState>,
     pub package_name: Option<Box<str>>,
     pub offset: usize,
     pub limit: usize,
@@ -36,6 +37,7 @@ impl ActiveFindingsQuery {
             component_key: component_key.into(),
             artifact,
             min_severity: None,
+            governance_state: None,
             package_name: None,
             offset: 0,
             limit: DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
@@ -45,6 +47,15 @@ impl ActiveFindingsQuery {
     #[must_use]
     pub const fn with_min_severity(mut self, min_severity: Severity) -> Self {
         self.min_severity = Some(min_severity);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_governance_state(
+        mut self,
+        governance_state: FindingGovernanceState,
+    ) -> Self {
+        self.governance_state = Some(governance_state);
         self
     }
 
@@ -79,6 +90,7 @@ pub struct ActiveFindingsPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedActiveFindingsQuery {
     pub min_severity: Option<Severity>,
+    pub governance_state: Option<FindingGovernanceState>,
     pub package_name: Option<Box<str>>,
     pub offset: usize,
     pub limit: usize,
@@ -89,6 +101,7 @@ impl ScopedActiveFindingsQuery {
     pub const fn new() -> Self {
         Self {
             min_severity: None,
+            governance_state: None,
             package_name: None,
             offset: 0,
             limit: DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
@@ -98,6 +111,15 @@ impl ScopedActiveFindingsQuery {
     #[must_use]
     pub const fn with_min_severity(mut self, min_severity: Severity) -> Self {
         self.min_severity = Some(min_severity);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_governance_state(
+        mut self,
+        governance_state: FindingGovernanceState,
+    ) -> Self {
+        self.governance_state = Some(governance_state);
         self
     }
 
@@ -246,6 +268,15 @@ impl FindingReadModel {
                     .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
             })
             .filter(|finding| {
+                query.governance_state.is_none_or(|governance_state| {
+                    self.finding_governance_state(
+                        query.component_key.as_ref(),
+                        &query.artifact,
+                        finding,
+                    ) == governance_state
+                })
+            })
+            .filter(|finding| {
                 query
                     .package_name
                     .as_deref()
@@ -306,6 +337,15 @@ impl FindingReadModel {
                 query
                     .min_severity
                     .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+            })
+            .filter(|(scope_item, finding)| {
+                query.governance_state.is_none_or(|governance_state| {
+                    self.finding_governance_state(
+                        scope_item.component_key.as_ref(),
+                        &scope_item.artifact,
+                        finding,
+                    ) == governance_state
+                })
             })
             .filter(|(_, finding)| {
                 query
@@ -372,6 +412,18 @@ impl FindingReadModel {
             governance_reason,
             governance_until_unix_ms,
         }
+    }
+
+    fn finding_governance_state(
+        &self,
+        component_key: &str,
+        artifact: &ArtifactRef,
+        finding: &ActiveFindingRecord,
+    ) -> FindingGovernanceState {
+        let finding_ref = finding.finding_ref(component_key.into(), artifact.clone());
+        self.decisions
+            .get(&finding_ref)
+            .map_or(FindingGovernanceState::Open, FindingDecision::state)
     }
 }
 
