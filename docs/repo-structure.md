@@ -64,6 +64,7 @@ Rules:
 - add `apps/web` or `apps/cli` only when they actually exist
 - when an app grows, separate `http/`, `app/`, and `infra/` concerns before adding more endpoints or adapters
 - for `apps/web`, keep the first structure shallow and route-driven, and let repository-level scripts own the default quality and test entrypoints
+- for `apps/web`, keep the canonical visual language in `docs/ui-visual-language.md` and converge shared route styling toward semantic tokens rather than route-local raw values
 
 ### `crates/`
 

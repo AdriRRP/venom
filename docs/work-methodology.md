@@ -199,6 +199,20 @@ Expected action:
 - if the answer is yes and the improvement is stable and low-risk, make it in the same wave
 - if it is not yet stable, record `Agentic impact: docs` or `Agentic impact: compact` in the wave doc and keep the guidance minimal until the pattern hardens
 
+## Frontend visual discipline
+
+When a wave touches `apps/web/**`, explicitly assess:
+
+1. whether the change alters the canonical visual language
+2. whether route-local styling should become shared token or pattern material
+3. whether browser-based verification is required to confirm the intended operator experience
+
+Rules:
+
+- `docs/ui-visual-language.md` is the canonical visual-language source
+- do not introduce one-off visual values in route code when they should become shared tokens or shared surface rules
+- any meaningful change to shell, tables, filters, panels, forms, or state feedback must keep that document current
+
 ## Gates
 
 ### Slice gate

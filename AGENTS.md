@@ -27,6 +27,7 @@ Build VENOM through small, verifiable, provider-agnostic changes.
    - `docs/architecture-invariants.md` for architectural work
    - `docs/bdd-feature-model.md` for `.feature` changes
    - `docs/repo-structure.md` for layout changes
+   - `docs/ui-visual-language.md` for `apps/web` layout, styling, and interaction work
 5. only the active wave doc, ADRs, runbooks, or legacy docs you actually need
 
 ## Delivery loop
@@ -59,6 +60,7 @@ Before closing a wave, explicitly check:
 - Product direction: `docs/product-direction.md`
 - Domain language: `docs/ubiquitous-language.md`
 - Architecture rules: `docs/architecture-invariants.md`
+- UI visual language: `docs/ui-visual-language.md`
 - Delivery process: `docs/work-methodology.md`
 - Active wave pointer: `docs/waves/ACTIVE`
 - Repository layout: `docs/repo-structure.md`
