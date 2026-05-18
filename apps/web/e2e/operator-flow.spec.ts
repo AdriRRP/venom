@@ -150,6 +150,12 @@ test("operator console can manage one release collection and execute one schedul
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();
+	await expect(page.getByText(/Active findings: 1\./i)).toBeVisible();
+	await expect(
+		page.getByText(
+			/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
 });
 
 test("findings console can query one seeded release collection", async ({

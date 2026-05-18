@@ -126,6 +126,7 @@ export type CollectionSummary = {
 	members: number;
 	scan_schedule: CollectionScanSchedule | null;
 	due_now: boolean;
+	health: CollectionHealth;
 };
 
 export type ListCollectionsResponse = {
@@ -137,7 +138,17 @@ export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
 	scan_schedule: CollectionScanSchedule | null;
+	health: CollectionHealth;
 	members: Array<{ component_key: string }>;
+};
+
+export type CollectionHealth = {
+	total_active_findings: number;
+	open_findings: number;
+	risk_accepted_findings: number;
+	suppressed_findings: number;
+	critical_risk_findings: number;
+	high_risk_findings: number;
 };
 
 export type CollectionScanSchedule = {

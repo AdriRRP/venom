@@ -40,6 +40,17 @@ function describeCollectionSchedule(
 	return `${dueNow ? "due now" : "due later"} - every ${cadenceMinutes} minutes (${freshness}) - ${lastRunLabel} - ${lastEnqueuedLabel}`;
 }
 
+function describeCollectionHealth(health: {
+	total_active_findings: number;
+	open_findings: number;
+	risk_accepted_findings: number;
+	suppressed_findings: number;
+	critical_risk_findings: number;
+	high_risk_findings: number;
+}) {
+	return `${health.total_active_findings} active - ${health.open_findings} open - ${health.risk_accepted_findings} risk accepted - ${health.suppressed_findings} suppressed - ${health.critical_risk_findings} critical risk - ${health.high_risk_findings} high risk`;
+}
+
 export function OperationsPage() {
 	const queryClient = useQueryClient();
 	const [operatorState, setOperatorState] = useState({
@@ -231,10 +242,15 @@ export function OperationsPage() {
 			(collection) => collection.scan_schedule !== null,
 		);
 		const dueNow = scheduled.filter((collection) => collection.due_now);
+		const activeFindings = collections.reduce(
+			(total, collection) => total + collection.health.total_active_findings,
+			0,
+		);
 		return {
 			total: collections.length,
 			scheduled: scheduled.length,
 			dueNow: dueNow.length,
+			activeFindings,
 		};
 	}, [collectionsQuery.data]);
 
@@ -598,7 +614,8 @@ export function OperationsPage() {
 						<p>
 							Total: {scheduledCollectionSummary.total}. Scheduled:{" "}
 							{scheduledCollectionSummary.scheduled}. Due now:{" "}
-							{scheduledCollectionSummary.dueNow}.
+							{scheduledCollectionSummary.dueNow}. Active findings:{" "}
+							{scheduledCollectionSummary.activeFindings}.
 						</p>
 						{collectionsQuery.data ? (
 							<ul>
@@ -614,7 +631,8 @@ export function OperationsPage() {
 													collection.scan_schedule.last_materialized_at_unix_ms,
 													collection.scan_schedule.last_enqueued_commands,
 												)
-											: "manual only"}
+											: "manual only"}{" "}
+										- {describeCollectionHealth(collection.health)}
 									</li>
 								))}
 							</ul>
@@ -653,6 +671,10 @@ export function OperationsPage() {
 								) : (
 									<p>No schedule configured.</p>
 								)}
+								<p>
+									Health:{" "}
+									{describeCollectionHealth(collectionDetailQuery.data.health)}.
+								</p>
 								<ul>
 									{collectionDetailQuery.data.members.map((member) => (
 										<li key={member.component_key}>{member.component_key}</li>

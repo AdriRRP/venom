@@ -147,6 +147,14 @@ describe("OperationsPage", () => {
 								members: 1,
 								scan_schedule: null,
 								due_now: false,
+								health: {
+									total_active_findings: 0,
+									open_findings: 0,
+									risk_accepted_findings: 0,
+									suppressed_findings: 0,
+									critical_risk_findings: 0,
+									high_risk_findings: 0,
+								},
 							},
 						],
 						change: "created",
@@ -169,6 +177,14 @@ describe("OperationsPage", () => {
 						collection_key: "release:2026.05",
 						name: "May Release",
 						scan_schedule: null,
+						health: {
+							total_active_findings: 0,
+							open_findings: 0,
+							risk_accepted_findings: 0,
+							suppressed_findings: 0,
+							critical_risk_findings: 0,
+							high_risk_findings: 0,
+						},
 						members: [{ component_key: "component:payments-api" }],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -196,8 +212,15 @@ describe("OperationsPage", () => {
 			await screen.findByText(/component:payments-api/i),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/Total: 1\. Scheduled: 0\. Due now: 0\./i),
+			await screen.findByText(
+				/Total: 1\. Scheduled: 0\. Due now: 0\. Active findings: 0\./i,
+			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findAllByText(
+				/0 active - 0 open - 0 risk accepted - 0 suppressed - 0 critical risk - 0 high risk/i,
+			),
+		).toHaveLength(2);
 	});
 
 	it("configures one collection scan schedule and runs the scheduler", async () => {
@@ -235,6 +258,14 @@ describe("OperationsPage", () => {
 									last_enqueued_commands: 1,
 								},
 								due_now: false,
+								health: {
+									total_active_findings: 1,
+									open_findings: 1,
+									risk_accepted_findings: 0,
+									suppressed_findings: 0,
+									critical_risk_findings: 1,
+									high_risk_findings: 0,
+								},
 							},
 						],
 					}),
@@ -252,6 +283,14 @@ describe("OperationsPage", () => {
 							next_due_at_unix_ms: 1000,
 							last_materialized_at_unix_ms: 1500,
 							last_enqueued_commands: 1,
+						},
+						health: {
+							total_active_findings: 1,
+							open_findings: 1,
+							risk_accepted_findings: 0,
+							suppressed_findings: 0,
+							critical_risk_findings: 1,
+							high_risk_findings: 0,
 						},
 						members: [{ component_key: "component:payments-api" }],
 					}),
@@ -295,7 +334,9 @@ describe("OperationsPage", () => {
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/Scheduled: 1\. Due now: 0\./i),
+			await screen.findByText(
+				/Scheduled: 1\. Due now: 0\. Active findings: 1\./i,
+			),
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
@@ -307,6 +348,11 @@ describe("OperationsPage", () => {
 				/Last run at 1500\. Last enqueued commands: 1\./i,
 			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findAllByText(
+				/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+			),
+		).toHaveLength(2);
 	});
 
 	it("requests one canonical scan from the operator flow", async () => {
