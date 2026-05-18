@@ -381,6 +381,27 @@ impl FindingReadModel {
         }
     }
 
+    pub fn visit_scoped_active_findings(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        mut visit: impl FnMut(ScopedActiveFinding),
+    ) {
+        for scope_item in scope {
+            if let Some(findings) = self.active.get(&TrackedArtifactKey::new(
+                scope_item.component_key.clone(),
+                scope_item.artifact.clone(),
+            )) {
+                for finding in findings {
+                    visit(self.project_active_finding(
+                        scope_item.component_key.clone(),
+                        scope_item.artifact.clone(),
+                        finding,
+                    ));
+                }
+            }
+        }
+    }
+
     fn project_active_finding(
         &self,
         component_key: Box<str>,

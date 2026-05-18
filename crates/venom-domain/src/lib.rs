@@ -7,15 +7,15 @@ pub mod scanning;
 pub use durable_state::{DurableState, DurableStateError};
 pub use findings::{
     AcceptRiskChange, AcceptRiskResult, ActiveFindingProjection, ActiveFindingsPage,
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, ContextualActiveFindingProjection,
-    ContextualRiskLevel, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet,
-    FindingDecision, FindingGovernance, FindingGovernanceState, FindingIngestion,
-    FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, FindingRef, FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFinding, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingChange, SuppressFindingResult, Suppression, contextual_risk_level,
-    contextualize_active_findings,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
+    ContextualActiveFindingProjection, ContextualRiskLevel, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+    EvidenceFreshness, FindingChangeSet, FindingDecision, FindingGovernance,
+    FindingGovernanceState, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, FindingTracker,
+    MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    contextual_risk_level, contextualize_active_findings, summarize_collection_health,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,

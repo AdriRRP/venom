@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
     RiskAcceptance, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
-    Suppression, contextualize_active_findings,
+    Suppression, contextualize_active_findings, summarize_collection_health,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -57,6 +57,7 @@ struct AcceptanceWorld {
     last_active_findings_page: Option<ActiveFindingsPage>,
     last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
     last_contextual_active_findings: Vec<ContextualActiveFindingProjection>,
+    last_collection_health_summary: Option<CollectionHealthSummary>,
 }
 
 #[given("no managed components")]
@@ -89,6 +90,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_active_findings_page = None;
     world.last_scoped_active_findings_page = None;
     world.last_contextual_active_findings.clear();
+    world.last_collection_health_summary = None;
 }
 
 #[given("a new durable state")]
@@ -1058,6 +1060,20 @@ async fn venom_queries_active_findings_for_collection_with_governance(
     world.last_scoped_active_findings_page = Some(page);
 }
 
+#[when(expr = "VENOM queries collection health for {string}")]
+async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection_key: String) {
+    let durable_state = world.durable_state_ref();
+    let inventory = durable_state.ingestion().inventory();
+    let scope = inventory
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before collection health query");
+    world.last_collection_health_summary = Some(summarize_collection_health(
+        inventory,
+        durable_state.read_model(),
+        &scope,
+    ));
+}
+
 #[then(expr = "the component {string} is under management")]
 async fn the_component_is_under_management(world: &mut AcceptanceWorld, component_key: String) {
     assert!(world.ingestion.inventory().is_managed(&component_key));
@@ -1976,6 +1992,66 @@ async fn the_first_contextual_active_finding_has_no_context_profile(world: &mut 
     );
 }
 
+#[then(expr = "the collection health total active findings is {int}")]
+async fn the_collection_health_total_active_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).total_active_findings,
+        expected
+    );
+}
+
+#[then(expr = "the collection health open findings is {int}")]
+async fn the_collection_health_open_findings_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        last_collection_health_summary(world).open_findings,
+        expected
+    );
+}
+
+#[then(expr = "the collection health suppressed findings is {int}")]
+async fn the_collection_health_suppressed_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).suppressed_findings,
+        expected
+    );
+}
+
+#[then(expr = "the collection health risk accepted findings is {int}")]
+async fn the_collection_health_risk_accepted_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).risk_accepted_findings,
+        expected
+    );
+}
+
+#[then(expr = "the collection health critical risk findings is {int}")]
+async fn the_collection_health_critical_risk_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).critical_risk_findings,
+        expected
+    );
+}
+
+#[then(expr = "the collection health high risk findings is {int}")]
+async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        last_collection_health_summary(world).high_risk_findings,
+        expected
+    );
+}
+
 fn build_finding(
     vulnerability_id: String,
     package_name: String,
@@ -2127,6 +2203,13 @@ const fn last_change_set(world: &AcceptanceWorld) -> &FindingChangeSet {
         .expect("a provider scan report must be recorded before assertions")
 }
 
+const fn last_collection_health_summary(world: &AcceptanceWorld) -> &CollectionHealthSummary {
+    world
+        .last_collection_health_summary
+        .as_ref()
+        .expect("a collection health query must be performed before assertions")
+}
+
 const fn last_registration(world: &AcceptanceWorld) -> &RegisterComponentResult {
     world
         .last_registration
@@ -2201,6 +2284,7 @@ async fn main() {
         "filter-governed-findings.feature",
         "classify-finding.feature",
         "manage-context-profiles.feature",
+        "view-collection-health.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {

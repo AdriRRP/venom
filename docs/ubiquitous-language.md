@@ -35,6 +35,7 @@ flowchart LR
 | Read Model | model role | A rebuildable query-oriented model shaped for one operator or integration view rather than for durable business mutation. | directly reusing mutable write state as the default query shape |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A closed explicit grouping of managed components operated as one release or platform scope. | "group", "universe" as the default term |
+| Collection Health | read model | A compact operator-facing summary of one collection's active findings, governance distribution, and elevated contextual risk counts. | reconstructing release health manually from raw findings tables |
 | Collection Scan | process | The act of expanding one closed collection into canonical scan requests for each currently owned immutable artifact of each collection member. | implicit ad hoc loops over components |
 | Collection Scan Schedule | value object | The durable periodic cadence and freshness mode attached to one managed collection, including the next due time for one explicit scheduler pass. | hidden background timers with no durable state |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
