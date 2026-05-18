@@ -8,15 +8,13 @@ use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScopedActiveFindingsQuery, ScanRequest, Severity,
+    ProviderScanReport, ReportedFinding, ScanRequest, ScopedActiveFindingsQuery, Severity,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
-use venom_domain::inventory::{
-    CollectionRegistration, ComponentInventory, ComponentRegistration,
-};
+use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };

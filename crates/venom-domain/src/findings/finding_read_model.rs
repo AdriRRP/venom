@@ -597,9 +597,21 @@ mod tests {
 
         assert_eq!(page.total, 2);
         assert_eq!(page.returned, 2);
-        assert_eq!(page.findings[0].component_key.as_ref(), "component:payments-api");
-        assert_eq!(page.findings[0].finding.vulnerability_id.as_ref(), "CVE-2026-0001");
-        assert_eq!(page.findings[1].component_key.as_ref(), "component:billing-api");
-        assert_eq!(page.findings[1].finding.vulnerability_id.as_ref(), "CVE-2026-0003");
+        assert_eq!(
+            page.findings[0].component_key.as_ref(),
+            "component:payments-api"
+        );
+        assert_eq!(
+            page.findings[0].finding.vulnerability_id.as_ref(),
+            "CVE-2026-0001"
+        );
+        assert_eq!(
+            page.findings[1].component_key.as_ref(),
+            "component:billing-api"
+        );
+        assert_eq!(
+            page.findings[1].finding.vulnerability_id.as_ref(),
+            "CVE-2026-0003"
+        );
     }
 }

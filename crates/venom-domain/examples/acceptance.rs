@@ -9,7 +9,7 @@ use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
     FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, ScanRequest, Severity,
+    ReportedFinding, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -1479,10 +1479,7 @@ async fn the_first_active_finding_vulnerability_is(world: &mut AcceptanceWorld, 
 }
 
 #[then(expr = "the scoped active findings page total is {int}")]
-async fn the_scoped_active_findings_page_total_is(
-    world: &mut AcceptanceWorld,
-    expected: usize,
-) {
+async fn the_scoped_active_findings_page_total_is(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(last_scoped_active_findings_page(world).total, expected);
 }
 
@@ -1716,9 +1713,7 @@ const fn last_active_findings_page(world: &AcceptanceWorld) -> &ActiveFindingsPa
         .expect("an active findings query must be performed before assertions")
 }
 
-const fn last_scoped_active_findings_page(
-    world: &AcceptanceWorld,
-) -> &ScopedActiveFindingsPage {
+const fn last_scoped_active_findings_page(world: &AcceptanceWorld) -> &ScopedActiveFindingsPage {
     world
         .last_scoped_active_findings_page
         .as_ref()
