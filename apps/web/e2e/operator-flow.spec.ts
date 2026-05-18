@@ -171,6 +171,14 @@ test("findings console can query one seeded release collection", async ({
 	).toHaveValue("release:2026.05");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("button", { name: "Open (1)" }),
+	).toBeVisible();
+	await expect(
 		collectionPanel.getByRole("cell", { name: "component:payments-api" }),
 	).toBeVisible();
 	await expect(
@@ -201,6 +209,14 @@ test("findings console can query one seeded release collection", async ({
 	await page.getByRole("button", { name: "Submit Suppression" }).click();
 	await expect(
 		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 0 open - 0 risk accepted - 1 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("button", { name: "Suppressed (1)" }),
 	).toBeVisible();
 	await collectionPanel
 		.getByRole("combobox", { name: "Governance" })

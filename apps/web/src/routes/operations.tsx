@@ -20,6 +20,7 @@ import {
 	requestCollectionScan,
 	requestScan,
 } from "../lib/api";
+import { describeCollectionHealth } from "../lib/collection-health";
 
 function describeCollectionSchedule(
 	cadenceMinutes: number,
@@ -38,17 +39,6 @@ function describeCollectionSchedule(
 			: `last enqueued ${lastEnqueuedCommands}`;
 
 	return `${dueNow ? "due now" : "due later"} - every ${cadenceMinutes} minutes (${freshness}) - ${lastRunLabel} - ${lastEnqueuedLabel}`;
-}
-
-function describeCollectionHealth(health: {
-	total: number;
-	open: number;
-	risk_accepted: number;
-	suppressed: number;
-	critical_risk: number;
-	high_risk: number;
-}) {
-	return `${health.total} active - ${health.open} open - ${health.risk_accepted} risk accepted - ${health.suppressed} suppressed - ${health.critical_risk} critical risk - ${health.high_risk} high risk`;
 }
 
 export function OperationsPage() {

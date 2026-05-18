@@ -16,6 +16,7 @@ import {
 	fetchCollectionActiveFindings,
 	suppressFinding,
 } from "../lib/api";
+import { describeCollectionHealth } from "../lib/collection-health";
 
 const defaultCollectionRequest = {
 	collectionKey: "release:2026.05",
@@ -407,6 +408,12 @@ export function FindingsPage() {
 							collectionRequest.collectionKey}
 					</span>
 					<span>
+						Health:{" "}
+						{collectionFindingsQuery.data
+							? describeCollectionHealth(collectionFindingsQuery.data.health)
+							: "0 active - 0 open - 0 risk accepted - 0 suppressed - 0 critical risk - 0 high risk"}
+					</span>
+					<span>
 						Total: {collectionFindingsQuery.data?.total_active_findings ?? 0}
 					</span>
 					<span>Returned: {collectionFindingsQuery.data?.returned ?? 0}</span>
@@ -416,6 +423,61 @@ export function FindingsPage() {
 						{collectionFindingsQuery.data?.limit ?? collectionRequest.limit}
 					</span>
 					<span>{collectionWindow}</span>
+				</div>
+
+				<div className="results-meta">
+					<button
+						className="secondary-button"
+						onClick={() => {
+							setCollectionRequest((current) => ({
+								...current,
+								governanceState: "all",
+								offset: 0,
+							}));
+						}}
+						type="button"
+					>
+						All ({collectionFindingsQuery.data?.health.total ?? 0})
+					</button>
+					<button
+						className="secondary-button"
+						onClick={() => {
+							setCollectionRequest((current) => ({
+								...current,
+								governanceState: "open",
+								offset: 0,
+							}));
+						}}
+						type="button"
+					>
+						Open ({collectionFindingsQuery.data?.health.open ?? 0})
+					</button>
+					<button
+						className="secondary-button"
+						onClick={() => {
+							setCollectionRequest((current) => ({
+								...current,
+								governanceState: "risk-accepted",
+								offset: 0,
+							}));
+						}}
+						type="button"
+					>
+						Risk Accepted ({collectionFindingsQuery.data?.health.risk_accepted ?? 0})
+					</button>
+					<button
+						className="secondary-button"
+						onClick={() => {
+							setCollectionRequest((current) => ({
+								...current,
+								governanceState: "suppressed",
+								offset: 0,
+							}));
+						}}
+						type="button"
+					>
+						Suppressed ({collectionFindingsQuery.data?.health.suppressed ?? 0})
+					</button>
 				</div>
 
 				<div className="results-meta">

@@ -38,6 +38,7 @@ export type CollectionActiveFindingsResponse = {
 	min_severity: string | null;
 	governance_state: string | null;
 	package_name: string | null;
+	health: CollectionHealth;
 	total_active_findings: number;
 	returned: number;
 	offset: number;

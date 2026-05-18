@@ -32,6 +32,14 @@ describe("FindingsPage", () => {
 						collection_key: "release:2026.05",
 						min_severity: null,
 						package_name: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
 						total_active_findings: 0,
 						returned: 0,
 						offset: 0,
@@ -98,6 +106,14 @@ describe("FindingsPage", () => {
 						min_severity: "high",
 						governance_state: "suppressed",
 						package_name: "openssl",
+						health: {
+							total: 3,
+							open: 1,
+							risk_accepted: 1,
+							suppressed: 1,
+							critical_risk: 1,
+							high_risk: 1,
+						},
 						total_active_findings: 1,
 						returned: 1,
 						offset: 0,
@@ -193,6 +209,14 @@ describe("FindingsPage", () => {
 		expect(
 			await screen.findByRole("cell", { name: "Internet Production" }),
 		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				"Health: 3 active - 1 open - 1 risk accepted - 1 suppressed - 1 critical risk - 1 high risk",
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("button", { name: "Suppressed (1)" }),
+		).toBeInTheDocument();
 	});
 
 	it("moves between artifact pages with bounded controls", async () => {
@@ -207,6 +231,14 @@ describe("FindingsPage", () => {
 						collection_key: "release:2026.05",
 						min_severity: null,
 						package_name: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
 						total_active_findings: 0,
 						returned: 0,
 						offset: 0,
@@ -337,13 +369,21 @@ describe("FindingsPage", () => {
 				}
 				if (url.includes("/collections/")) {
 					return new Response(
-						JSON.stringify({
-							collection_key: "release:2026.05",
-							min_severity: null,
-							package_name: null,
-							total_active_findings: 1,
-							returned: 1,
-							offset: 0,
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						min_severity: null,
+						package_name: null,
+						health: {
+							total: 1,
+							open: accepted ? 0 : 1,
+							risk_accepted: accepted ? 1 : 0,
+							suppressed: 0,
+							critical_risk: 1,
+							high_risk: 0,
+						},
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
 							limit: 50,
 							active_findings: [
 								{
@@ -453,13 +493,21 @@ describe("FindingsPage", () => {
 				}
 				if (url.includes("/collections/")) {
 					return new Response(
-						JSON.stringify({
-							collection_key: "release:2026.05",
-							min_severity: null,
-							package_name: null,
-							total_active_findings: 1,
-							returned: 1,
-							offset: 0,
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						min_severity: null,
+						package_name: null,
+						health: {
+							total: 1,
+							open: suppressed ? 0 : 1,
+							risk_accepted: 0,
+							suppressed: suppressed ? 1 : 0,
+							critical_risk: 1,
+							high_risk: 0,
+						},
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
 							limit: 50,
 							active_findings: [
 								{
