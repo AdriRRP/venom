@@ -72,6 +72,32 @@ export type RegisterComponentResponse = {
 	managed_components: number;
 };
 
+export type ContextProfileRegistrationRequest = {
+	profileKey: string;
+	name: string;
+	internetExposed: boolean;
+	production: boolean;
+	missionCritical: boolean;
+};
+
+export type RegisterContextProfileResponse = {
+	change: string;
+	managed_context_profiles: number;
+};
+
+export type ContextProfile = {
+	profile_key: string;
+	name: string;
+	internet_exposed: boolean;
+	production: boolean;
+	mission_critical: boolean;
+};
+
+export type ListContextProfilesResponse = {
+	managed_context_profiles: number;
+	profiles: ContextProfile[];
+};
+
 export type CollectionRegistrationRequest = {
 	collectionKey: string;
 	name: string;
@@ -136,6 +162,15 @@ export type ConfigureProviderRequest = {
 export type ConfigureProviderResponse = {
 	change: string;
 	provider_key: string | null;
+};
+
+export type AssignContextProfileRequest = {
+	profileKey: string;
+};
+
+export type AssignContextProfileResponse = {
+	change: string;
+	profile_key: string | null;
 };
 
 export type ConfigureCollectionScanSchedulePayload = {
@@ -402,6 +437,38 @@ export async function registerComponent(
 	return (await response.json()) as RegisterComponentResponse;
 }
 
+export async function registerContextProfile(
+	request: ContextProfileRegistrationRequest,
+): Promise<RegisterContextProfileResponse> {
+	const response = await fetch("/api/context-profiles", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			profile_key: request.profileKey,
+			name: request.name,
+			internet_exposed: request.internetExposed,
+			production: request.production,
+			mission_critical: request.missionCritical,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`context profile registration failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RegisterContextProfileResponse;
+}
+
+export async function fetchContextProfiles(): Promise<ListContextProfilesResponse> {
+	const response = await fetch("/api/context-profiles");
+	if (!response.ok) {
+		throw new Error(
+			`context profiles query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ListContextProfilesResponse;
+}
+
 export async function registerCollection(
 	request: CollectionRegistrationRequest,
 ): Promise<RegisterCollectionResponse> {
@@ -567,6 +634,28 @@ export async function configureProvider(
 		);
 	}
 	return (await response.json()) as ConfigureProviderResponse;
+}
+
+export async function assignContextProfile(
+	componentKey: string,
+	request: AssignContextProfileRequest,
+): Promise<AssignContextProfileResponse> {
+	const response = await fetch(
+		`/api/components/${encodeURIComponent(componentKey)}/context-profile`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				profile_key: request.profileKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`context profile assignment failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as AssignContextProfileResponse;
 }
 
 export async function requestScan(

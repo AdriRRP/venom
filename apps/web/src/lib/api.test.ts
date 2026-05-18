@@ -1,6 +1,7 @@
 import {
 	acceptFindingRisk,
 	addCollectionComponent,
+	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
 	configureProvider,
@@ -11,9 +12,11 @@ import {
 	fetchCollectionActiveFindings,
 	fetchCollectionDetail,
 	fetchCollections,
+	fetchContextProfiles,
 	fetchScanCommandStatus,
 	registerCollection,
 	registerComponent,
+	registerContextProfile,
 	requestCollectionScan,
 	requestScan,
 	suppressFinding,
@@ -171,6 +174,44 @@ describe("fetchApiHealth", () => {
 		expect(calls[6]?.input).toContain("min_severity=high");
 		expect(calls[6]?.input).toContain("governance_state=suppressed");
 		expect(calls[6]?.input).toContain("package_name=openssl");
+	});
+
+	it("serializes context profile registration, listing, and assignment", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			},
+		) as typeof fetch;
+
+		await registerContextProfile({
+			profileKey: "context:internet-prod",
+			name: "Internet Production",
+			internetExposed: true,
+			production: true,
+			missionCritical: true,
+		});
+		await fetchContextProfiles();
+		await assignContextProfile("component:payments-api", {
+			profileKey: "context:internet-prod",
+		});
+
+		expect(calls[0]?.input).toBe("/api/context-profiles");
+		expect(calls[0]?.init?.body).toContain(
+			'"profile_key":"context:internet-prod"',
+		);
+		expect(calls[0]?.init?.body).toContain('"mission_critical":true');
+		expect(calls[1]?.input).toBe("/api/context-profiles");
+		expect(calls[2]?.input).toBe(
+			"/api/components/component%3Apayments-api/context-profile",
+		);
+		expect(calls[2]?.init?.body).toContain(
+			'"profile_key":"context:internet-prod"',
+		);
 	});
 
 	it("serializes risk acceptance over the canonical finding identity", async () => {

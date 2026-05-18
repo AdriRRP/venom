@@ -66,6 +66,70 @@ describe("OperationsPage", () => {
 		expect(await screen.findByText(/Change: registered/i)).toBeInTheDocument();
 	});
 
+	it("registers one context profile and assigns it to one managed component", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/context-profiles") {
+				return new Response(
+					JSON.stringify({
+						change: "registered",
+						managed_context_profiles: 1,
+						profiles: [
+							{
+								profile_key: "context:internet-prod",
+								name: "Internet Production",
+								internet_exposed: true,
+								production: true,
+								mission_critical: true,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/components/component%3Apayments-api/context-profile") {
+				return new Response(
+					JSON.stringify({
+						change: "assigned",
+						profile_key: "context:internet-prod",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Register Context Profile" }),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Assign Context Profile" }),
+		);
+
+		expect(
+			await screen.findByText(/Managed context profiles: 1\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/Change: assigned\. Profile: context:internet-prod\./i,
+			),
+		).toBeInTheDocument();
+	});
+
 	it("creates one collection and adds one managed component", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);

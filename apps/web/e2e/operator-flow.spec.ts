@@ -17,6 +17,29 @@ async function seedReleaseCollection(request: APIRequestContext) {
 	);
 
 	await expectOk(
+		await request.post("/api/context-profiles", {
+			data: {
+				profile_key: "context:internet-prod",
+				name: "Internet Production",
+				internet_exposed: true,
+				production: true,
+				mission_critical: true,
+			},
+		}),
+	);
+
+	await expectOk(
+		await request.post(
+			"/api/components/component%3Apayments-api/context-profile",
+			{
+				data: {
+					profile_key: "context:internet-prod",
+				},
+			},
+		),
+	);
+
+	await expectOk(
 		await request.post("/api/collections", {
 			data: {
 				collection_key: "release:2026.05",
@@ -86,6 +109,19 @@ test("operator console can manage one release collection and execute one schedul
 
 	await page.getByRole("button", { name: "Register" }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Register Context Profile" }).click();
+	await expect(page.getByText(/Managed context profiles: 1\./i)).toBeVisible();
+	await expect(
+		page.getByText(
+			/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+		),
+	).toBeVisible();
+
+	await page.getByRole("button", { name: "Assign Context Profile" }).click();
+	await expect(
+		page.getByText(/Change: assigned\. Profile: context:internet-prod\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Create Collection" }).click();
 	await expect(page.getByText(/Managed collections: 1\./i)).toBeVisible();
