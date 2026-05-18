@@ -9,6 +9,17 @@ Keep VENOM documentation:
 - cheap for agents to consume;
 - reliable enough to drive implementation.
 
+## Agentic minimum
+
+The preferred low-token agent shape for this repo is:
+
+1. one short always-on manifest: `AGENTS.md`
+2. one active-wave pointer: `docs/waves/ACTIVE`
+3. one process doc: `docs/work-methodology.md`
+4. on-demand canonical references only when the task needs them
+5. scripts for repeated deterministic work
+6. at most a very small optional skill set for orchestration that cannot be reduced to a script
+
 ## Operating principles
 
 1. One concept, one canonical document.
@@ -39,7 +50,6 @@ This follows a simple Diataxis split:
 | `docs/ubiquitous-language.md` | reference | domain vocabulary | domain meaning changes |
 | `docs/architecture-invariants.md` | reference | current architectural rules | a rule changes |
 | `docs/work-methodology.md` | how-to | waves, slices, gates | delivery process changes |
-| `docs/agentic-development.md` | explanation | token-efficient agent workflow | agent workflow changes |
 | `docs/waves/ACTIVE` | reference | active wave pointer | active wave changes |
 | `docs/waves/WXX-<slug>.md` | reference | one wave plan and trace | per wave |
 | `docs/waves/WAVE-TEMPLATE.md` | reference | wave doc structure | wave template changes |
@@ -57,6 +67,7 @@ This follows a simple Diataxis split:
 - `docs/ubiquitous-language.md` is the only glossary.
 - `docs/architecture-invariants.md` is the only invariant list.
 - `docs/product-direction.md` is the only compact source of mission, outcomes, and capability map.
+- `docs/documentation-model.md` is the only explanation of how the agentic/doc system stays compact.
 - `features/**` are organized by capability, not by wave.
 - `docs/waves/**` link to features and impacts; they do not duplicate Gherkin, glossary, or ADR text.
 - `docs/waves/ACTIVE` is the only active-wave pointer.
@@ -105,8 +116,8 @@ Update one of:
 
 - a script under `scripts/`
 - a skill under `agents/skills/`
-- `docs/agentic-development.md`
 - `AGENTS.md`
+- `docs/documentation-model.md`
 
 Rule:
 
@@ -142,7 +153,7 @@ Default set:
 
 - `always-on`: `AGENTS.md`
 - `frequent`: active wave pointer, glossary, invariants
-- `on-demand`: BDD model, methodology, active wave doc, ADRs
+- `on-demand`: BDD model, methodology, active wave doc, ADRs, documentation model
 - `on-demand when planning`: product direction
 - `rare`: runbooks, legacy analysis
 

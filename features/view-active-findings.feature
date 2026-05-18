@@ -48,3 +48,22 @@ Feature: View active findings
       And the active findings page returned count is 1
       And the active findings page limit is 1
       And the first active finding vulnerability is "CVE-2026-0001"
+
+  Rule: Release collections can scope active findings queries
+    Scenario: Query active findings for one closed release collection
+      Given no managed components
+      And a new durable state
+      And a component "component:payments-api"
+      And an artifact "registry.example/payments@sha256:111"
+      And a provider scan report with vulnerability "CVE-2026-0001" in package "openssl" version "3.0.0"
+      When VENOM durably registers component "component:payments-api" named "Payments API"
+      And VENOM durably binds artifact "registry.example/payments@sha256:111" to component "component:payments-api"
+      And VENOM durably creates collection "release:2026.05" named "May Release"
+      And VENOM durably adds component "component:payments-api" to collection "release:2026.05"
+      And VENOM durably records the provider scan report
+      And VENOM queries active findings for collection "release:2026.05" with minimum severity "unknown", offset 0, and limit 10
+      Then the scoped active findings page total is 1
+      And the scoped active findings page returned count is 1
+      And the first scoped active finding component is "component:payments-api"
+      And the first scoped active finding artifact is "registry.example/payments@sha256:111"
+      And the first scoped active finding vulnerability is "CVE-2026-0001"

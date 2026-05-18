@@ -7,6 +7,7 @@ import {
 	drainScanWorker,
 	fetchActiveFindings,
 	fetchApiHealth,
+	fetchCollectionActiveFindings,
 	fetchCollectionDetail,
 	fetchCollections,
 	fetchScanCommandStatus,
@@ -133,6 +134,11 @@ describe("fetchApiHealth", () => {
 		});
 		await fetchCollections();
 		await fetchCollectionDetail("release:2026.05");
+		await fetchCollectionActiveFindings({
+			collectionKey: "release:2026.05",
+			minSeverity: "high",
+			packageName: "openssl",
+		});
 
 		expect(calls[0]?.input).toBe("/api/collections");
 		expect(calls[0]?.init?.body).toContain(
@@ -154,6 +160,11 @@ describe("fetchApiHealth", () => {
 		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
 		expect(calls[4]?.input).toBe("/api/collections");
 		expect(calls[5]?.input).toBe("/api/collections/release%3A2026.05");
+		expect(calls[6]?.input).toContain(
+			"/api/collections/release%3A2026.05/findings/active?",
+		);
+		expect(calls[6]?.input).toContain("min_severity=high");
+		expect(calls[6]?.input).toContain("package_name=openssl");
 	});
 
 	it("serializes scan command lookup and worker drain payloads", async () => {

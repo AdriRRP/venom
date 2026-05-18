@@ -285,6 +285,16 @@ pub struct ManagedCollection {
     pub scan_schedule: Option<CollectionScanSchedule>,
 }
 
+/// One immutable artifact that belongs to one managed collection through one
+/// managed component membership.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CollectionScopedArtifact {
+    /// Stable component identity that owns the artifact.
+    pub component_key: Box<str>,
+    /// Immutable artifact identity under that managed component.
+    pub artifact: ArtifactRef,
+}
+
 /// Operator-facing summary of one managed collection in the release operations view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedCollectionOperationsSummary {
@@ -667,6 +677,32 @@ impl ComponentInventory {
                 .iter()
                 .cloned()
                 .collect::<Vec<Box<str>>>()
+        })
+    }
+
+    #[must_use]
+    pub fn collection_scoped_artifacts(
+        &self,
+        collection_key: &str,
+    ) -> Option<Vec<CollectionScopedArtifact>> {
+        self.collections.get(collection_key).map(|record| {
+            record
+                .component_keys
+                .iter()
+                .flat_map(|component_key| {
+                    self.components
+                        .get(component_key.as_ref())
+                        .into_iter()
+                        .flat_map(move |component| {
+                            component.artifacts.iter().cloned().map(move |artifact| {
+                                CollectionScopedArtifact {
+                                    component_key: component_key.clone(),
+                                    artifact,
+                                }
+                            })
+                        })
+                })
+                .collect::<Vec<_>>()
         })
     }
 

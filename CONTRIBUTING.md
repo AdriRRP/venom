@@ -7,13 +7,14 @@ Start here before changing VENOM.
 - [docs/waves/ACTIVE](/Users/adrianramos/Cybersecurity/Venom/docs/waves/ACTIVE)
 - [docs/product-direction.md](/Users/adrianramos/Cybersecurity/Venom/docs/product-direction.md)
 - [docs/work-methodology.md](/Users/adrianramos/Cybersecurity/Venom/docs/work-methodology.md)
-- [docs/ubiquitous-language.md](/Users/adrianramos/Cybersecurity/Venom/docs/ubiquitous-language.md)
 
 Read these only when relevant:
 
+- [docs/ubiquitous-language.md](/Users/adrianramos/Cybersecurity/Venom/docs/ubiquitous-language.md)
 - [docs/bdd-feature-model.md](/Users/adrianramos/Cybersecurity/Venom/docs/bdd-feature-model.md)
 - [docs/architecture-invariants.md](/Users/adrianramos/Cybersecurity/Venom/docs/architecture-invariants.md)
 - [docs/repo-structure.md](/Users/adrianramos/Cybersecurity/Venom/docs/repo-structure.md)
+- [docs/documentation-model.md](/Users/adrianramos/Cybersecurity/Venom/docs/documentation-model.md)
 
 ## Minimum rules
 

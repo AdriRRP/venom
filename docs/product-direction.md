@@ -13,6 +13,7 @@ The platform target is:
 
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
+- query active findings over one closed release collection without reconstructing scope by hand
 - see which release collections are due now, which are scheduled next, and what the last scheduler pass materialized
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings

@@ -12,10 +12,13 @@ Read:
 - `docs/work-methodology.md`
 - only the task-specific docs you actually need
 
-Use this skill to enforce:
+Use this skill only as a compact reminder to follow the repo delivery loop.
 
-- Do not couple the domain to a concrete provider.
-- Do not broad-scan the repo if targeted reads are enough.
-- Do not treat BDD as a substitute for lower-level or higher-level tests.
-- Do not add always-on guidance unless it clearly saves more tokens than it costs.
-- Before closing a wave, check whether repeated workflow should become a script and whether touched guidance can be compacted.
+It should not duplicate the manifest.
+
+Its main purpose is to reinforce:
+
+- targeted reads over broad scans
+- provider-neutral domain work
+- script-first verification
+- documentation and workflow compaction before wave close

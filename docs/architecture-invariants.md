@@ -60,6 +60,18 @@ Business-critical paths must be designed so that loss, duplication, reordering, 
 
 Providers may discover vulnerabilities, but the meaning of discovered, repeated, changed, or withdrawn findings must be derived inside VENOM from canonical provider observations rather than delegated to provider-specific delta semantics.
 
+### I11. Write side and read side stay intentionally separate
+
+Durable business writes, command execution, and source-of-truth state must not be coupled directly to operator-facing query shapes.
+
+Apply these rules:
+
+- write paths own correctness, durability, and explicit terminal outcomes
+- read paths own projection shape, query efficiency, and view-specific ergonomics
+- UI and API views should be served from dedicated rebuildable read models or explicit read snapshots rather than walking mutable write state ad hoc
+- when a new operator view needs a different shape, prefer a new or refined projection over widening the write model payload indiscriminately
+- rebuildability and compactness matter together: projections should be specific enough for the view they serve and cheap enough to refresh or replay predictably
+
 ## Update rule
 
 Change this file only when:

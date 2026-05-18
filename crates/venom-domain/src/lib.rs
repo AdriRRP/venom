@@ -10,7 +10,8 @@ pub use findings::{
     DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet, FindingIngestion,
     FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScanRequest, Severity,
+    ProviderScanReport, ReportedFinding, ScanRequest, ScopedActiveFinding,
+    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,
@@ -19,8 +20,8 @@ pub use integration::{
 };
 pub use inventory::{
     AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange,
-    BindArtifactResult, CollectionRegistration, CollectionScanSchedule, ComponentInventory,
-    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    BindArtifactResult, CollectionRegistration, CollectionScanSchedule, CollectionScopedArtifact,
+    ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
     ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
     ManagedCollection, ManagedCollectionOperationsSummary, RegisterCollectionChange,
     RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,

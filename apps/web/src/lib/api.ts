@@ -20,10 +20,35 @@ export type ActiveFindingsResponse = {
 	active_findings: ActiveFinding[];
 };
 
+export type CollectionActiveFinding = ActiveFinding & {
+	component_key: string;
+	artifact_kind: string;
+	artifact_identity: string;
+};
+
+export type CollectionActiveFindingsResponse = {
+	collection_key: string;
+	min_severity: string | null;
+	package_name: string | null;
+	total_active_findings: number;
+	returned: number;
+	offset: number;
+	limit: number;
+	active_findings: CollectionActiveFinding[];
+};
+
 export type ActiveFindingsRequest = {
 	componentKey: string;
 	artifactKind: string;
 	artifactIdentity: string;
+	minSeverity?: string;
+	packageName?: string;
+	limit?: number;
+	offset?: number;
+};
+
+export type CollectionActiveFindingsRequest = {
+	collectionKey: string;
 	minSeverity?: string;
 	packageName?: string;
 	limit?: number;
@@ -225,6 +250,34 @@ export async function fetchActiveFindings(
 	}
 
 	return (await response.json()) as ActiveFindingsResponse;
+}
+
+export async function fetchCollectionActiveFindings(
+	request: CollectionActiveFindingsRequest,
+): Promise<CollectionActiveFindingsResponse> {
+	const params = new URLSearchParams({
+		limit: String(request.limit ?? 50),
+		offset: String(request.offset ?? 0),
+	});
+
+	if (request.minSeverity && request.minSeverity !== "all") {
+		params.set("min_severity", request.minSeverity);
+	}
+
+	if (request.packageName) {
+		params.set("package_name", request.packageName);
+	}
+
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/findings/active?${params.toString()}`,
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection active findings request failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as CollectionActiveFindingsResponse;
 }
 
 export async function registerComponent(

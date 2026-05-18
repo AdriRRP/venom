@@ -9,11 +9,21 @@ import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
 	type ActiveFinding,
+	type CollectionActiveFinding,
 	fetchActiveFindings,
 	fetchApiHealth,
+	fetchCollectionActiveFindings,
 } from "../lib/api";
 
-const defaultRequest = {
+const defaultCollectionRequest = {
+	collectionKey: "release:2026.05",
+	minSeverity: "all",
+	packageName: "",
+	limit: 50,
+	offset: 0,
+};
+
+const defaultArtifactRequest = {
 	componentKey: "component:payments-api",
 	artifactKind: "container-image",
 	artifactIdentity: "registry.example/payments@sha256:111",
@@ -23,7 +33,16 @@ const defaultRequest = {
 	offset: 0,
 };
 
-const columns: ColumnDef<ActiveFinding>[] = [
+const collectionColumns: ColumnDef<CollectionActiveFinding>[] = [
+	{
+		header: "Component",
+		accessorKey: "component_key",
+	},
+	{
+		header: "Artifact",
+		cell: ({ row }) =>
+			`${row.original.artifact_kind}:${row.original.artifact_identity}`,
+	},
 	{
 		header: "Severity",
 		accessorKey: "severity",
@@ -39,8 +58,39 @@ const columns: ColumnDef<ActiveFinding>[] = [
 	},
 ];
 
+const artifactColumns: ColumnDef<ActiveFinding>[] = [
+	{
+		header: "Severity",
+		accessorKey: "severity",
+	},
+	{
+		header: "Vulnerability",
+		accessorKey: "vulnerability_id",
+	},
+	{
+		header: "Package",
+		cell: ({ row }) =>
+			`${row.original.package_name}@${row.original.package_version}`,
+	},
+];
+
+function findingsWindowLabel(total: number, returned: number, offset: number) {
+	if (total === 0 || returned === 0) {
+		return "Showing 0 of 0";
+	}
+
+	const start = offset + 1;
+	const end = offset + returned;
+	return `Showing ${start}-${end} of ${total}`;
+}
+
 export function FindingsPage() {
-	const [request, setRequest] = useState(defaultRequest);
+	const [collectionRequest, setCollectionRequest] = useState(
+		defaultCollectionRequest,
+	);
+	const [artifactRequest, setArtifactRequest] = useState(
+		defaultArtifactRequest,
+	);
 
 	const healthQuery = useQuery({
 		queryKey: ["api-health"],
@@ -48,14 +98,25 @@ export function FindingsPage() {
 		refetchInterval: 15_000,
 	});
 
-	const findingsQuery = useQuery({
-		queryKey: ["active-findings", request],
-		queryFn: () => fetchActiveFindings(request),
+	const collectionFindingsQuery = useQuery({
+		queryKey: ["collection-active-findings", collectionRequest],
+		queryFn: () => fetchCollectionActiveFindings(collectionRequest),
 	});
 
-	const table = useReactTable({
-		data: findingsQuery.data?.active_findings ?? [],
-		columns,
+	const artifactFindingsQuery = useQuery({
+		queryKey: ["active-findings", artifactRequest],
+		queryFn: () => fetchActiveFindings(artifactRequest),
+	});
+
+	const collectionTable = useReactTable({
+		data: collectionFindingsQuery.data?.active_findings ?? [],
+		columns: collectionColumns,
+		getCoreRowModel: getCoreRowModel(),
+	});
+
+	const artifactTable = useReactTable({
+		data: artifactFindingsQuery.data?.active_findings ?? [],
+		columns: artifactColumns,
 		getCoreRowModel: getCoreRowModel(),
 	});
 
@@ -66,26 +127,41 @@ export function FindingsPage() {
 		return healthQuery.data === "healthy" ? "healthy" : "unhealthy";
 	}, [healthQuery.data, healthQuery.isLoading]);
 
-	const findingsWindowLabel = useMemo(() => {
-		const total = findingsQuery.data?.total_active_findings ?? 0;
-		const returned = findingsQuery.data?.returned ?? 0;
-		const offset = findingsQuery.data?.offset ?? request.offset;
+	const collectionWindow = useMemo(
+		() =>
+			findingsWindowLabel(
+				collectionFindingsQuery.data?.total_active_findings ?? 0,
+				collectionFindingsQuery.data?.returned ?? 0,
+				collectionFindingsQuery.data?.offset ?? collectionRequest.offset,
+			),
+		[collectionFindingsQuery.data, collectionRequest.offset],
+	);
 
-		if (total === 0 || returned === 0) {
-			return "Showing 0 of 0";
-		}
+	const artifactWindow = useMemo(
+		() =>
+			findingsWindowLabel(
+				artifactFindingsQuery.data?.total_active_findings ?? 0,
+				artifactFindingsQuery.data?.returned ?? 0,
+				artifactFindingsQuery.data?.offset ?? artifactRequest.offset,
+			),
+		[artifactFindingsQuery.data, artifactRequest.offset],
+	);
 
-		const start = offset + 1;
-		const end = offset + returned;
-		return `Showing ${start}-${end} of ${total}`;
-	}, [findingsQuery.data, request.offset]);
+	const canGoCollectionPrevious =
+		collectionRequest.offset > 0 && !collectionFindingsQuery.isFetching;
+	const canGoCollectionNext =
+		(collectionFindingsQuery.data?.offset ?? collectionRequest.offset) +
+			(collectionFindingsQuery.data?.returned ?? 0) <
+			(collectionFindingsQuery.data?.total_active_findings ?? 0) &&
+		!collectionFindingsQuery.isFetching;
 
-	const canGoPrevious = request.offset > 0 && !findingsQuery.isFetching;
-	const canGoNext =
-		(findingsQuery.data?.offset ?? request.offset) +
-			(findingsQuery.data?.returned ?? 0) <
-			(findingsQuery.data?.total_active_findings ?? 0) &&
-		!findingsQuery.isFetching;
+	const canGoArtifactPrevious =
+		artifactRequest.offset > 0 && !artifactFindingsQuery.isFetching;
+	const canGoArtifactNext =
+		(artifactFindingsQuery.data?.offset ?? artifactRequest.offset) +
+			(artifactFindingsQuery.data?.returned ?? 0) <
+			(artifactFindingsQuery.data?.total_active_findings ?? 0) &&
+		!artifactFindingsQuery.isFetching;
 
 	return (
 		<AppShell apiHealth={healthLabel} currentView="findings">
@@ -93,12 +169,13 @@ export function FindingsPage() {
 				<div className="panel-header">
 					<div>
 						<p className="eyebrow">Operations</p>
-						<h2>Active Findings</h2>
+						<h2>Collection Active Findings</h2>
 					</div>
 					<button
 						className="secondary-button"
 						onClick={() => {
-							void findingsQuery.refetch();
+							void collectionFindingsQuery.refetch();
+							void artifactFindingsQuery.refetch();
 							void healthQuery.refetch();
 						}}
 						type="button"
@@ -112,12 +189,8 @@ export function FindingsPage() {
 					onSubmit={(event) => {
 						event.preventDefault();
 						const formData = new FormData(event.currentTarget);
-						setRequest({
-							componentKey: String(formData.get("componentKey") ?? ""),
-							artifactKind: String(
-								formData.get("artifactKind") ?? "container-image",
-							),
-							artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
+						setCollectionRequest({
+							collectionKey: String(formData.get("collectionKey") ?? ""),
 							minSeverity: String(formData.get("minSeverity") ?? "all"),
 							packageName: String(formData.get("packageName") ?? ""),
 							limit: Number(formData.get("limit") ?? 50),
@@ -126,30 +199,25 @@ export function FindingsPage() {
 					}}
 				>
 					<label>
-						Component
-						<input defaultValue={request.componentKey} name="componentKey" />
-					</label>
-					<label>
-						Artifact kind
-						<select defaultValue={request.artifactKind} name="artifactKind">
-							<option value="container-image">container-image</option>
-							<option value="sbom-document">sbom-document</option>
-						</select>
-					</label>
-					<label>
-						Artifact identity
+						Collection key
 						<input
-							defaultValue={request.artifactIdentity}
-							name="artifactIdentity"
+							defaultValue={collectionRequest.collectionKey}
+							name="collectionKey"
 						/>
 					</label>
 					<label>
 						Package name
-						<input defaultValue={request.packageName} name="packageName" />
+						<input
+							defaultValue={collectionRequest.packageName}
+							name="packageName"
+						/>
 					</label>
 					<label>
 						Minimum severity
-						<select defaultValue={request.minSeverity} name="minSeverity">
+						<select
+							defaultValue={collectionRequest.minSeverity}
+							name="minSeverity"
+						>
 							<option value="all">all</option>
 							<option value="low">low</option>
 							<option value="medium">medium</option>
@@ -160,66 +228,76 @@ export function FindingsPage() {
 					<label>
 						Limit
 						<input
-							defaultValue={request.limit}
+							defaultValue={collectionRequest.limit}
 							min={1}
 							name="limit"
 							type="number"
 						/>
 					</label>
 					<button className="primary-button" type="submit">
-						Query
+						Query Collection
 					</button>
 				</form>
 
-				{findingsQuery.isError ? (
+				{collectionFindingsQuery.isError ? (
 					<p className="error-banner">
-						{findingsQuery.error instanceof Error
-							? findingsQuery.error.message
-							: "failed to load active findings"}
+						{collectionFindingsQuery.error instanceof Error
+							? collectionFindingsQuery.error.message
+							: "failed to load collection active findings"}
 					</p>
 				) : null}
 
 				<div className="results-meta">
-					<span>Total: {findingsQuery.data?.total_active_findings ?? 0}</span>
-					<span>Returned: {findingsQuery.data?.returned ?? 0}</span>
-					<span>Offset: {findingsQuery.data?.offset ?? 0}</span>
-					<span>Limit: {findingsQuery.data?.limit ?? request.limit}</span>
-					<span>{findingsWindowLabel}</span>
+					<span>
+						Collection:{" "}
+						{collectionFindingsQuery.data?.collection_key ??
+							collectionRequest.collectionKey}
+					</span>
+					<span>
+						Total: {collectionFindingsQuery.data?.total_active_findings ?? 0}
+					</span>
+					<span>Returned: {collectionFindingsQuery.data?.returned ?? 0}</span>
+					<span>Offset: {collectionFindingsQuery.data?.offset ?? 0}</span>
+					<span>
+						Limit:{" "}
+						{collectionFindingsQuery.data?.limit ?? collectionRequest.limit}
+					</span>
+					<span>{collectionWindow}</span>
 				</div>
 
 				<div className="results-meta">
 					<button
 						className="secondary-button"
-						disabled={!canGoPrevious}
+						disabled={!canGoCollectionPrevious}
 						onClick={() => {
-							setRequest((current) => ({
+							setCollectionRequest((current) => ({
 								...current,
 								offset: Math.max(0, current.offset - current.limit),
 							}));
 						}}
 						type="button"
 					>
-						Previous Page
+						Previous Collection Page
 					</button>
 					<button
 						className="secondary-button"
-						disabled={!canGoNext}
+						disabled={!canGoCollectionNext}
 						onClick={() => {
-							setRequest((current) => ({
+							setCollectionRequest((current) => ({
 								...current,
 								offset: current.offset + current.limit,
 							}));
 						}}
 						type="button"
 					>
-						Next Page
+						Next Collection Page
 					</button>
 				</div>
 
 				<div className="table-wrap">
 					<table>
 						<thead>
-							{table.getHeaderGroups().map((headerGroup) => (
+							{collectionTable.getHeaderGroups().map((headerGroup) => (
 								<tr key={headerGroup.id}>
 									{headerGroup.headers.map((header) => (
 										<th key={header.id}>
@@ -235,12 +313,191 @@ export function FindingsPage() {
 							))}
 						</thead>
 						<tbody>
-							{table.getRowModel().rows.length === 0 ? (
+							{collectionTable.getRowModel().rows.length === 0 ? (
 								<tr>
-									<td colSpan={columns.length}>No active findings yet.</td>
+									<td colSpan={collectionColumns.length}>
+										No active findings for this collection yet.
+									</td>
 								</tr>
 							) : (
-								table.getRowModel().rows.map((row) => (
+								collectionTable.getRowModel().rows.map((row) => (
+									<tr key={row.id}>
+										{row.getVisibleCells().map((cell) => (
+											<td key={cell.id}>
+												{flexRender(
+													cell.column.columnDef.cell,
+													cell.getContext(),
+												)}
+											</td>
+										))}
+									</tr>
+								))
+							)}
+						</tbody>
+					</table>
+				</div>
+			</section>
+
+			<section className="panel">
+				<div className="panel-header">
+					<div>
+						<p className="eyebrow">Diagnostics</p>
+						<h2>Artifact Active Findings</h2>
+					</div>
+				</div>
+
+				<form
+					className="filters"
+					onSubmit={(event) => {
+						event.preventDefault();
+						const formData = new FormData(event.currentTarget);
+						setArtifactRequest({
+							componentKey: String(formData.get("componentKey") ?? ""),
+							artifactKind: String(
+								formData.get("artifactKind") ?? "container-image",
+							),
+							artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
+							minSeverity: String(formData.get("minSeverity") ?? "all"),
+							packageName: String(formData.get("packageName") ?? ""),
+							limit: Number(formData.get("limit") ?? 50),
+							offset: 0,
+						});
+					}}
+				>
+					<label>
+						Component
+						<input
+							defaultValue={artifactRequest.componentKey}
+							name="componentKey"
+						/>
+					</label>
+					<label>
+						Artifact kind
+						<select
+							defaultValue={artifactRequest.artifactKind}
+							name="artifactKind"
+						>
+							<option value="container-image">container-image</option>
+							<option value="sbom-document">sbom-document</option>
+						</select>
+					</label>
+					<label>
+						Artifact identity
+						<input
+							defaultValue={artifactRequest.artifactIdentity}
+							name="artifactIdentity"
+						/>
+					</label>
+					<label>
+						Package name
+						<input
+							defaultValue={artifactRequest.packageName}
+							name="packageName"
+						/>
+					</label>
+					<label>
+						Minimum severity
+						<select
+							defaultValue={artifactRequest.minSeverity}
+							name="minSeverity"
+						>
+							<option value="all">all</option>
+							<option value="low">low</option>
+							<option value="medium">medium</option>
+							<option value="high">high</option>
+							<option value="critical">critical</option>
+						</select>
+					</label>
+					<label>
+						Limit
+						<input
+							defaultValue={artifactRequest.limit}
+							min={1}
+							name="limit"
+							type="number"
+						/>
+					</label>
+					<button className="primary-button" type="submit">
+						Query Artifact
+					</button>
+				</form>
+
+				{artifactFindingsQuery.isError ? (
+					<p className="error-banner">
+						{artifactFindingsQuery.error instanceof Error
+							? artifactFindingsQuery.error.message
+							: "failed to load active findings"}
+					</p>
+				) : null}
+
+				<div className="results-meta">
+					<span>
+						Total: {artifactFindingsQuery.data?.total_active_findings ?? 0}
+					</span>
+					<span>Returned: {artifactFindingsQuery.data?.returned ?? 0}</span>
+					<span>Offset: {artifactFindingsQuery.data?.offset ?? 0}</span>
+					<span>
+						Limit: {artifactFindingsQuery.data?.limit ?? artifactRequest.limit}
+					</span>
+					<span>{artifactWindow}</span>
+				</div>
+
+				<div className="results-meta">
+					<button
+						className="secondary-button"
+						disabled={!canGoArtifactPrevious}
+						onClick={() => {
+							setArtifactRequest((current) => ({
+								...current,
+								offset: Math.max(0, current.offset - current.limit),
+							}));
+						}}
+						type="button"
+					>
+						Previous Artifact Page
+					</button>
+					<button
+						className="secondary-button"
+						disabled={!canGoArtifactNext}
+						onClick={() => {
+							setArtifactRequest((current) => ({
+								...current,
+								offset: current.offset + current.limit,
+							}));
+						}}
+						type="button"
+					>
+						Next Artifact Page
+					</button>
+				</div>
+
+				<div className="table-wrap">
+					<table>
+						<thead>
+							{artifactTable.getHeaderGroups().map((headerGroup) => (
+								<tr key={headerGroup.id}>
+									{headerGroup.headers.map((header) => (
+										<th key={header.id}>
+											{header.isPlaceholder
+												? null
+												: flexRender(
+														header.column.columnDef.header,
+														header.getContext(),
+													)}
+										</th>
+									))}
+								</tr>
+							))}
+						</thead>
+						<tbody>
+							{artifactTable.getRowModel().rows.length === 0 ? (
+								<tr>
+									<td colSpan={artifactColumns.length}>
+										No active findings yet.
+									</td>
+								</tr>
+							) : (
+								artifactTable.getRowModel().rows.map((row) => (
 									<tr key={row.id}>
 										{row.getVisibleCells().map((cell) => (
 											<td key={cell.id}>

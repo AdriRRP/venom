@@ -7,6 +7,11 @@ fail() {
   exit 1
 }
 
+skip() {
+  echo "SKIP: $*"
+  exit 0
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
@@ -66,18 +71,38 @@ cleanup() {
 
 trap cleanup EXIT
 
+skip_if_bind_forbidden() {
+  local pid="$1"
+  local log_path="$2"
+  local label="$3"
+
+  if kill -0 "${pid}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ -f "${log_path}" ]] && grep -q "Operation not permitted" "${log_path}"; then
+    skip "${label} could not bind a local port in the current sandbox"
+  fi
+
+  return 0
+}
+
 VENOM_STATE_PATH="${state_path}" \
 VENOM_RUNTIME_PATH="${runtime_path}" \
 VENOM_API_BIND="127.0.0.1:${api_port}" \
 cargo run -p venom-api >"${api_log}" 2>&1 &
 api_pid=$!
 
+sleep 1
+skip_if_bind_forbidden "${api_pid}" "${api_log}" "api"
 wait_for_url "${api_url}/health" "api" "${api_ready_attempts}"
 
 VITE_API_TARGET="${api_url}" \
 npm --prefix apps/web run dev -- --host 127.0.0.1 --port "${web_port}" >"${web_log}" 2>&1 &
 web_pid=$!
 
+sleep 1
+skip_if_bind_forbidden "${web_pid}" "${web_log}" "web"
 wait_for_url "${web_url}/findings" "web" "${web_ready_attempts}"
 
 (
