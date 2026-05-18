@@ -1,4 +1,4 @@
-use crate::{ArtifactRef, ProviderScanReport, ReportedFinding, Severity};
+use crate::{ArtifactRef, CollectionScopedArtifact, ProviderScanReport, ReportedFinding, Severity};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
@@ -70,6 +70,72 @@ pub struct ActiveFindingsPage {
     pub offset: usize,
     pub limit: usize,
     pub findings: Vec<ReportedFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedActiveFindingsQuery {
+    pub min_severity: Option<Severity>,
+    pub package_name: Option<Box<str>>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl ScopedActiveFindingsQuery {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            min_severity: None,
+            package_name: None,
+            offset: 0,
+            limit: DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_min_severity(mut self, min_severity: Severity) -> Self {
+        self.min_severity = Some(min_severity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_package_name(mut self, package_name: impl Into<Box<str>>) -> Self {
+        self.package_name = Some(package_name.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+impl Default for ScopedActiveFindingsQuery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedActiveFindingsPage {
+    pub total: usize,
+    pub returned: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub findings: Vec<ScopedActiveFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedActiveFinding {
+    pub component_key: Box<str>,
+    pub artifact: ArtifactRef,
+    pub finding: ReportedFinding,
 }
 
 impl FindingReadModel {
@@ -193,6 +259,69 @@ impl FindingReadModel {
             findings: page,
         }
     }
+
+    #[must_use]
+    pub fn query_scoped_active_findings(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        query: &ScopedActiveFindingsQuery,
+    ) -> ScopedActiveFindingsPage {
+        let offset = query.offset;
+        let limit = normalize_page_limit(query.limit);
+        let mut filtered = scope
+            .iter()
+            .flat_map(|scope_item| {
+                self.active
+                    .get(&TrackedArtifactKey::new(
+                        scope_item.component_key.clone(),
+                        scope_item.artifact.clone(),
+                    ))
+                    .into_iter()
+                    .flatten()
+                    .map(move |finding| (scope_item, finding))
+            })
+            .filter(|(_, finding)| {
+                query
+                    .min_severity
+                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+            })
+            .filter(|(_, finding)| {
+                query
+                    .package_name
+                    .as_deref()
+                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
+            })
+            .collect::<Vec<_>>();
+        filtered.sort_unstable_by_key(|(scope_item, finding)| {
+            (
+                std::cmp::Reverse(severity_rank(finding.severity)),
+                scope_item.component_key.as_ref(),
+                scope_item.artifact.kind,
+                scope_item.artifact.identity.as_ref(),
+                finding_dedup_key(finding),
+            )
+        });
+
+        let total = filtered.len();
+        let page = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(scope_item, finding)| ScopedActiveFinding {
+                component_key: scope_item.component_key.clone(),
+                artifact: scope_item.artifact.clone(),
+                finding: finding.to_reported_finding(),
+            })
+            .collect::<Vec<_>>();
+
+        ScopedActiveFindingsPage {
+            total,
+            returned: page.len(),
+            offset,
+            limit,
+            findings: page,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,11 +438,11 @@ struct FindingDedupKey<'a> {
 mod tests {
     use super::{
         ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
-        MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
+        MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFindingsQuery,
     };
     use crate::{
-        ArtifactKind, ArtifactRef, EvidenceFreshness, PackageCoordinate, ProviderScanReport,
-        ReportedFinding, Severity,
+        ArtifactKind, ArtifactRef, CollectionScopedArtifact, EvidenceFreshness, PackageCoordinate,
+        ProviderScanReport, ReportedFinding, Severity,
     };
     use std::time::SystemTime;
 
@@ -419,5 +548,58 @@ mod tests {
                 .with_limit(MAX_ACTIVE_FINDINGS_PAGE_LIMIT + 100),
         );
         assert_eq!(capped_page.limit, MAX_ACTIVE_FINDINGS_PAGE_LIMIT);
+    }
+
+    #[test]
+    fn scoped_query_aggregates_findings_across_multiple_collection_members() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("busybox", "1.36.0"))
+                .with_severity(Severity::Low),
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::Critical),
+        ]));
+
+        let billing_artifact = ArtifactRef::new(
+            ArtifactKind::ContainerImage,
+            "registry.example/billing@sha256:222",
+        );
+        let billing_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:billing-api",
+            billing_artifact.clone(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![
+                ReportedFinding::new("CVE-2026-0003", PackageCoordinate::new("nghttp2", "1.61"))
+                    .with_severity(Severity::High),
+            ],
+        );
+        read_model.record_scan_report(&billing_report);
+
+        let scope = vec![
+            CollectionScopedArtifact {
+                component_key: "component:payments-api".into(),
+                artifact: artifact(),
+            },
+            CollectionScopedArtifact {
+                component_key: "component:billing-api".into(),
+                artifact: billing_artifact,
+            },
+        ];
+
+        let page = read_model.query_scoped_active_findings(
+            &scope,
+            &ScopedActiveFindingsQuery::new()
+                .with_min_severity(Severity::High)
+                .with_limit(10),
+        );
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.returned, 2);
+        assert_eq!(page.findings[0].component_key.as_ref(), "component:payments-api");
+        assert_eq!(page.findings[0].finding.vulnerability_id.as_ref(), "CVE-2026-0001");
+        assert_eq!(page.findings[1].component_key.as_ref(), "component:billing-api");
+        assert_eq!(page.findings[1].finding.vulnerability_id.as_ref(), "CVE-2026-0003");
     }
 }

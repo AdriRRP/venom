@@ -1,16 +1,16 @@
 use crate::app::service::{
     self, ActiveFindingsResponse, ApiApplication, ApiReadSnapshot, BindArtifactRequest,
-    BindArtifactResponse, CollectionDetailResponse, CollectionMembershipRequest,
-    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
-    ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
-    ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
-    ConfigureProviderRequest, ConfigureProviderResponse, DrainCollectionScanWorkerCommand,
-    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
-    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
-    ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
-    RegisterCollectionResponse, RegisterComponentResponse, RequestCollectionScanCommand,
-    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
-    RunNextScanResponse, ScanCommandStatusResponse,
+    BindArtifactResponse, CollectionActiveFindingsResponse, CollectionDetailResponse,
+    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
+    ComponentRegistrationRequest, ConfigureCollectionScanScheduleRequest,
+    ConfigureCollectionScanScheduleResponse, ConfigureIntegrationRuntimeRequest,
+    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
+    DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
+    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
+    DrainWorkerResponse, ListCollectionsResponse, ProviderScanReportRequest,
+    RecordProviderReportResponse, RegisterCollectionResponse, RegisterComponentResponse,
+    RequestCollectionScanCommand, RequestCollectionScanResponse, RequestScanCommand,
+    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
 };
 use axum::{
     Json, Router,
@@ -116,6 +116,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/scan-requests",
             post(request_collection_scan),
+        )
+        .route(
+            "/collections/{collection_key}/findings/active",
+            get(list_collection_active_findings),
         )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
@@ -442,6 +446,18 @@ async fn list_active_findings(
     Ok(Json(response))
 }
 
+async fn list_collection_active_findings(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Query(query): Query<CollectionActiveFindingsQuery>,
+) -> Result<Json<CollectionActiveFindingsResponse>, ApiError> {
+    let response = state
+        .read_snapshot()
+        .list_collection_active_findings(&collection_key, query.into_request())
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
 #[derive(Debug, Deserialize)]
 struct ActiveFindingsQuery {
     component_key: String,
@@ -459,6 +475,25 @@ impl ActiveFindingsQuery {
             component_key: self.component_key,
             artifact_kind: self.artifact_kind,
             artifact_identity: self.artifact_identity,
+            min_severity: self.min_severity,
+            package_name: self.package_name,
+            offset: self.offset,
+            limit: self.limit,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectionActiveFindingsQuery {
+    min_severity: Option<String>,
+    package_name: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+impl CollectionActiveFindingsQuery {
+    fn into_request(self) -> service::CollectionActiveFindingsRequest {
+        service::CollectionActiveFindingsRequest {
             min_severity: self.min_severity,
             package_name: self.package_name,
             offset: self.offset,
@@ -642,6 +677,64 @@ mod tests {
         assert_eq!(payload["returned"], 1);
         assert_eq!(payload["limit"], 1);
         assert_eq!(payload["offset"], 0);
+        assert_eq!(
+            payload["active_findings"][0]["vulnerability_id"],
+            "CVE-2026-0001"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_queries_active_findings_for_one_collection_scope() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-findings-query", "state"),
+                temp_path("collection-findings-query", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?package_name=openssl&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["collection_key"], "release:2026.05");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["component_key"],
+            "component:payments-api"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["artifact_identity"],
+            "registry.example/payments@sha256:111"
+        );
         assert_eq!(
             payload["active_findings"][0]["vulnerability_id"],
             "CVE-2026-0001"

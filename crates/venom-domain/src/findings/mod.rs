@@ -12,6 +12,7 @@ pub use finding_provider::{
 };
 pub use finding_read_model::{
     ActiveFindingsPage, ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
-    MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
+    MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFinding, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery,
 };
 pub use finding_tracker::{FindingChangeSet, FindingTracker};

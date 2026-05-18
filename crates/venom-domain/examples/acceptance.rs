@@ -9,7 +9,7 @@ use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
     FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, ScanRequest, Severity,
+    ReportedFinding, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, ScanRequest, Severity,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -53,6 +53,7 @@ struct AcceptanceWorld {
     last_durable_runtime_error: Option<String>,
     last_durable_error: Option<String>,
     last_active_findings_page: Option<ActiveFindingsPage>,
+    last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
 }
 
 #[given("no managed components")]
@@ -83,6 +84,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_durable_runtime_error = None;
     world.last_durable_error = None;
     world.last_active_findings_page = None;
+    world.last_scoped_active_findings_page = None;
 }
 
 #[given("a new durable state")]
@@ -728,6 +730,33 @@ async fn venom_queries_active_findings_for_component_and_artifact(
         .read_model()
         .query_active_findings(&query);
     world.last_active_findings_page = Some(page);
+}
+
+#[when(
+    expr = "VENOM queries active findings for collection {string} with minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_collection(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let scope = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before scoped finding query");
+    let query = ScopedActiveFindingsQuery::new()
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_scoped_active_findings(&scope, &query);
+    world.last_scoped_active_findings_page = Some(page);
 }
 
 #[then(expr = "the component {string} is under management")]
@@ -1449,6 +1478,72 @@ async fn the_first_active_finding_vulnerability_is(world: &mut AcceptanceWorld, 
     );
 }
 
+#[then(expr = "the scoped active findings page total is {int}")]
+async fn the_scoped_active_findings_page_total_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_scoped_active_findings_page(world).total, expected);
+}
+
+#[then(expr = "the scoped active findings page returned count is {int}")]
+async fn the_scoped_active_findings_page_returned_count_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_scoped_active_findings_page(world).returned, expected);
+}
+
+#[then(expr = "the first scoped active finding component is {string}")]
+async fn the_first_scoped_active_finding_component_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .first()
+            .expect("a scoped active finding must exist before first-finding assertions")
+            .component_key
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first scoped active finding artifact is {string}")]
+async fn the_first_scoped_active_finding_artifact_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .first()
+            .expect("a scoped active finding must exist before first-finding assertions")
+            .artifact
+            .identity
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first scoped active finding vulnerability is {string}")]
+async fn the_first_scoped_active_finding_vulnerability_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .first()
+            .expect("a scoped active finding must exist before first-finding assertions")
+            .finding
+            .vulnerability_id
+            .as_ref(),
+        expected.as_str()
+    );
+}
+
 fn build_finding(
     vulnerability_id: String,
     package_name: String,
@@ -1619,6 +1714,15 @@ const fn last_active_findings_page(world: &AcceptanceWorld) -> &ActiveFindingsPa
         .last_active_findings_page
         .as_ref()
         .expect("an active findings query must be performed before assertions")
+}
+
+const fn last_scoped_active_findings_page(
+    world: &AcceptanceWorld,
+) -> &ScopedActiveFindingsPage {
+    world
+        .last_scoped_active_findings_page
+        .as_ref()
+        .expect("a scoped active findings query must be performed before assertions")
 }
 
 fn parse_severity(value: &str) -> Severity {

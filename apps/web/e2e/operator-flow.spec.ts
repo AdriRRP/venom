@@ -41,12 +41,19 @@ test("operator flow registers, targets one collection, scans, and queries one ac
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();
 
 	await page.goto("/findings");
-	await page.getByRole("textbox", { name: "Package name" }).fill("openssl");
 	await page
-		.locator("form.filters")
-		.evaluate((form) => (form as HTMLFormElement).requestSubmit());
+		.getByRole("textbox", { name: "Collection key" })
+		.fill("release:2026.05");
+	await page
+		.getByRole("textbox", { name: "Package name" })
+		.first()
+		.fill("openssl");
+	await page.getByRole("button", { name: "Query Collection" }).click();
 
 	await expect(page.getByText("Showing 1-1 of 1")).toBeVisible();
+	await expect(
+		page.getByRole("cell", { name: "component:payments-api" }),
+	).toBeVisible();
 	await expect(page.getByRole("cell", { name: "CVE-2026-0001" })).toBeVisible();
 	await expect(page.getByRole("cell", { name: "openssl@3.0.0" })).toBeVisible();
 });

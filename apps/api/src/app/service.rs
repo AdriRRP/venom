@@ -8,13 +8,15 @@ use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScanRequest, Severity,
+    ProviderScanReport, ReportedFinding, ScopedActiveFindingsQuery, ScanRequest, Severity,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
-use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
+use venom_domain::inventory::{
+    CollectionRegistration, ComponentInventory, ComponentRegistration,
+};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -168,6 +170,51 @@ impl ApiReadSnapshot {
                     component_key: component_key.into(),
                 })
                 .collect(),
+        })
+    }
+
+    /// Query active findings over one closed managed collection scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError::NotFound`] when the collection is unknown
+    /// or [`ApiApplicationError`] when one requested severity is unsupported.
+    pub fn list_collection_active_findings(
+        &self,
+        collection_key: &str,
+        request: CollectionActiveFindingsRequest,
+    ) -> Result<CollectionActiveFindingsResponse, ApiApplicationError> {
+        let scope = self
+            .inventory
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| {
+                ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
+            })?;
+        let query = build_scoped_active_findings_query(&request)?;
+        let page = self.read_model.query_scoped_active_findings(&scope, &query);
+        let findings = page
+            .findings
+            .into_iter()
+            .map(|item| CollectionActiveFindingItem {
+                component_key: item.component_key.into(),
+                artifact_kind: artifact_kind_name(item.artifact.kind).to_owned(),
+                artifact_identity: item.artifact.identity.into(),
+                vulnerability_id: item.finding.vulnerability_id.into(),
+                package_name: item.finding.package.name.into(),
+                package_version: item.finding.package.version.into(),
+                severity: severity_name(item.finding.severity).to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        Ok(CollectionActiveFindingsResponse {
+            collection_key: collection_key.to_owned(),
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            total_active_findings: page.total,
+            returned: page.returned,
+            offset: page.offset,
+            limit: page.limit,
+            active_findings: findings,
         })
     }
 }
@@ -1245,6 +1292,37 @@ pub struct ActiveFindingItem {
     pub severity: String,
 }
 
+#[derive(Debug)]
+pub struct CollectionActiveFindingsRequest {
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionActiveFindingsResponse {
+    pub collection_key: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub total_active_findings: usize,
+    pub returned: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub active_findings: Vec<CollectionActiveFindingItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CollectionActiveFindingItem {
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
+    pub vulnerability_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub severity: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RequestScanCommand {
     pub component_key: String,
@@ -1380,6 +1458,13 @@ fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, ApiApplicationError>
     }
 }
 
+const fn artifact_kind_name(value: ArtifactKind) -> &'static str {
+    match value {
+        ArtifactKind::ContainerImage => "container-image",
+        ArtifactKind::SbomDocument => "sbom-document",
+    }
+}
+
 fn parse_freshness(value: &str) -> Result<EvidenceFreshness, ApiApplicationError> {
     match value {
         "deterministic" => Ok(EvidenceFreshness::Deterministic),
@@ -1459,6 +1544,25 @@ fn build_active_findings_query(
     artifact: ArtifactRef,
 ) -> Result<ActiveFindingsQuery, ApiApplicationError> {
     let mut query = ActiveFindingsQuery::new(request.component_key.clone(), artifact);
+    if let Some(min_severity) = request.min_severity.as_deref() {
+        query = query.with_min_severity(parse_severity(min_severity)?);
+    }
+    if let Some(package_name) = request.package_name.as_deref() {
+        query = query.with_package_name(package_name);
+    }
+    if let Some(offset) = request.offset {
+        query = query.with_offset(offset);
+    }
+    if let Some(limit) = request.limit {
+        query = query.with_limit(limit);
+    }
+    Ok(query)
+}
+
+fn build_scoped_active_findings_query(
+    request: &CollectionActiveFindingsRequest,
+) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
+    let mut query = ScopedActiveFindingsQuery::new();
     if let Some(min_severity) = request.min_severity.as_deref() {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
