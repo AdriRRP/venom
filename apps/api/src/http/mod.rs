@@ -843,6 +843,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_exposes_collection_health_overview() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-health-overview", "state"),
+                temp_path("collection-health-overview", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report_with_two_findings(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = suppress_busybox_finding(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let list_response = router
+            .clone()
+            .oneshot(
+                Request::get("/collections")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("list collections request should succeed");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = http_body_util::BodyExt::collect(list_response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let list_payload: serde_json::Value =
+            serde_json::from_slice(&list_body).expect("response should be valid json");
+        assert_eq!(
+            list_payload["collections"][0]["health"]["total_active_findings"],
+            2
+        );
+        assert_eq!(list_payload["collections"][0]["health"]["open_findings"], 1);
+        assert_eq!(
+            list_payload["collections"][0]["health"]["suppressed_findings"],
+            1
+        );
+        assert_eq!(
+            list_payload["collections"][0]["health"]["risk_accepted_findings"],
+            0
+        );
+        assert_eq!(
+            list_payload["collections"][0]["health"]["critical_risk_findings"],
+            1
+        );
+        assert_eq!(
+            list_payload["collections"][0]["health"]["high_risk_findings"],
+            1
+        );
+
+        let detail_response = router
+            .oneshot(
+                Request::get("/collections/release%3A2026.05")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection detail request should succeed");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_body = http_body_util::BodyExt::collect(detail_response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let detail_payload: serde_json::Value =
+            serde_json::from_slice(&detail_body).expect("response should be valid json");
+        assert_eq!(detail_payload["health"]["total_active_findings"], 2);
+        assert_eq!(detail_payload["health"]["open_findings"], 1);
+        assert_eq!(detail_payload["health"]["suppressed_findings"], 1);
+        assert_eq!(detail_payload["health"]["critical_risk_findings"], 1);
+        assert_eq!(detail_payload["health"]["high_risk_findings"], 1);
+    }
+
+    #[tokio::test]
     async fn api_suppresses_one_active_finding_and_projects_the_state() {
         let router = build_router(
             ApiState::open(
@@ -2314,6 +2408,29 @@ mod tests {
             )
             .await
             .expect("provider report request should succeed")
+    }
+
+    async fn suppress_busybox_finding(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0002",
+                            "package_name": "busybox",
+                            "package_version": "1.36.0",
+                            "reason": "Known local suppression"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("suppression request should succeed")
     }
 
     async fn enqueue_scan_request(router: axum::Router) -> axum::response::Response {

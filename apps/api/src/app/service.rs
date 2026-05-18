@@ -6,12 +6,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
     PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
     ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
-    contextualize_active_findings,
+    contextualize_active_findings, summarize_collection_health,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -119,14 +119,18 @@ impl ApiReadSnapshot {
             .inventory
             .collection_operations_summaries(now_unix_ms)
             .into_iter()
-            .map(|collection| CollectionSummary {
-                collection_key: collection.collection_key.into(),
-                name: collection.name.into(),
-                members: collection.members,
-                scan_schedule: collection
-                    .scan_schedule
-                    .map(CollectionScanScheduleItem::from),
-                due_now: collection.due_now,
+            .map(|collection| {
+                let health = self.collection_health_summary(collection.collection_key.as_ref());
+                CollectionSummary {
+                    collection_key: collection.collection_key.into(),
+                    name: collection.name.into(),
+                    members: collection.members,
+                    scan_schedule: collection
+                        .scan_schedule
+                        .map(CollectionScanScheduleItem::from),
+                    due_now: collection.due_now,
+                    health: CollectionHealthItem::from(health),
+                }
             })
             .collect::<Vec<_>>();
         let managed_collections = collections.len();
@@ -160,6 +164,7 @@ impl ApiReadSnapshot {
             scan_schedule: collection
                 .scan_schedule
                 .map(CollectionScanScheduleItem::from),
+            health: CollectionHealthItem::from(self.collection_health_summary(collection_key)),
             members: collection
                 .component_keys
                 .into_iter()
@@ -220,6 +225,13 @@ impl ApiReadSnapshot {
             limit: page.limit,
             active_findings: findings,
         })
+    }
+
+    fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthSummary {
+        self.inventory
+            .collection_scoped_artifacts(collection_key)
+            .map(|scope| summarize_collection_health(&self.inventory, &self.read_model, &scope))
+            .unwrap_or_default()
     }
 }
 
@@ -1345,6 +1357,7 @@ pub struct CollectionSummary {
     pub members: usize,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub due_now: bool,
+    pub health: CollectionHealthItem,
 }
 
 #[derive(Debug, Serialize)]
@@ -1352,7 +1365,31 @@ pub struct CollectionDetailResponse {
     pub collection_key: String,
     pub name: String,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub health: CollectionHealthItem,
     pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CollectionHealthItem {
+    pub total_active_findings: usize,
+    pub open_findings: usize,
+    pub risk_accepted_findings: usize,
+    pub suppressed_findings: usize,
+    pub critical_risk_findings: usize,
+    pub high_risk_findings: usize,
+}
+
+impl From<CollectionHealthSummary> for CollectionHealthItem {
+    fn from(value: CollectionHealthSummary) -> Self {
+        Self {
+            total_active_findings: value.total_active_findings,
+            open_findings: value.open_findings,
+            risk_accepted_findings: value.risk_accepted_findings,
+            suppressed_findings: value.suppressed_findings,
+            critical_risk_findings: value.critical_risk_findings,
+            high_risk_findings: value.high_risk_findings,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
