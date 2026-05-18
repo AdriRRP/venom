@@ -51,7 +51,9 @@ impl ContextualActiveFindingProjection {
             finding: finding.finding,
             severity: finding.severity,
             contextual_risk,
-            context_profile_key: context_profile.as_ref().map(|profile| profile.profile_key.clone()),
+            context_profile_key: context_profile
+                .as_ref()
+                .map(|profile| profile.profile_key.clone()),
             context_profile_name: context_profile.map(|profile| profile.name),
             governance_state: finding.governance_state,
             governance_reason: finding.governance_reason,
@@ -118,9 +120,7 @@ pub fn contextual_risk_level(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level,
-    };
+    use super::{ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level};
     use crate::{
         ActiveFindingProjection, ArtifactKind, ArtifactRef, FindingGovernanceState, FindingRef,
         ManagedContextProfile, PackageCoordinate, Severity,

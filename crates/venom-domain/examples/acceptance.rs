@@ -7,11 +7,11 @@ use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet,
-    FindingGovernanceState, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression, contextualize_active_findings,
+    ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
+    FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
+    Suppression, contextualize_active_findings,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -1925,10 +1925,10 @@ async fn the_first_contextual_active_finding_raw_severity_is(
     assert_eq!(
         severity_name(
             world
-            .last_contextual_active_findings
-            .first()
-            .expect("a contextual active findings query must be performed before assertions")
-            .severity,
+                .last_contextual_active_findings
+                .first()
+                .expect("a contextual active findings query must be performed before assertions")
+                .severity,
         ),
         expected.as_str()
     );
@@ -1965,9 +1965,7 @@ async fn the_first_contextual_active_finding_context_profile_is(
 }
 
 #[then("the first contextual active finding has no context profile")]
-async fn the_first_contextual_active_finding_has_no_context_profile(
-    world: &mut AcceptanceWorld,
-) {
+async fn the_first_contextual_active_finding_has_no_context_profile(world: &mut AcceptanceWorld) {
     assert!(
         world
             .last_contextual_active_findings
