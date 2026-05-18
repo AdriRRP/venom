@@ -8,9 +8,9 @@ use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
     EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult,
-    Suppression,
+    FindingGovernanceState, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
+    SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -97,6 +97,7 @@ impl ApiReadSnapshot {
             artifact_kind: request.artifact_kind,
             artifact_identity: request.artifact_identity,
             min_severity: request.min_severity,
+            governance_state: request.governance_state,
             package_name: request.package_name,
             total_active_findings: page.total,
             returned: page.returned,
@@ -196,6 +197,7 @@ impl ApiReadSnapshot {
         Ok(CollectionActiveFindingsResponse {
             collection_key: collection_key.to_owned(),
             min_severity: request.min_severity,
+            governance_state: request.governance_state,
             package_name: request.package_name,
             total_active_findings: page.total,
             returned: page.returned,
@@ -1410,6 +1412,7 @@ pub struct ActiveFindingsRequest {
     pub artifact_kind: String,
     pub artifact_identity: String,
     pub min_severity: Option<String>,
+    pub governance_state: Option<String>,
     pub package_name: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
@@ -1421,6 +1424,7 @@ pub struct ActiveFindingsResponse {
     pub artifact_kind: String,
     pub artifact_identity: String,
     pub min_severity: Option<String>,
+    pub governance_state: Option<String>,
     pub package_name: Option<String>,
     pub total_active_findings: usize,
     pub returned: usize,
@@ -1465,6 +1469,7 @@ impl ActiveFindingItem {
 #[derive(Debug)]
 pub struct CollectionActiveFindingsRequest {
     pub min_severity: Option<String>,
+    pub governance_state: Option<String>,
     pub package_name: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
@@ -1474,6 +1479,7 @@ pub struct CollectionActiveFindingsRequest {
 pub struct CollectionActiveFindingsResponse {
     pub collection_key: String,
     pub min_severity: Option<String>,
+    pub governance_state: Option<String>,
     pub package_name: Option<String>,
     pub total_active_findings: usize,
     pub returned: usize,
@@ -1739,6 +1745,9 @@ fn build_active_findings_query(
     if let Some(min_severity) = request.min_severity.as_deref() {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
+    if let Some(governance_state) = request.governance_state.as_deref() {
+        query = query.with_governance_state(parse_governance_state(governance_state)?);
+    }
     if let Some(package_name) = request.package_name.as_deref() {
         query = query.with_package_name(package_name);
     }
@@ -1783,6 +1792,9 @@ fn build_scoped_active_findings_query(
     if let Some(min_severity) = request.min_severity.as_deref() {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
+    if let Some(governance_state) = request.governance_state.as_deref() {
+        query = query.with_governance_state(parse_governance_state(governance_state)?);
+    }
     if let Some(package_name) = request.package_name.as_deref() {
         query = query.with_package_name(package_name);
     }
@@ -1793,6 +1805,19 @@ fn build_scoped_active_findings_query(
         query = query.with_limit(limit);
     }
     Ok(query)
+}
+
+fn parse_governance_state(
+    value: &str,
+) -> Result<FindingGovernanceState, ApiApplicationError> {
+    match value {
+        "open" => Ok(FindingGovernanceState::Open),
+        "risk-accepted" => Ok(FindingGovernanceState::RiskAccepted),
+        "suppressed" => Ok(FindingGovernanceState::Suppressed),
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
+            "unsupported governance state: {value}"
+        ))),
+    }
 }
 
 const fn severity_name(value: Severity) -> &'static str {

@@ -499,6 +499,7 @@ struct ActiveFindingsQuery {
     artifact_kind: String,
     artifact_identity: String,
     min_severity: Option<String>,
+    governance_state: Option<String>,
     package_name: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -511,6 +512,7 @@ impl ActiveFindingsQuery {
             artifact_kind: self.artifact_kind,
             artifact_identity: self.artifact_identity,
             min_severity: self.min_severity,
+            governance_state: self.governance_state,
             package_name: self.package_name,
             offset: self.offset,
             limit: self.limit,
@@ -521,6 +523,7 @@ impl ActiveFindingsQuery {
 #[derive(Debug, Deserialize)]
 struct CollectionActiveFindingsQuery {
     min_severity: Option<String>,
+    governance_state: Option<String>,
     package_name: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -530,6 +533,7 @@ impl CollectionActiveFindingsQuery {
     fn into_request(self) -> service::CollectionActiveFindingsRequest {
         service::CollectionActiveFindingsRequest {
             min_severity: self.min_severity,
+            governance_state: self.governance_state,
             package_name: self.package_name,
             offset: self.offset,
             limit: self.limit,
@@ -822,7 +826,7 @@ mod tests {
         let response = router
             .oneshot(
                 Request::get(
-                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111",
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&governance_state=suppressed",
                 )
                 .body(Body::empty())
                 .expect("request should build"),
@@ -844,6 +848,7 @@ mod tests {
             payload["active_findings"][0]["governance_reason"],
             "Known upstream false alarm"
         );
+        assert_eq!(payload["governance_state"], "suppressed");
     }
 
     #[tokio::test]
