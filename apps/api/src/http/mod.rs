@@ -795,6 +795,12 @@ mod tests {
         let response = add_payments_component_to_collection(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = record_provider_report(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -828,6 +834,11 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["vulnerability_id"],
             "CVE-2026-0001"
+        );
+        assert_eq!(payload["active_findings"][0]["contextual_risk"], "critical");
+        assert_eq!(
+            payload["active_findings"][0]["context_profile_name"],
+            "Internet Production"
         );
     }
 
@@ -998,6 +1009,7 @@ mod tests {
         assert_eq!(payload["profile_key"], "context:internet-prod");
 
         let response = router
+            .clone()
             .oneshot(
                 Request::get("/context-profiles")
                     .body(Body::empty())
@@ -1020,6 +1032,40 @@ mod tests {
         assert_eq!(payload["profiles"][0]["internet_exposed"], true);
         assert_eq!(payload["profiles"][0]["production"], true);
         assert_eq!(payload["profiles"][0]["mission_critical"], true);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("contextual active findings request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"][0]["severity"], "high");
+        assert_eq!(payload["active_findings"][0]["contextual_risk"], "critical");
+        assert_eq!(
+            payload["active_findings"][0]["context_profile_key"],
+            "context:internet-prod"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["context_profile_name"],
+            "Internet Production"
+        );
     }
 
     #[tokio::test]

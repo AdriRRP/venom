@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingResult, Suppression,
+    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    contextualize_active_findings,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -87,8 +88,7 @@ impl ApiReadSnapshot {
         );
         let query = build_active_findings_query(&request, artifact)?;
         let page = self.read_model.query_active_findings(&query);
-        let findings = page
-            .findings
+        let findings = contextualize_active_findings(&self.inventory, page.findings)
             .into_iter()
             .map(ActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
@@ -204,8 +204,7 @@ impl ApiReadSnapshot {
             })?;
         let query = build_scoped_active_findings_query(&request)?;
         let page = self.read_model.query_scoped_active_findings(&scope, &query);
-        let findings = page
-            .findings
+        let findings = contextualize_active_findings(&self.inventory, page.findings)
             .into_iter()
             .map(CollectionActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
@@ -1572,13 +1571,16 @@ pub struct ActiveFindingItem {
     pub package_version: String,
     pub package_purl: Option<String>,
     pub severity: String,
+    pub contextual_risk: String,
+    pub context_profile_key: Option<String>,
+    pub context_profile_name: Option<String>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
 }
 
 impl ActiveFindingItem {
-    fn from_projection(value: ActiveFindingProjection) -> Self {
+    fn from_projection(value: ContextualActiveFindingProjection) -> Self {
         Self {
             component_key: value.finding.component_key.into(),
             artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
@@ -1588,6 +1590,9 @@ impl ActiveFindingItem {
             package_version: value.finding.package.version.into(),
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
+            contextual_risk: value.contextual_risk.as_str().to_owned(),
+            context_profile_key: value.context_profile_key.map(Into::into),
+            context_profile_name: value.context_profile_name.map(Into::into),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,
@@ -1627,13 +1632,16 @@ pub struct CollectionActiveFindingItem {
     pub package_version: String,
     pub package_purl: Option<String>,
     pub severity: String,
+    pub contextual_risk: String,
+    pub context_profile_key: Option<String>,
+    pub context_profile_name: Option<String>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
 }
 
 impl CollectionActiveFindingItem {
-    fn from_projection(value: ActiveFindingProjection) -> Self {
+    fn from_projection(value: ContextualActiveFindingProjection) -> Self {
         Self {
             component_key: value.finding.component_key.into(),
             artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
@@ -1643,6 +1651,9 @@ impl CollectionActiveFindingItem {
             package_version: value.finding.package.version.into(),
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
+            contextual_risk: value.contextual_risk.as_str().to_owned(),
+            context_profile_key: value.context_profile_key.map(Into::into),
+            context_profile_name: value.context_profile_name.map(Into::into),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,
