@@ -61,7 +61,7 @@ Feature: View active findings
       And VENOM durably creates collection "release:2026.05" named "May Release"
       And VENOM durably adds component "component:payments-api" to collection "release:2026.05"
       And VENOM durably records the provider scan report
-      And VENOM queries active findings for collection "release:2026.05" with minimum severity "high", offset 0, and limit 10
+      And VENOM queries active findings for collection "release:2026.05" with minimum severity "unknown", offset 0, and limit 10
       Then the scoped active findings page total is 1
       And the scoped active findings page returned count is 1
       And the first scoped active finding component is "component:payments-api"
