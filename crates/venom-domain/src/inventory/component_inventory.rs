@@ -827,6 +827,15 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn managed_component_context_profile(
+        &self,
+        component_key: &str,
+    ) -> Option<ManagedContextProfile> {
+        self.assigned_context_profile(component_key)
+            .and_then(|profile_key| self.context_profile(profile_key))
+    }
+
+    #[must_use]
     pub fn managed_context_profiles(&self) -> usize {
         self.context_profiles.len()
     }

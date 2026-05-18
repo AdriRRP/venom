@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
-    FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
-    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet,
+    FindingGovernanceState, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
     ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression,
+    ScopedActiveFindingsQuery, Severity, Suppression, contextualize_active_findings,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -55,6 +56,7 @@ struct AcceptanceWorld {
     last_durable_error: Option<String>,
     last_active_findings_page: Option<ActiveFindingsPage>,
     last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
+    last_contextual_active_findings: Vec<ContextualActiveFindingProjection>,
 }
 
 #[given("no managed components")]
@@ -86,6 +88,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_durable_error = None;
     world.last_active_findings_page = None;
     world.last_scoped_active_findings_page = None;
+    world.last_contextual_active_findings.clear();
 }
 
 #[given("a new durable state")]
@@ -175,6 +178,29 @@ async fn a_provider_scan_report_with_one_finding(
             package_name,
             package_version,
         )],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
+    expr = "a provider scan report with vulnerability {string} in package {string} version {string} and severity {string}"
+)]
+#[when(
+    expr = "a provider scan report with vulnerability {string} in package {string} version {string} and severity {string}"
+)]
+async fn a_provider_scan_report_with_one_finding_and_severity(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    severity: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(vulnerability_id, package_name, package_version)
+                .with_severity(parse_severity(&severity)),
+        ],
     ));
     world.provider_failure = None;
 }
@@ -921,6 +947,33 @@ async fn venom_queries_active_findings_for_component_and_artifact(
         .durable_state_ref()
         .read_model()
         .query_active_findings(&query);
+    world.last_active_findings_page = Some(page);
+}
+
+#[when(
+    expr = "VENOM queries contextual active findings for component {string} and artifact {string} with minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_contextual_active_findings_for_component_and_artifact(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    artifact_identity: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    let query = ActiveFindingsQuery::new(component_key, artifact)
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_active_findings(&query);
+    world.last_contextual_active_findings = contextualize_active_findings(
+        world.durable_state_ref().ingestion().inventory(),
+        page.findings.clone(),
+    );
     world.last_active_findings_page = Some(page);
 }
 
@@ -1864,6 +1917,67 @@ async fn the_first_scoped_active_finding_governance_reason_is(
     );
 }
 
+#[then(expr = "the first contextual active finding raw severity is {string}")]
+async fn the_first_contextual_active_finding_raw_severity_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        severity_name(
+            world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .severity,
+        ),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first contextual active finding risk is {string}")]
+async fn the_first_contextual_active_finding_risk_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .contextual_risk
+            .as_str(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first contextual active finding context profile is {string}")]
+async fn the_first_contextual_active_finding_context_profile_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .and_then(|finding| finding.context_profile_key.as_deref()),
+        Some(expected.as_str())
+    );
+}
+
+#[then("the first contextual active finding has no context profile")]
+async fn the_first_contextual_active_finding_has_no_context_profile(
+    world: &mut AcceptanceWorld,
+) {
+    assert!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .context_profile_key
+            .is_none()
+    );
+}
+
 fn build_finding(
     vulnerability_id: String,
     package_name: String,
@@ -2064,6 +2178,17 @@ fn parse_governance_state(value: &str) -> FindingGovernanceState {
     }
 }
 
+const fn severity_name(value: Severity) -> &'static str {
+    match value {
+        Severity::Unknown => "unknown",
+        Severity::None => "none",
+        Severity::Low => "low",
+        Severity::Medium => "medium",
+        Severity::High => "high",
+        Severity::Critical => "critical",
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let base = format!("{}/../../features", env!("CARGO_MANIFEST_DIR"));
@@ -2076,6 +2201,7 @@ async fn main() {
         "report-finding.feature",
         "suppress-finding.feature",
         "filter-governed-findings.feature",
+        "classify-finding.feature",
         "manage-context-profiles.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",

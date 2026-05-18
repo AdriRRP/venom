@@ -39,6 +39,7 @@ flowchart LR
 | Collection Scan Schedule | value object | The durable periodic cadence and freshness mode attached to one managed collection, including the next due time for one explicit scheduler pass. | hidden background timers with no durable state |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
 | Context Profile | entity | A reusable template of execution-context information. | "preset" as the canonical domain name |
+| Contextual Risk | projection field | The deterministic operator-facing risk level produced by combining raw finding severity with one managed component context profile. | treating raw severity as the final operational priority |
 | Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |
 | Execution Context | value object | The runtime and business context that changes how a finding should be interpreted. | "environment" when the richer domain meaning is intended |
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |
