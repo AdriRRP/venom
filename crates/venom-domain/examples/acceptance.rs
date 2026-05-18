@@ -685,6 +685,7 @@ async fn venom_durably_accepts_risk(
 #[when(
     expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string} until unix ms {int}"
 )]
+#[allow(clippy::too_many_arguments)]
 async fn venom_durably_accepts_risk_until(
     world: &mut AcceptanceWorld,
     vulnerability_id: String,
