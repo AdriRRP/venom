@@ -145,4 +145,13 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByText("risk-accepted: Compensating control in place"),
 	).toBeVisible();
+
+	await collectionPanel.getByRole("button", { name: "Suppress" }).click();
+	await page
+		.getByRole("textbox", { name: "Reason" })
+		.fill("Known upstream false alarm");
+	await page.getByRole("button", { name: "Submit Suppression" }).click();
+	await expect(
+		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
 });

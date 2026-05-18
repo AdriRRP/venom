@@ -14,6 +14,7 @@ import {
 	fetchActiveFindings,
 	fetchApiHealth,
 	fetchCollectionActiveFindings,
+	suppressFinding,
 } from "../lib/api";
 
 const defaultCollectionRequest = {
@@ -100,6 +101,12 @@ function governanceLabel(finding: {
 		return `risk-accepted${until}${reason}`;
 	}
 
+	if (finding.governance_state === "suppressed") {
+		const reason =
+			finding.governance_reason == null ? "" : `: ${finding.governance_reason}`;
+		return `suppressed${reason}`;
+	}
+
 	return finding.governance_state;
 }
 
@@ -113,6 +120,9 @@ export function FindingsPage() {
 	);
 	const [selectedFinding, setSelectedFinding] =
 		useState<CollectionActiveFinding | null>(null);
+	const [selectedGovernanceAction, setSelectedGovernanceAction] = useState<
+		"accept-risk" | "suppress" | null
+	>(null);
 	const [riskReason, setRiskReason] = useState("");
 	const [riskUntilUnixMs, setRiskUntilUnixMs] = useState("");
 	const [riskFeedback, setRiskFeedback] = useState<string | null>(null);
@@ -140,6 +150,7 @@ export function FindingsPage() {
 				`Governance: ${response.governance_state} (${response.change}).`,
 			);
 			setSelectedFinding(null);
+			setSelectedGovernanceAction(null);
 			setRiskReason("");
 			setRiskUntilUnixMs("");
 			await Promise.all([
@@ -154,6 +165,32 @@ export function FindingsPage() {
 		onError: (error) => {
 			setRiskFeedback(
 				error instanceof Error ? error.message : "risk acceptance failed",
+			);
+		},
+	});
+
+	const suppressFindingMutation = useMutation({
+		mutationFn: suppressFinding,
+		onSuccess: async (response) => {
+			setRiskFeedback(
+				`Governance: ${response.governance_state} (${response.change}).`,
+			);
+			setSelectedFinding(null);
+			setSelectedGovernanceAction(null);
+			setRiskReason("");
+			setRiskUntilUnixMs("");
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: ["collection-active-findings", collectionRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["active-findings", artifactRequest],
+				}),
+			]);
+		},
+		onError: (error) => {
+			setRiskFeedback(
+				error instanceof Error ? error.message : "finding suppression failed",
 			);
 		},
 	});
@@ -212,6 +249,15 @@ export function FindingsPage() {
 			(artifactFindingsQuery.data?.returned ?? 0) <
 			(artifactFindingsQuery.data?.total_active_findings ?? 0) &&
 		!artifactFindingsQuery.isFetching;
+
+	const governanceActionLabel =
+		selectedGovernanceAction === "suppress"
+			? "Suppress Finding"
+			: "Accept Risk";
+	const governanceActionSubmitLabel =
+		selectedGovernanceAction === "suppress"
+			? "Submit Suppression"
+			: "Submit Risk Acceptance";
 
 	return (
 		<AppShell apiHealth={healthLabel} currentView="findings">
@@ -388,6 +434,7 @@ export function FindingsPage() {
 												className="secondary-button"
 												onClick={() => {
 													setSelectedFinding(row.original);
+													setSelectedGovernanceAction("accept-risk");
 													setRiskReason(row.original.governance_reason ?? "");
 													setRiskUntilUnixMs(
 														row.original.governance_until_unix_ms == null
@@ -400,6 +447,19 @@ export function FindingsPage() {
 											>
 												Accept Risk
 											</button>
+											<button
+												className="secondary-button"
+												onClick={() => {
+													setSelectedFinding(row.original);
+													setSelectedGovernanceAction("suppress");
+													setRiskReason(row.original.governance_reason ?? "");
+													setRiskUntilUnixMs("");
+													setRiskFeedback(null);
+												}}
+												type="button"
+											>
+												Suppress
+											</button>
 										</td>
 									</tr>
 								))
@@ -408,11 +468,24 @@ export function FindingsPage() {
 					</table>
 				</div>
 
-				{selectedFinding ? (
+				{selectedFinding && selectedGovernanceAction ? (
 					<form
 						className="filters"
 						onSubmit={(event) => {
 							event.preventDefault();
+							if (selectedGovernanceAction === "suppress") {
+								void suppressFindingMutation.mutate({
+									componentKey: selectedFinding.component_key,
+									artifactKind: selectedFinding.artifact_kind,
+									artifactIdentity: selectedFinding.artifact_identity,
+									vulnerabilityId: selectedFinding.vulnerability_id,
+									packageName: selectedFinding.package_name,
+									packageVersion: selectedFinding.package_version,
+									packagePurl: selectedFinding.package_purl,
+									reason: riskReason,
+								});
+								return;
+							}
 							void acceptRiskMutation.mutate({
 								componentKey: selectedFinding.component_key,
 								artifactKind: selectedFinding.artifact_kind,
@@ -430,7 +503,7 @@ export function FindingsPage() {
 						}}
 					>
 						<label>
-							Selected finding
+							{governanceActionLabel}
 							<input
 								readOnly
 								value={`${selectedFinding.vulnerability_id} on ${selectedFinding.component_key}`}
@@ -444,23 +517,26 @@ export function FindingsPage() {
 								value={riskReason}
 							/>
 						</label>
-						<label>
-							Until unix ms
-							<input
-								name="riskUntilUnixMs"
-								onChange={(event) => setRiskUntilUnixMs(event.target.value)}
-								placeholder="optional"
-								type="number"
-								value={riskUntilUnixMs}
-							/>
-						</label>
+						{selectedGovernanceAction === "accept-risk" ? (
+							<label>
+								Until unix ms
+								<input
+									name="riskUntilUnixMs"
+									onChange={(event) => setRiskUntilUnixMs(event.target.value)}
+									placeholder="optional"
+									type="number"
+									value={riskUntilUnixMs}
+								/>
+							</label>
+						) : null}
 						<button className="primary-button" type="submit">
-							Submit Risk Acceptance
+							{governanceActionSubmitLabel}
 						</button>
 						<button
 							className="secondary-button"
 							onClick={() => {
 								setSelectedFinding(null);
+								setSelectedGovernanceAction(null);
 								setRiskFeedback(null);
 							}}
 							type="button"

@@ -394,4 +394,112 @@ describe("FindingsPage", () => {
 		expect(governedFindings).toHaveLength(2);
 		expect(methods).toContain("POST");
 	});
+
+	it("suppresses one collection finding and refreshes governance state", async () => {
+		let suppressed = false;
+
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, _init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("/health")) {
+					return new Response("ok", { status: 200 });
+				}
+				if (url === "/api/findings/suppression") {
+					suppressed = true;
+					return new Response(
+						JSON.stringify({
+							change: "suppressed",
+							governance_state: "suppressed",
+							governance_reason: "Known upstream false alarm",
+							governance_until_unix_ms: null,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/collections/")) {
+					return new Response(
+						JSON.stringify({
+							collection_key: "release:2026.05",
+							min_severity: null,
+							package_name: null,
+							total_active_findings: 1,
+							returned: 1,
+							offset: 0,
+							limit: 50,
+							active_findings: [
+								{
+									component_key: "component:payments-api",
+									artifact_kind: "container-image",
+									artifact_identity: "registry.example/payments@sha256:111",
+									vulnerability_id: "CVE-2026-0001",
+									package_name: "openssl",
+									package_version: "3.0.0",
+									package_purl: null,
+									severity: "high",
+									governance_state: suppressed ? "suppressed" : "open",
+									governance_reason: suppressed
+										? "Known upstream false alarm"
+										: null,
+									governance_until_unix_ms: null,
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						component_key: "component:payments-api",
+						artifact_kind: "container-image",
+						artifact_identity: "registry.example/payments@sha256:111",
+						min_severity: null,
+						package_name: null,
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
+						limit: 50,
+						active_findings: [
+							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
+								vulnerability_id: "CVE-2026-0001",
+								package_name: "openssl",
+								package_version: "3.0.0",
+								package_purl: null,
+								severity: "high",
+								governance_state: suppressed ? "suppressed" : "open",
+								governance_reason: suppressed
+									? "Known upstream false alarm"
+									: null,
+								governance_until_unix_ms: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<FindingsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(await screen.findByRole("button", { name: "Suppress" }));
+		fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), {
+			target: { value: "Known upstream false alarm" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Submit Suppression" }));
+
+		expect(
+			await screen.findByText("Governance: suppressed (suppressed)."),
+		).toBeInTheDocument();
+		const suppressedFindings = await screen.findAllByText(
+			"suppressed: Known upstream false alarm",
+		);
+		expect(suppressedFindings).toHaveLength(2);
+		expect(globalThis.fetch).toHaveBeenCalled();
+	});
 });

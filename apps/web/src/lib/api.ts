@@ -195,6 +195,24 @@ export type AcceptRiskResponse = {
 	governance_until_unix_ms: number | null;
 };
 
+export type SuppressFindingPayload = {
+	componentKey: string;
+	artifactKind: string;
+	artifactIdentity: string;
+	vulnerabilityId: string;
+	packageName: string;
+	packageVersion: string;
+	packagePurl?: string | null;
+	reason: string;
+};
+
+export type SuppressFindingResponse = {
+	change: string;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
+};
+
 export type ScanCommandStatusResponse = {
 	command_id: string;
 	status: string;
@@ -325,6 +343,32 @@ export async function acceptFindingRisk(
 	}
 
 	return (await response.json()) as AcceptRiskResponse;
+}
+
+export async function suppressFinding(
+	request: SuppressFindingPayload,
+): Promise<SuppressFindingResponse> {
+	const response = await fetch("/api/findings/suppression", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			component_key: request.componentKey,
+			artifact_kind: request.artifactKind,
+			artifact_identity: request.artifactIdentity,
+			vulnerability_id: request.vulnerabilityId,
+			package_name: request.packageName,
+			package_version: request.packageVersion,
+			package_purl: request.packagePurl ?? null,
+			reason: request.reason,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`finding suppression failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as SuppressFindingResponse;
 }
 
 export async function registerComponent(

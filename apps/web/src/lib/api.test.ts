@@ -16,6 +16,7 @@ import {
 	registerComponent,
 	requestCollectionScan,
 	requestScan,
+	suppressFinding,
 } from "./api";
 
 describe("fetchApiHealth", () => {
@@ -204,6 +205,42 @@ describe("fetchApiHealth", () => {
 			'"reason":"Compensating control in place"',
 		);
 		expect(calls[0]?.init?.body).toContain('"until_unix_ms":1760000000000');
+	});
+
+	it("serializes finding suppression over the canonical finding identity", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(
+					JSON.stringify({
+						change: "suppressed",
+						governance_state: "suppressed",
+						governance_reason: "Known upstream false alarm",
+						governance_until_unix_ms: null,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		await suppressFinding({
+			componentKey: "component:payments-api",
+			artifactKind: "container-image",
+			artifactIdentity: "registry.example/payments@sha256:111",
+			vulnerabilityId: "CVE-2026-0001",
+			packageName: "openssl",
+			packageVersion: "3.0.0",
+			reason: "Known upstream false alarm",
+		});
+
+		expect(calls[0]?.input).toBe("/api/findings/suppression");
+		expect(calls[0]?.init?.body).toContain(
+			'"vulnerability_id":"CVE-2026-0001"',
+		);
+		expect(calls[0]?.init?.body).toContain(
+			'"reason":"Known upstream false alarm"',
+		);
 	});
 
 	it("serializes scan command lookup and worker drain payloads", async () => {

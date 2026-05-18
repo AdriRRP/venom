@@ -1,7 +1,7 @@
 # W70. Suppress findings
 
 Wave: `W70-suppress-findings`
-Status: `active`
+Status: `done`
 BDD impact: `create`
 Agentic impact: `none`
 Infra profile: `db`
@@ -41,9 +41,9 @@ rebuildable across release-scoped and artifact-scoped views.
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W70-S01` | in_progress | extend finding governance with durable suppression and read projection | unit and acceptance checks |
-| `W70-S02` | planned | expose suppression through API and Postgres | integration checks |
-| `W70-S03` | planned | let operators suppress findings from the findings console | web and e2e checks |
+| `W70-S01` | done | extend finding governance with durable suppression and read projection | unit and acceptance checks |
+| `W70-S02` | done | expose suppression through API and Postgres | integration checks |
+| `W70-S03` | done | let operators suppress findings from the findings console | web and e2e checks |
 
 ## Language impact
 
