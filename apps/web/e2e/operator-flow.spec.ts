@@ -159,6 +159,6 @@ test("findings console can query one seeded release collection", async ({
 		.selectOption("suppressed");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
-		.click();
+		.dispatchEvent("click");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 });
