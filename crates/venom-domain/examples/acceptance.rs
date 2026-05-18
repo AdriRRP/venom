@@ -339,6 +339,7 @@ async fn venom_durably_registers_component(
 }
 
 #[given(expr = "VENOM durably creates collection {string} named {string}")]
+#[when(expr = "VENOM durably creates collection {string} named {string}")]
 async fn venom_durably_creates_collection(
     world: &mut AcceptanceWorld,
     collection_key: String,
