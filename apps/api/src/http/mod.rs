@@ -822,6 +822,9 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["collection_key"], "release:2026.05");
+        assert_eq!(payload["health"]["total"], 1);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["suppressed"], 0);
         assert_eq!(payload["total_active_findings"], 1);
         assert_eq!(
             payload["active_findings"][0]["component_key"],
@@ -839,6 +842,70 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["context_profile_name"],
             "Internet Production"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_keeps_collection_health_when_collection_findings_are_governance_filtered() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-governance-overview", "state"),
+                temp_path("collection-governance-overview", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report_with_two_findings(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = suppress_busybox_finding(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=suppressed&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["health"]["total"], 2);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["suppressed"], 1);
+        assert_eq!(payload["health"]["risk_accepted"], 0);
+        assert_eq!(payload["health"]["critical_risk"], 1);
+        assert_eq!(payload["health"]["high_risk"], 0);
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "suppressed"
         );
     }
 

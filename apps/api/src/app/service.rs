@@ -11,7 +11,8 @@ use venom_domain::findings::{
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
     PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
     ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
-    contextualize_active_findings, summarize_collection_health,
+    contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -201,15 +202,17 @@ impl ApiReadSnapshot {
         collection_key: &str,
         request: CollectionActiveFindingsRequest,
     ) -> Result<CollectionActiveFindingsResponse, ApiApplicationError> {
-        let scope = self
-            .inventory
-            .collection_scoped_artifacts(collection_key)
-            .ok_or_else(|| {
-                ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
-            })?;
         let query = build_scoped_active_findings_query(&request)?;
-        let page = self.read_model.query_scoped_active_findings(&scope, &query);
-        let findings = contextualize_active_findings(&self.inventory, page.findings)
+        let overview = query_collection_governance_overview(
+            &self.inventory,
+            &self.read_model,
+            collection_key,
+            &query,
+        )
+        .ok_or_else(|| {
+            ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
+        })?;
+        let findings = contextualize_active_findings(&self.inventory, overview.page.findings)
             .into_iter()
             .map(CollectionActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
@@ -219,10 +222,11 @@ impl ApiReadSnapshot {
             min_severity: request.min_severity,
             governance_state: request.governance_state,
             package_name: request.package_name,
-            total_active_findings: page.total,
-            returned: page.returned,
-            offset: page.offset,
-            limit: page.limit,
+            health: CollectionHealthItem::from(overview.health),
+            total_active_findings: overview.page.total,
+            returned: overview.page.returned,
+            offset: overview.page.offset,
+            limit: overview.page.limit,
             active_findings: findings,
         })
     }
@@ -1652,6 +1656,7 @@ pub struct CollectionActiveFindingsResponse {
     pub min_severity: Option<String>,
     pub governance_state: Option<String>,
     pub package_name: Option<String>,
+    pub health: CollectionHealthItem,
     pub total_active_findings: usize,
     pub returned: usize,
     pub offset: usize,
