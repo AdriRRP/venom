@@ -479,7 +479,10 @@ impl DurableState {
             DurableEvent::FindingRiskAccepted {
                 finding,
                 acceptance,
-            } => self.apply_finding_risk_accepted(finding, acceptance),
+            } => {
+                self.apply_finding_risk_accepted(finding, acceptance);
+                Ok(())
+            }
             DurableEvent::IntegrationEventPublished { event_id } => {
                 self.remove_pending_integration_event(event_id.as_ref());
                 Ok(())
@@ -765,12 +768,11 @@ impl DurableState {
         &mut self,
         finding: StoredFindingRef,
         acceptance: RiskAcceptance,
-    ) -> Result<(), DurableStateError> {
+    ) {
         let finding = finding.into_domain();
         self.governance
             .replay_risk_acceptance(finding.clone(), acceptance.clone());
         self.read_model.replay_risk_acceptance(finding, acceptance);
-        Ok(())
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
