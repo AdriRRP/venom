@@ -143,12 +143,12 @@ export type CollectionDetailResponse = {
 };
 
 export type CollectionHealth = {
-	total_active_findings: number;
-	open_findings: number;
-	risk_accepted_findings: number;
-	suppressed_findings: number;
-	critical_risk_findings: number;
-	high_risk_findings: number;
+	total: number;
+	open: number;
+	risk_accepted: number;
+	suppressed: number;
+	critical_risk: number;
+	high_risk: number;
 };
 
 export type CollectionScanSchedule = {

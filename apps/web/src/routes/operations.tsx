@@ -41,14 +41,14 @@ function describeCollectionSchedule(
 }
 
 function describeCollectionHealth(health: {
-	total_active_findings: number;
-	open_findings: number;
-	risk_accepted_findings: number;
-	suppressed_findings: number;
-	critical_risk_findings: number;
-	high_risk_findings: number;
+	total: number;
+	open: number;
+	risk_accepted: number;
+	suppressed: number;
+	critical_risk: number;
+	high_risk: number;
 }) {
-	return `${health.total_active_findings} active - ${health.open_findings} open - ${health.risk_accepted_findings} risk accepted - ${health.suppressed_findings} suppressed - ${health.critical_risk_findings} critical risk - ${health.high_risk_findings} high risk`;
+	return `${health.total} active - ${health.open} open - ${health.risk_accepted} risk accepted - ${health.suppressed} suppressed - ${health.critical_risk} critical risk - ${health.high_risk} high risk`;
 }
 
 export function OperationsPage() {
@@ -243,7 +243,7 @@ export function OperationsPage() {
 		);
 		const dueNow = scheduled.filter((collection) => collection.due_now);
 		const activeFindings = collections.reduce(
-			(total, collection) => total + collection.health.total_active_findings,
+			(total, collection) => total + collection.health.total,
 			0,
 		);
 		return {

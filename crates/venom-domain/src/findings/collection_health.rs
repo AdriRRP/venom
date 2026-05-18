@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 /// Compact operator-facing summary of one closed collection health state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CollectionHealthSummary {
-    pub total_active_findings: usize,
-    pub open_findings: usize,
-    pub risk_accepted_findings: usize,
-    pub suppressed_findings: usize,
-    pub critical_risk_findings: usize,
-    pub high_risk_findings: usize,
+    pub total: usize,
+    pub open: usize,
+    pub risk_accepted: usize,
+    pub suppressed: usize,
+    pub critical_risk: usize,
+    pub high_risk: usize,
 }
 
 /// Derive one compact collection health summary from scoped active findings,
@@ -27,12 +27,12 @@ pub fn summarize_collection_health(
     let mut context_profiles = BTreeMap::new();
 
     read_model.visit_scoped_active_findings(scope, |finding| {
-        summary.total_active_findings += 1;
+        summary.total += 1;
 
         match finding.governance_state {
-            FindingGovernanceState::Open => summary.open_findings += 1,
-            FindingGovernanceState::RiskAccepted => summary.risk_accepted_findings += 1,
-            FindingGovernanceState::Suppressed => summary.suppressed_findings += 1,
+            FindingGovernanceState::Open => summary.open += 1,
+            FindingGovernanceState::RiskAccepted => summary.risk_accepted += 1,
+            FindingGovernanceState::Suppressed => summary.suppressed += 1,
         }
 
         let context_profile = context_profiles
@@ -41,8 +41,8 @@ pub fn summarize_collection_health(
                 inventory.managed_component_context_profile(finding.finding.component_key.as_ref())
             });
         match contextual_risk_level(finding.severity, context_profile.as_ref()) {
-            ContextualRiskLevel::Critical => summary.critical_risk_findings += 1,
-            ContextualRiskLevel::High => summary.high_risk_findings += 1,
+            ContextualRiskLevel::Critical => summary.critical_risk += 1,
+            ContextualRiskLevel::High => summary.high_risk += 1,
             ContextualRiskLevel::Unknown
             | ContextualRiskLevel::None
             | ContextualRiskLevel::Low
@@ -132,12 +132,12 @@ mod tests {
         assert_eq!(
             summary,
             CollectionHealthSummary {
-                total_active_findings: 2,
-                open_findings: 1,
-                risk_accepted_findings: 0,
-                suppressed_findings: 1,
-                critical_risk_findings: 1,
-                high_risk_findings: 1,
+                total: 2,
+                open: 1,
+                risk_accepted: 0,
+                suppressed: 1,
+                critical_risk: 1,
+                high_risk: 1,
             }
         );
     }

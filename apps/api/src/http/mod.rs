@@ -892,27 +892,12 @@ mod tests {
             .to_bytes();
         let list_payload: serde_json::Value =
             serde_json::from_slice(&list_body).expect("response should be valid json");
-        assert_eq!(
-            list_payload["collections"][0]["health"]["total_active_findings"],
-            2
-        );
-        assert_eq!(list_payload["collections"][0]["health"]["open_findings"], 1);
-        assert_eq!(
-            list_payload["collections"][0]["health"]["suppressed_findings"],
-            1
-        );
-        assert_eq!(
-            list_payload["collections"][0]["health"]["risk_accepted_findings"],
-            0
-        );
-        assert_eq!(
-            list_payload["collections"][0]["health"]["critical_risk_findings"],
-            1
-        );
-        assert_eq!(
-            list_payload["collections"][0]["health"]["high_risk_findings"],
-            1
-        );
+        assert_eq!(list_payload["collections"][0]["health"]["total"], 2);
+        assert_eq!(list_payload["collections"][0]["health"]["open"], 1);
+        assert_eq!(list_payload["collections"][0]["health"]["suppressed"], 1);
+        assert_eq!(list_payload["collections"][0]["health"]["risk_accepted"], 0);
+        assert_eq!(list_payload["collections"][0]["health"]["critical_risk"], 1);
+        assert_eq!(list_payload["collections"][0]["health"]["high_risk"], 1);
 
         let detail_response = router
             .oneshot(
@@ -929,11 +914,11 @@ mod tests {
             .to_bytes();
         let detail_payload: serde_json::Value =
             serde_json::from_slice(&detail_body).expect("response should be valid json");
-        assert_eq!(detail_payload["health"]["total_active_findings"], 2);
-        assert_eq!(detail_payload["health"]["open_findings"], 1);
-        assert_eq!(detail_payload["health"]["suppressed_findings"], 1);
-        assert_eq!(detail_payload["health"]["critical_risk_findings"], 1);
-        assert_eq!(detail_payload["health"]["high_risk_findings"], 1);
+        assert_eq!(detail_payload["health"]["total"], 2);
+        assert_eq!(detail_payload["health"]["open"], 1);
+        assert_eq!(detail_payload["health"]["suppressed"], 1);
+        assert_eq!(detail_payload["health"]["critical_risk"], 1);
+        assert_eq!(detail_payload["health"]["high_risk"], 1);
     }
 
     #[tokio::test]

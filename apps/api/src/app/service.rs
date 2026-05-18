@@ -1371,23 +1371,23 @@ pub struct CollectionDetailResponse {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct CollectionHealthItem {
-    pub total_active_findings: usize,
-    pub open_findings: usize,
-    pub risk_accepted_findings: usize,
-    pub suppressed_findings: usize,
-    pub critical_risk_findings: usize,
-    pub high_risk_findings: usize,
+    pub total: usize,
+    pub open: usize,
+    pub risk_accepted: usize,
+    pub suppressed: usize,
+    pub critical_risk: usize,
+    pub high_risk: usize,
 }
 
 impl From<CollectionHealthSummary> for CollectionHealthItem {
     fn from(value: CollectionHealthSummary) -> Self {
         Self {
-            total_active_findings: value.total_active_findings,
-            open_findings: value.open_findings,
-            risk_accepted_findings: value.risk_accepted_findings,
-            suppressed_findings: value.suppressed_findings,
-            critical_risk_findings: value.critical_risk_findings,
-            high_risk_findings: value.high_risk_findings,
+            total: value.total,
+            open: value.open,
+            risk_accepted: value.risk_accepted,
+            suppressed: value.suppressed,
+            critical_risk: value.critical_risk,
+            high_risk: value.high_risk,
         }
     }
 }

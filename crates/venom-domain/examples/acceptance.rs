@@ -1997,18 +1997,12 @@ async fn the_collection_health_total_active_findings_is(
     world: &mut AcceptanceWorld,
     expected: usize,
 ) {
-    assert_eq!(
-        last_collection_health_summary(world).total_active_findings,
-        expected
-    );
+    assert_eq!(last_collection_health_summary(world).total, expected);
 }
 
 #[then(expr = "the collection health open findings is {int}")]
 async fn the_collection_health_open_findings_is(world: &mut AcceptanceWorld, expected: usize) {
-    assert_eq!(
-        last_collection_health_summary(world).open_findings,
-        expected
-    );
+    assert_eq!(last_collection_health_summary(world).open, expected);
 }
 
 #[then(expr = "the collection health suppressed findings is {int}")]
@@ -2016,10 +2010,7 @@ async fn the_collection_health_suppressed_findings_is(
     world: &mut AcceptanceWorld,
     expected: usize,
 ) {
-    assert_eq!(
-        last_collection_health_summary(world).suppressed_findings,
-        expected
-    );
+    assert_eq!(last_collection_health_summary(world).suppressed, expected);
 }
 
 #[then(expr = "the collection health risk accepted findings is {int}")]
@@ -2028,7 +2019,7 @@ async fn the_collection_health_risk_accepted_findings_is(
     expected: usize,
 ) {
     assert_eq!(
-        last_collection_health_summary(world).risk_accepted_findings,
+        last_collection_health_summary(world).risk_accepted,
         expected
     );
 }
@@ -2039,17 +2030,14 @@ async fn the_collection_health_critical_risk_findings_is(
     expected: usize,
 ) {
     assert_eq!(
-        last_collection_health_summary(world).critical_risk_findings,
+        last_collection_health_summary(world).critical_risk,
         expected
     );
 }
 
 #[then(expr = "the collection health high risk findings is {int}")]
 async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld, expected: usize) {
-    assert_eq!(
-        last_collection_health_summary(world).high_risk_findings,
-        expected
-    );
+    assert_eq!(last_collection_health_summary(world).high_risk, expected);
 }
 
 fn build_finding(
