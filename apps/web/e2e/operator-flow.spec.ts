@@ -154,4 +154,11 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByText("suppressed: Known upstream false alarm"),
 	).toBeVisible();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("suppressed");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.click();
+	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 });

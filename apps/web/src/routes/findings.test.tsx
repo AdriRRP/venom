@@ -82,7 +82,7 @@ describe("FindingsPage", () => {
 		expect(screen.getByText("No active findings yet.")).toBeInTheDocument();
 	});
 
-	it("submits the collection query with package filter", async () => {
+	it("submits the collection query with package and governance filters", async () => {
 		const calls: string[] = [];
 
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
@@ -96,6 +96,7 @@ describe("FindingsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						min_severity: "high",
+						governance_state: "suppressed",
 						package_name: "openssl",
 						total_active_findings: 1,
 						returned: 1,
@@ -154,6 +155,17 @@ describe("FindingsPage", () => {
 		fireEvent.change(collectionPackageInput, {
 			target: { value: "openssl" },
 		});
+		const governanceSelects = screen.getAllByRole("combobox", {
+			name: "Governance",
+		});
+		const collectionGovernanceSelect = governanceSelects[0];
+		expect(collectionGovernanceSelect).toBeDefined();
+		if (!collectionGovernanceSelect) {
+			throw new Error("expected collection governance select");
+		}
+		fireEvent.change(collectionGovernanceSelect, {
+			target: { value: "suppressed" },
+		});
 		fireEvent.click(screen.getByRole("button", { name: "Query Collection" }));
 
 		expect(await screen.findByText("Showing 1-1 of 1")).toBeInTheDocument();
@@ -162,7 +174,9 @@ describe("FindingsPage", () => {
 				(call) =>
 					call.includes(
 						"/api/collections/release%3A2026.05/findings/active?",
-					) && call.includes("package_name=openssl"),
+					) &&
+					call.includes("package_name=openssl") &&
+					call.includes("governance_state=suppressed"),
 			),
 		).toBe(true);
 		expect(

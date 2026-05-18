@@ -55,6 +55,7 @@ describe("fetchApiHealth", () => {
 			artifactKind: "container-image",
 			artifactIdentity: "registry.example/payments@sha256:111",
 			minSeverity: "high",
+			governanceState: "open",
 			packageName: "openssl",
 		});
 
@@ -62,6 +63,7 @@ describe("fetchApiHealth", () => {
 		expect(calls[0]).toContain("component_key=component%3Apayments-api");
 		expect(calls[0]).toContain("artifact_kind=container-image");
 		expect(calls[0]).toContain("min_severity=high");
+		expect(calls[0]).toContain("governance_state=open");
 		expect(calls[0]).toContain("package_name=openssl");
 	});
 
@@ -139,6 +141,7 @@ describe("fetchApiHealth", () => {
 		await fetchCollectionActiveFindings({
 			collectionKey: "release:2026.05",
 			minSeverity: "high",
+			governanceState: "suppressed",
 			packageName: "openssl",
 		});
 
@@ -166,6 +169,7 @@ describe("fetchApiHealth", () => {
 			"/api/collections/release%3A2026.05/findings/active?",
 		);
 		expect(calls[6]?.input).toContain("min_severity=high");
+		expect(calls[6]?.input).toContain("governance_state=suppressed");
 		expect(calls[6]?.input).toContain("package_name=openssl");
 	});
 

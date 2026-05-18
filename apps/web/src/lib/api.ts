@@ -19,6 +19,7 @@ export type ActiveFindingsResponse = {
 	artifact_kind: string;
 	artifact_identity: string;
 	min_severity: string | null;
+	governance_state: string | null;
 	package_name: string | null;
 	total_active_findings: number;
 	returned: number;
@@ -32,6 +33,7 @@ export type CollectionActiveFinding = ActiveFinding;
 export type CollectionActiveFindingsResponse = {
 	collection_key: string;
 	min_severity: string | null;
+	governance_state: string | null;
 	package_name: string | null;
 	total_active_findings: number;
 	returned: number;
@@ -45,6 +47,7 @@ export type ActiveFindingsRequest = {
 	artifactKind: string;
 	artifactIdentity: string;
 	minSeverity?: string;
+	governanceState?: string;
 	packageName?: string;
 	limit?: number;
 	offset?: number;
@@ -53,6 +56,7 @@ export type ActiveFindingsRequest = {
 export type CollectionActiveFindingsRequest = {
 	collectionKey: string;
 	minSeverity?: string;
+	governanceState?: string;
 	packageName?: string;
 	limit?: number;
 	offset?: number;
@@ -278,6 +282,10 @@ export async function fetchActiveFindings(
 		params.set("min_severity", request.minSeverity);
 	}
 
+	if (request.governanceState && request.governanceState !== "all") {
+		params.set("governance_state", request.governanceState);
+	}
+
 	if (request.packageName) {
 		params.set("package_name", request.packageName);
 	}
@@ -302,6 +310,10 @@ export async function fetchCollectionActiveFindings(
 
 	if (request.minSeverity && request.minSeverity !== "all") {
 		params.set("min_severity", request.minSeverity);
+	}
+
+	if (request.governanceState && request.governanceState !== "all") {
+		params.set("governance_state", request.governanceState);
 	}
 
 	if (request.packageName) {

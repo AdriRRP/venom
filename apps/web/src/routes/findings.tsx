@@ -20,6 +20,7 @@ import {
 const defaultCollectionRequest = {
 	collectionKey: "release:2026.05",
 	minSeverity: "all",
+	governanceState: "all",
 	packageName: "",
 	limit: 50,
 	offset: 0,
@@ -30,6 +31,7 @@ const defaultArtifactRequest = {
 	artifactKind: "container-image",
 	artifactIdentity: "registry.example/payments@sha256:111",
 	minSeverity: "all",
+	governanceState: "all",
 	packageName: "",
 	limit: 50,
 	offset: 0,
@@ -288,6 +290,7 @@ export function FindingsPage() {
 						setCollectionRequest({
 							collectionKey: String(formData.get("collectionKey") ?? ""),
 							minSeverity: String(formData.get("minSeverity") ?? "all"),
+							governanceState: String(formData.get("governanceState") ?? "all"),
 							packageName: String(formData.get("packageName") ?? ""),
 							limit: Number(formData.get("limit") ?? 50),
 							offset: 0,
@@ -319,6 +322,18 @@ export function FindingsPage() {
 							<option value="medium">medium</option>
 							<option value="high">high</option>
 							<option value="critical">critical</option>
+						</select>
+					</label>
+					<label>
+						Governance
+						<select
+							defaultValue={collectionRequest.governanceState}
+							name="governanceState"
+						>
+							<option value="all">all</option>
+							<option value="open">open</option>
+							<option value="risk-accepted">risk-accepted</option>
+							<option value="suppressed">suppressed</option>
 						</select>
 					</label>
 					<label>
@@ -569,6 +584,7 @@ export function FindingsPage() {
 							),
 							artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
 							minSeverity: String(formData.get("minSeverity") ?? "all"),
+							governanceState: String(formData.get("governanceState") ?? "all"),
 							packageName: String(formData.get("packageName") ?? ""),
 							limit: Number(formData.get("limit") ?? 50),
 							offset: 0,
@@ -605,6 +621,18 @@ export function FindingsPage() {
 							defaultValue={artifactRequest.packageName}
 							name="packageName"
 						/>
+					</label>
+					<label>
+						Governance
+						<select
+							defaultValue={artifactRequest.governanceState}
+							name="governanceState"
+						>
+							<option value="all">all</option>
+							<option value="open">open</option>
+							<option value="risk-accepted">risk-accepted</option>
+							<option value="suppressed">suppressed</option>
+						</select>
 					</label>
 					<label>
 						Minimum severity
