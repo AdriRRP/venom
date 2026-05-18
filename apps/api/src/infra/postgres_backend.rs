@@ -8,7 +8,7 @@ use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, EvidenceFreshness,
     FindingChangeSet, FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding,
-    RiskAcceptance, ScanRequest,
+    RiskAcceptance, ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -440,6 +440,55 @@ impl PostgresStore {
             .map_err(|error| format!("postgres finding risk acceptance upsert failed: {error}"))?;
 
             candidate_read_model.accept_risk(finding, acceptance);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(result)
+    }
+
+    /// Durably suppress one currently active finding in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the finding is not active or the durable
+    /// write fails.
+    pub async fn suppress_finding(
+        &mut self,
+        finding: FindingRef,
+        suppression: Suppression,
+    ) -> Result<SuppressFindingResult, String> {
+        if !self.read_model.has_active_finding(&finding) {
+            return Err("cannot suppress an inactive finding".to_owned());
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.suppress(finding.clone(), suppression.clone());
+        if result.change == SuppressFindingChange::Suppressed {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} ",
+                    "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
+                    "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                    "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
+                ),
+                self.names.finding_suppressions
+            ))
+            .bind(finding.component_key.as_ref())
+            .bind(artifact_kind_name(finding.artifact.kind))
+            .bind(finding.artifact.identity.as_ref())
+            .bind(finding.vulnerability_id.as_ref())
+            .bind(finding.package.name.as_ref())
+            .bind(finding.package.version.as_ref())
+            .bind(finding.package.purl.as_deref().unwrap_or(""))
+            .bind(suppression.reason.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres finding suppression upsert failed: {error}"))?;
+
+            candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
         }
@@ -1107,6 +1156,7 @@ impl PostgresStore {
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
         self.create_finding_risk_acceptances_table().await?;
+        self.create_finding_suppressions_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
 
@@ -1314,6 +1364,31 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_finding_suppressions_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT NOT NULL, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "vulnerability_id TEXT NOT NULL, ",
+                "package_name TEXT NOT NULL, ",
+                "package_version TEXT NOT NULL, ",
+                "package_purl TEXT NOT NULL DEFAULT '', ",
+                "reason TEXT NOT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "PRIMARY KEY (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
+                ")"
+            ),
+            self.names.finding_suppressions
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres finding suppressions table create failed: {error}"))?;
+        Ok(())
+    }
+
     async fn create_scan_commands_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -1382,6 +1457,7 @@ impl PostgresStore {
         self.load_integration_runtime_config().await?;
         self.load_provider_reports().await?;
         self.load_finding_risk_acceptances().await?;
+        self.load_finding_suppressions().await?;
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
 
@@ -1658,6 +1734,52 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn load_finding_suppressions(&mut self) -> Result<(), String> {
+        let rows = sqlx::query_as::<
+            _,
+            (String, String, String, String, String, String, String, String),
+        >(&format!(
+            concat!(
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, reason ",
+                "FROM {} ORDER BY created_at"
+            ),
+            self.names.finding_suppressions
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres finding suppressions load failed: {error}"))?;
+
+        for (
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            vulnerability_id,
+            package_name,
+            package_version,
+            package_purl,
+            reason,
+        ) in rows
+        {
+            let finding = FindingRef::new(
+                component_key,
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                vulnerability_id,
+                venom_domain::PackageCoordinate {
+                    name: package_name.into_boxed_str(),
+                    version: package_version.into_boxed_str(),
+                    purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+                },
+            );
+            let suppression = Suppression::new(reason);
+            self.governance
+                .replay_suppression(finding.clone(), suppression.clone());
+            self.read_model.replay_suppression(finding, suppression);
+        }
+
+        Ok(())
+    }
+
     async fn load_provider_runtime_configs(&mut self) -> Result<(), String> {
         let configs = sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT component_key, provider_key FROM {} ORDER BY component_key",
@@ -1779,6 +1901,7 @@ struct TableNames {
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
     finding_risk_acceptances: Box<str>,
+    finding_suppressions: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
 }
@@ -1798,6 +1921,7 @@ impl TableNames {
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
+            finding_suppressions: format!("{schema}.finding_suppressions").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
             schema,

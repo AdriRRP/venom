@@ -9,7 +9,8 @@ use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
     EvidenceFreshness, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
+    RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult,
+    Suppression,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -659,6 +660,62 @@ impl ApiApplication {
             governance_state: "risk-accepted".to_owned(),
             governance_reason: result.acceptance.reason.into(),
             governance_until_unix_ms: result.acceptance.until_unix_ms,
+        })
+    }
+
+    /// Suppress one currently active finding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the finding
+    /// is not active, or the durable write fails.
+    pub async fn suppress_finding(
+        &mut self,
+        request: SuppressFindingRequest,
+    ) -> Result<SuppressFindingResponse, ApiApplicationError> {
+        let finding = build_finding_ref(
+            &request.component_key,
+            &request.artifact_kind,
+            &request.artifact_identity,
+            &request.vulnerability_id,
+            &request.package_name,
+            &request.package_version,
+            request.package_purl.as_deref(),
+        )?;
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "suppression reason must not be empty".to_owned(),
+            ));
+        }
+        let suppression = Suppression::new(request.reason.clone());
+
+        let result: SuppressFindingResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .suppress_finding(finding, suppression.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingFinding(_) => {
+                        ApiApplicationError::NotFound(error.to_string())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .suppress_finding(finding, suppression.clone())
+                .await
+                .map_err(|error| {
+                    if error == "cannot suppress an inactive finding" {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(SuppressFindingResponse {
+            change: result.change.as_str().to_owned(),
+            governance_state: "suppressed".to_owned(),
+            governance_reason: result.suppression.reason.into(),
+            governance_until_unix_ms: None,
         })
     }
 
@@ -1321,6 +1378,26 @@ pub struct AcceptRiskRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AcceptRiskResponse {
+    pub change: String,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuppressFindingRequest {
+    pub component_key: String,
+    pub artifact_kind: String,
+    pub artifact_identity: String,
+    pub vulnerability_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub package_purl: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SuppressFindingResponse {
     pub change: String,
     pub governance_state: String,
     pub governance_reason: String,
