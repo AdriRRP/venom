@@ -100,7 +100,10 @@ pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/components", post(register_component))
-        .route("/context-profiles", post(register_context_profile).get(list_context_profiles))
+        .route(
+            "/context-profiles",
+            post(register_context_profile).get(list_context_profiles),
+        )
         .route(
             "/collections",
             post(register_collection).get(list_collections),
@@ -1010,7 +1013,10 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["managed_context_profiles"], 1);
-        assert_eq!(payload["profiles"][0]["profile_key"], "context:internet-prod");
+        assert_eq!(
+            payload["profiles"][0]["profile_key"],
+            "context:internet-prod"
+        );
         assert_eq!(payload["profiles"][0]["internet_exposed"], true);
         assert_eq!(payload["profiles"][0]["production"], true);
         assert_eq!(payload["profiles"][0]["mission_critical"], true);
@@ -1739,7 +1745,10 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["managed_context_profiles"], 1);
-        assert_eq!(payload["profiles"][0]["profile_key"], "context:internet-prod");
+        assert_eq!(
+            payload["profiles"][0]["profile_key"],
+            "context:internet-prod"
+        );
         assert_eq!(payload["profiles"][0]["internet_exposed"], true);
         assert_eq!(payload["profiles"][0]["production"], true);
         assert_eq!(payload["profiles"][0]["mission_critical"], true);

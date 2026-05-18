@@ -16,8 +16,8 @@ use venom_domain::integration::{
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
-    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, CollectionRegistration, ComponentInventory, ComponentRegistration,
+    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
+    CollectionRegistration, ComponentInventory, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
@@ -1274,7 +1274,9 @@ impl PostgresStore {
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
-            self.names.component_context_profiles, self.names.components, self.names.context_profiles
+            self.names.component_context_profiles,
+            self.names.components,
+            self.names.context_profiles
         ))
         .execute(&self.pool)
         .await
@@ -1623,16 +1625,15 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres context profiles load failed: {error}"))?;
         for (profile_key, name, internet_exposed, production, mission_critical) in profiles {
-            let result = self
-                .ingestion
-                .inventory_mut()
-                .register_context_profile(ContextProfileRegistration::new(
+            let result = self.ingestion.inventory_mut().register_context_profile(
+                ContextProfileRegistration::new(
                     profile_key,
                     name,
                     internet_exposed,
                     production,
                     mission_critical,
-                ));
+                ),
+            );
             if result.change == RegisterContextProfileChange::Rejected {
                 return Err("postgres context profiles contain conflicting registration".to_owned());
             }
@@ -1642,9 +1643,7 @@ impl PostgresStore {
 
     async fn load_component_context_profiles(&mut self) -> Result<(), String> {
         let assignments = sqlx::query_as::<_, (String, String)>(&format!(
-            concat!(
-                "SELECT component_key, profile_key FROM {} ORDER BY component_key"
-            ),
+            concat!("SELECT component_key, profile_key FROM {} ORDER BY component_key"),
             self.names.component_context_profiles
         ))
         .fetch_all(&self.pool)

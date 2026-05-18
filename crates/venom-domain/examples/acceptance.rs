@@ -16,7 +16,7 @@ use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
     ComponentRegistration, ConfigureCollectionScanScheduleResult, ContextProfileRegistration,
     ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
-    };
+};
 use venom_domain::scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
     RunNextScanResult, ScanCommandQueue, ScanExecutionResult, ScanPlanner, ScanPlanningError,
@@ -353,19 +353,19 @@ async fn venom_durably_registers_context_profile(
     match world
         .durable_state_mut()
         .register_context_profile(ContextProfileRegistration::new(
-            profile_key, name, true, true, true,
+            profile_key,
+            name,
+            true,
+            true,
+            true,
         )) {
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
     }
 }
 
-#[given(
-    expr = "VENOM durably assigns context profile {string} to component {string}"
-)]
-#[when(
-    expr = "VENOM durably assigns context profile {string} to component {string}"
-)]
+#[given(expr = "VENOM durably assigns context profile {string} to component {string}")]
+#[when(expr = "VENOM durably assigns context profile {string} to component {string}")]
 async fn venom_durably_assigns_context_profile(
     world: &mut AcceptanceWorld,
     profile_key: String,

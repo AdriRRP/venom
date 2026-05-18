@@ -45,6 +45,7 @@ durable, explicit runtime context rather than ad hoc input.
 | `W72-S01` | done | add durable context profiles and component assignment to the domain inventory | unit and acceptance checks |
 | `W72-S02` | done | expose context profile creation, listing, and component assignment through API and Postgres | integration checks |
 | `W72-S03` | done | let operators manage context profiles from the console and prove the flow through browser-driven smoke | web and e2e checks |
+| `W72-S04` | done | normalize Rust formatting and close the wave on a clean committed tree | full wave gate |
 
 ## Language impact
 

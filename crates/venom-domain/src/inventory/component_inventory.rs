@@ -847,13 +847,15 @@ impl ComponentInventory {
 
     #[must_use]
     pub fn context_profile(&self, profile_key: &str) -> Option<ManagedContextProfile> {
-        self.context_profiles.get(profile_key).map(|record| ManagedContextProfile {
-            profile_key: record.registration.profile_key.clone(),
-            name: record.registration.name.clone(),
-            internet_exposed: record.registration.internet_exposed,
-            production: record.registration.production,
-            mission_critical: record.registration.mission_critical,
-        })
+        self.context_profiles
+            .get(profile_key)
+            .map(|record| ManagedContextProfile {
+                profile_key: record.registration.profile_key.clone(),
+                name: record.registration.name.clone(),
+                internet_exposed: record.registration.internet_exposed,
+                production: record.registration.production,
+                mission_critical: record.registration.mission_critical,
+            })
     }
 
     #[must_use]
