@@ -103,18 +103,18 @@ pub fn contextual_risk_level(
         + u8::from(context_profile.production)
         + u8::from(context_profile.mission_critical);
 
-    match (severity, context_pressure) {
-        (Severity::Unknown, _) => ContextualRiskLevel::Unknown,
-        (Severity::None, _) => ContextualRiskLevel::None,
-        (Severity::Critical, _) => ContextualRiskLevel::Critical,
-        (Severity::High, 0) => ContextualRiskLevel::High,
-        (Severity::High, _) => ContextualRiskLevel::Critical,
-        (Severity::Medium, 0) => ContextualRiskLevel::Medium,
-        (Severity::Medium, 1) => ContextualRiskLevel::High,
-        (Severity::Medium, _) => ContextualRiskLevel::Critical,
-        (Severity::Low, 0) => ContextualRiskLevel::Low,
-        (Severity::Low, 1 | 2) => ContextualRiskLevel::Medium,
-        (Severity::Low, _) => ContextualRiskLevel::High,
+    match severity {
+        Severity::Unknown => ContextualRiskLevel::Unknown,
+        Severity::None => ContextualRiskLevel::None,
+        Severity::Critical => ContextualRiskLevel::Critical,
+        Severity::High if context_pressure == 0 => ContextualRiskLevel::High,
+        Severity::High => ContextualRiskLevel::Critical,
+        Severity::Medium if context_pressure == 0 => ContextualRiskLevel::Medium,
+        Severity::Medium if context_pressure == 1 => ContextualRiskLevel::High,
+        Severity::Medium => ContextualRiskLevel::Critical,
+        Severity::Low if context_pressure == 0 => ContextualRiskLevel::Low,
+        Severity::Low if context_pressure <= 2 => ContextualRiskLevel::Medium,
+        Severity::Low => ContextualRiskLevel::High,
     }
 }
 
