@@ -1,3 +1,4 @@
+pub mod collection_governance_overview;
 pub mod collection_health;
 pub mod contextual_risk;
 pub mod finding_governance;
@@ -7,6 +8,9 @@ pub mod finding_provider_contract;
 pub mod finding_read_model;
 pub mod finding_tracker;
 
+pub use collection_governance_overview::{
+    CollectionGovernanceOverview, query_collection_governance_overview,
+};
 pub use collection_health::{CollectionHealthSummary, summarize_collection_health};
 pub use contextual_risk::{
     ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level,

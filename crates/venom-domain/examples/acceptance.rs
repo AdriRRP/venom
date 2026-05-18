@@ -11,7 +11,8 @@ use venom_domain::findings::{
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
     RiskAcceptance, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
-    Suppression, contextualize_active_findings, summarize_collection_health,
+    Suppression, contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -1103,6 +1104,33 @@ async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection
         durable_state.read_model(),
         &scope,
     ));
+}
+
+#[when(
+    expr = "VENOM queries collection governance overview for {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_collection_governance_overview(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let durable_state = world.durable_state_ref();
+    let overview = query_collection_governance_overview(
+        durable_state.ingestion().inventory(),
+        durable_state.read_model(),
+        &collection_key,
+        &ScopedActiveFindingsQuery::new()
+            .with_governance_state(parse_governance_state(&governance_state))
+            .with_min_severity(parse_severity(&min_severity))
+            .with_offset(offset)
+            .with_limit(limit),
+    )
+    .expect("collection governance overview should exist");
+    world.last_collection_health_summary = Some(overview.health);
+    world.last_scoped_active_findings_page = Some(overview.page);
 }
 
 #[then(expr = "the component {string} is under management")]
@@ -2303,6 +2331,7 @@ async fn main() {
         "filter-governed-findings.feature",
         "classify-finding.feature",
         "manage-context-profiles.feature",
+        "view-collection-governance.feature",
         "view-collection-health.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
