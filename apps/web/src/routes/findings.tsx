@@ -261,6 +261,30 @@ export function FindingsPage() {
 			? "Submit Suppression"
 			: "Submit Risk Acceptance";
 
+	function submitCollectionQuery(formData: FormData) {
+		setCollectionRequest({
+			collectionKey: String(formData.get("collectionKey") ?? ""),
+			minSeverity: String(formData.get("minSeverity") ?? "all"),
+			governanceState: String(formData.get("governanceState") ?? "all"),
+			packageName: String(formData.get("packageName") ?? ""),
+			limit: Number(formData.get("limit") ?? 50),
+			offset: 0,
+		});
+	}
+
+	function submitArtifactQuery(formData: FormData) {
+		setArtifactRequest({
+			componentKey: String(formData.get("componentKey") ?? ""),
+			artifactKind: String(formData.get("artifactKind") ?? "container-image"),
+			artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
+			minSeverity: String(formData.get("minSeverity") ?? "all"),
+			governanceState: String(formData.get("governanceState") ?? "all"),
+			packageName: String(formData.get("packageName") ?? ""),
+			limit: Number(formData.get("limit") ?? 50),
+			offset: 0,
+		});
+	}
+
 	return (
 		<AppShell apiHealth={healthLabel} currentView="findings">
 			<section className="panel">
@@ -286,15 +310,7 @@ export function FindingsPage() {
 					className="filters"
 					onSubmit={(event) => {
 						event.preventDefault();
-						const formData = new FormData(event.currentTarget);
-						setCollectionRequest({
-							collectionKey: String(formData.get("collectionKey") ?? ""),
-							minSeverity: String(formData.get("minSeverity") ?? "all"),
-							governanceState: String(formData.get("governanceState") ?? "all"),
-							packageName: String(formData.get("packageName") ?? ""),
-							limit: Number(formData.get("limit") ?? 50),
-							offset: 0,
-						});
+						submitCollectionQuery(new FormData(event.currentTarget));
 					}}
 				>
 					<label>
@@ -345,7 +361,17 @@ export function FindingsPage() {
 							type="number"
 						/>
 					</label>
-					<button className="primary-button" type="submit">
+					<button
+						className="primary-button"
+						onClick={(event) => {
+							event.preventDefault();
+							const form = event.currentTarget.form;
+							if (form) {
+								submitCollectionQuery(new FormData(form));
+							}
+						}}
+						type="button"
+					>
 						Query Collection
 					</button>
 				</form>
@@ -576,19 +602,7 @@ export function FindingsPage() {
 					className="filters"
 					onSubmit={(event) => {
 						event.preventDefault();
-						const formData = new FormData(event.currentTarget);
-						setArtifactRequest({
-							componentKey: String(formData.get("componentKey") ?? ""),
-							artifactKind: String(
-								formData.get("artifactKind") ?? "container-image",
-							),
-							artifactIdentity: String(formData.get("artifactIdentity") ?? ""),
-							minSeverity: String(formData.get("minSeverity") ?? "all"),
-							governanceState: String(formData.get("governanceState") ?? "all"),
-							packageName: String(formData.get("packageName") ?? ""),
-							limit: Number(formData.get("limit") ?? 50),
-							offset: 0,
-						});
+						submitArtifactQuery(new FormData(event.currentTarget));
 					}}
 				>
 					<label>
@@ -656,7 +670,17 @@ export function FindingsPage() {
 							type="number"
 						/>
 					</label>
-					<button className="primary-button" type="submit">
+					<button
+						className="primary-button"
+						onClick={(event) => {
+							event.preventDefault();
+							const form = event.currentTarget.form;
+							if (form) {
+								submitArtifactQuery(new FormData(form));
+							}
+						}}
+						type="button"
+					>
 						Query Artifact
 					</button>
 				</form>
