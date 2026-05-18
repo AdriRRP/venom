@@ -9,6 +9,9 @@ export type ActiveFinding = {
 	package_version: string;
 	package_purl: string | null;
 	severity: string;
+	contextual_risk: string;
+	context_profile_key: string | null;
+	context_profile_name: string | null;
 	governance_state: string;
 	governance_reason: string | null;
 	governance_until_unix_ms: number | null;

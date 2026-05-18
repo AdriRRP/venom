@@ -112,6 +112,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: "open",
 								governance_reason: null,
 								governance_until_unix_ms: null,
@@ -184,6 +187,12 @@ describe("FindingsPage", () => {
 				"container-image:registry.example/payments@sha256:111",
 			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "critical" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "Internet Production" }),
+		).toBeInTheDocument();
 	});
 
 	it("moves between artifact pages with bounded controls", async () => {
@@ -229,6 +238,9 @@ describe("FindingsPage", () => {
 								package_version: "1.3.1",
 								package_purl: null,
 								severity: "medium",
+								contextual_risk: "medium",
+								context_profile_key: null,
+								context_profile_name: null,
 								governance_state: "open",
 								governance_reason: null,
 								governance_until_unix_ms: null,
@@ -259,6 +271,9 @@ describe("FindingsPage", () => {
 							package_version: "3.0.0",
 							package_purl: null,
 							severity: "high",
+							contextual_risk: "high",
+							context_profile_key: null,
+							context_profile_name: null,
 							governance_state: "open",
 							governance_reason: null,
 							governance_until_unix_ms: null,
@@ -340,6 +355,9 @@ describe("FindingsPage", () => {
 									package_version: "3.0.0",
 									package_purl: null,
 									severity: "high",
+									contextual_risk: accepted ? "critical" : "critical",
+									context_profile_key: "context:internet-prod",
+									context_profile_name: "Internet Production",
 									governance_state: accepted ? "risk-accepted" : "open",
 									governance_reason: accepted
 										? "Compensating control in place"
@@ -372,6 +390,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: accepted ? "critical" : "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: accepted ? "risk-accepted" : "open",
 								governance_reason: accepted
 									? "Compensating control in place"
@@ -450,6 +471,9 @@ describe("FindingsPage", () => {
 									package_version: "3.0.0",
 									package_purl: null,
 									severity: "high",
+									contextual_risk: suppressed ? "critical" : "critical",
+									context_profile_key: "context:internet-prod",
+									context_profile_name: "Internet Production",
 									governance_state: suppressed ? "suppressed" : "open",
 									governance_reason: suppressed
 										? "Known upstream false alarm"
@@ -482,6 +506,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: suppressed ? "critical" : "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: suppressed ? "suppressed" : "open",
 								governance_reason: suppressed
 									? "Known upstream false alarm"

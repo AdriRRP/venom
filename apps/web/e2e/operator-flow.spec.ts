@@ -173,6 +173,12 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByRole("cell", { name: "openssl@3.0.0" }),
 	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("cell", { name: "critical" }),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("cell", { name: "Internet Production" }),
+	).toBeVisible();
 	await collectionPanel.getByRole("button", { name: "Accept Risk" }).click();
 	await page
 		.getByRole("textbox", { name: "Reason" })

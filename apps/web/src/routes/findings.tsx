@@ -52,6 +52,10 @@ const collectionColumns: ColumnDef<CollectionActiveFinding>[] = [
 		accessorKey: "severity",
 	},
 	{
+		header: "Risk",
+		accessorKey: "contextual_risk",
+	},
+	{
 		header: "Vulnerability",
 		accessorKey: "vulnerability_id",
 	},
@@ -59,6 +63,10 @@ const collectionColumns: ColumnDef<CollectionActiveFinding>[] = [
 		header: "Package",
 		cell: ({ row }) =>
 			`${row.original.package_name}@${row.original.package_version}`,
+	},
+	{
+		header: "Context",
+		cell: ({ row }) => row.original.context_profile_name ?? "unassigned",
 	},
 ];
 
@@ -68,6 +76,10 @@ const artifactColumns: ColumnDef<ActiveFinding>[] = [
 		accessorKey: "severity",
 	},
 	{
+		header: "Risk",
+		accessorKey: "contextual_risk",
+	},
+	{
 		header: "Vulnerability",
 		accessorKey: "vulnerability_id",
 	},
@@ -75,6 +87,10 @@ const artifactColumns: ColumnDef<ActiveFinding>[] = [
 		header: "Package",
 		cell: ({ row }) =>
 			`${row.original.package_name}@${row.original.package_version}`,
+	},
+	{
+		header: "Context",
+		cell: ({ row }) => row.original.context_profile_name ?? "unassigned",
 	},
 ];
 
