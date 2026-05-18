@@ -7,9 +7,10 @@ use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
-    FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
+    FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
+    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery, Severity, Suppression,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -654,6 +655,90 @@ async fn venom_durably_records_the_provider_scan_report(world: &mut AcceptanceWo
     }
 }
 
+#[when(
+    expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
+)]
+async fn venom_durably_accepts_risk(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    component_key: String,
+    artifact_identity: String,
+    reason: String,
+) {
+    let finding = FindingRef::new(
+        component_key,
+        ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity),
+        vulnerability_id,
+        PackageCoordinate::new(package_name, package_version),
+    );
+    match world
+        .durable_state_mut()
+        .accept_risk(finding, RiskAcceptance::new(reason))
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably accepts risk for vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string} until unix ms {int}"
+)]
+#[allow(clippy::too_many_arguments)]
+async fn venom_durably_accepts_risk_until(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    component_key: String,
+    artifact_identity: String,
+    reason: String,
+    until_unix_ms: usize,
+) {
+    let finding = FindingRef::new(
+        component_key,
+        ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity),
+        vulnerability_id,
+        PackageCoordinate::new(package_name, package_version),
+    );
+    match world.durable_state_mut().accept_risk(
+        finding,
+        RiskAcceptance::new(reason)
+            .until_unix_ms(u64::try_from(until_unix_ms).expect("until should fit u64")),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably suppresses vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
+)]
+async fn venom_durably_suppresses_finding(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    component_key: String,
+    artifact_identity: String,
+    reason: String,
+) {
+    let finding = FindingRef::new(
+        component_key,
+        ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity),
+        vulnerability_id,
+        PackageCoordinate::new(package_name, package_version),
+    );
+    match world
+        .durable_state_mut()
+        .suppress_finding(finding, Suppression::new(reason))
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[when("VENOM durably runs the next queued scan")]
 async fn venom_durably_runs_the_next_queued_scan(world: &mut AcceptanceWorld) {
     let provider = AcceptanceFindingProvider {
@@ -734,6 +819,31 @@ async fn venom_queries_active_findings_for_component_and_artifact(
 }
 
 #[when(
+    expr = "VENOM queries active findings for component {string} and artifact {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_component_and_artifact_with_governance(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    artifact_identity: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    let query = ActiveFindingsQuery::new(component_key, artifact)
+        .with_governance_state(parse_governance_state(&governance_state))
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_active_findings(&query);
+    world.last_active_findings_page = Some(page);
+}
+
+#[when(
     expr = "VENOM queries active findings for collection {string} with minimum severity {string}, offset {int}, and limit {int}"
 )]
 async fn venom_queries_active_findings_for_collection(
@@ -750,6 +860,35 @@ async fn venom_queries_active_findings_for_collection(
         .collection_scoped_artifacts(&collection_key)
         .expect("collection scope must exist before scoped finding query");
     let query = ScopedActiveFindingsQuery::new()
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_scoped_active_findings(&scope, &query);
+    world.last_scoped_active_findings_page = Some(page);
+}
+
+#[when(
+    expr = "VENOM queries active findings for collection {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_active_findings_for_collection_with_governance(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let scope = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before scoped finding query");
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(parse_governance_state(&governance_state))
         .with_min_severity(parse_severity(&min_severity))
         .with_offset(offset)
         .with_limit(limit);
@@ -1473,9 +1612,54 @@ async fn the_first_active_finding_vulnerability_is(world: &mut AcceptanceWorld, 
             .findings
             .first()
             .expect("an active finding must exist before first-finding assertions")
+            .finding
             .vulnerability_id
             .as_ref(),
         expected.as_str()
+    );
+}
+
+#[then(expr = "the first active finding governance state is {string}")]
+async fn the_first_active_finding_governance_state_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_active_findings_page(world)
+            .findings
+            .first()
+            .expect("an active finding must exist before governance assertions")
+            .governance_state
+            .as_str(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first active finding governance reason is {string}")]
+async fn the_first_active_finding_governance_reason_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_active_findings_page(world)
+            .findings
+            .first()
+            .and_then(|finding| finding.governance_reason.as_deref()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(expr = "the first active finding governance until unix ms is {int}")]
+async fn the_first_active_finding_governance_until_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_active_findings_page(world)
+            .findings
+            .first()
+            .and_then(|finding| finding.governance_until_unix_ms),
+        Some(u64::try_from(expected).expect("expected until should fit u64"))
     );
 }
 
@@ -1502,6 +1686,7 @@ async fn the_first_scoped_active_finding_component_is(
             .findings
             .first()
             .expect("a scoped active finding must exist before first-finding assertions")
+            .finding
             .component_key
             .as_ref(),
         expected.as_str()
@@ -1518,6 +1703,7 @@ async fn the_first_scoped_active_finding_artifact_is(
             .findings
             .first()
             .expect("a scoped active finding must exist before first-finding assertions")
+            .finding
             .artifact
             .identity
             .as_ref(),
@@ -1539,6 +1725,36 @@ async fn the_first_scoped_active_finding_vulnerability_is(
             .vulnerability_id
             .as_ref(),
         expected.as_str()
+    );
+}
+
+#[then(expr = "the first scoped active finding governance state is {string}")]
+async fn the_first_scoped_active_finding_governance_state_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .first()
+            .expect("a scoped active finding must exist before governance assertions")
+            .governance_state
+            .as_str(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first scoped active finding governance reason is {string}")]
+async fn the_first_scoped_active_finding_governance_reason_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .first()
+            .and_then(|finding| finding.governance_reason.as_deref()),
+        Some(expected.as_str())
     );
 }
 
@@ -1733,6 +1949,15 @@ fn parse_severity(value: &str) -> Severity {
     }
 }
 
+fn parse_governance_state(value: &str) -> FindingGovernanceState {
+    match value {
+        "open" => FindingGovernanceState::Open,
+        "risk-accepted" => FindingGovernanceState::RiskAccepted,
+        "suppressed" => FindingGovernanceState::Suppressed,
+        _ => panic!("unsupported governance state in acceptance step: {value}"),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let base = format!("{}/../../features", env!("CARGO_MANIFEST_DIR"));
@@ -1743,6 +1968,8 @@ async fn main() {
         "schedule-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
+        "suppress-finding.feature",
+        "filter-governed-findings.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {

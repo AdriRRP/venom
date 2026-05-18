@@ -6,12 +6,14 @@ pub mod scanning;
 
 pub use durable_state::{DurableState, DurableStateError};
 pub use findings::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet, FindingIngestion,
-    FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, ScanRequest, ScopedActiveFinding,
-    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
+    AcceptRiskChange, AcceptRiskResult, ActiveFindingProjection, ActiveFindingsPage,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+    EvidenceFreshness, FindingChangeSet, FindingDecision, FindingGovernance,
+    FindingGovernanceState, FindingIngestion, FindingIngestionError, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, FindingTracker,
+    MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,

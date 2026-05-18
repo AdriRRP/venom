@@ -82,7 +82,7 @@ describe("FindingsPage", () => {
 		expect(screen.getByText("No active findings yet.")).toBeInTheDocument();
 	});
 
-	it("submits the collection query with package filter", async () => {
+	it("submits the collection query with package and governance filters", async () => {
 		const calls: string[] = [];
 
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
@@ -96,6 +96,7 @@ describe("FindingsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						min_severity: "high",
+						governance_state: "suppressed",
 						package_name: "openssl",
 						total_active_findings: 1,
 						returned: 1,
@@ -109,7 +110,11 @@ describe("FindingsPage", () => {
 								vulnerability_id: "CVE-2026-0001",
 								package_name: "openssl",
 								package_version: "3.0.0",
+								package_purl: null,
 								severity: "high",
+								governance_state: "open",
+								governance_reason: null,
+								governance_until_unix_ms: null,
 							},
 						],
 					}),
@@ -150,6 +155,17 @@ describe("FindingsPage", () => {
 		fireEvent.change(collectionPackageInput, {
 			target: { value: "openssl" },
 		});
+		const governanceSelects = screen.getAllByRole("combobox", {
+			name: "Governance",
+		});
+		const collectionGovernanceSelect = governanceSelects[0];
+		expect(collectionGovernanceSelect).toBeDefined();
+		if (!collectionGovernanceSelect) {
+			throw new Error("expected collection governance select");
+		}
+		fireEvent.change(collectionGovernanceSelect, {
+			target: { value: "suppressed" },
+		});
 		fireEvent.click(screen.getByRole("button", { name: "Query Collection" }));
 
 		expect(await screen.findByText("Showing 1-1 of 1")).toBeInTheDocument();
@@ -158,7 +174,9 @@ describe("FindingsPage", () => {
 				(call) =>
 					call.includes(
 						"/api/collections/release%3A2026.05/findings/active?",
-					) && call.includes("package_name=openssl"),
+					) &&
+					call.includes("package_name=openssl") &&
+					call.includes("governance_state=suppressed"),
 			),
 		).toBe(true);
 		expect(
@@ -203,10 +221,17 @@ describe("FindingsPage", () => {
 						limit: 1,
 						active_findings: [
 							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
 								vulnerability_id: "CVE-2026-0002",
 								package_name: "zlib",
 								package_version: "1.3.1",
+								package_purl: null,
 								severity: "medium",
+								governance_state: "open",
+								governance_reason: null,
+								governance_until_unix_ms: null,
 							},
 						],
 					}),
@@ -226,10 +251,17 @@ describe("FindingsPage", () => {
 					limit: 1,
 					active_findings: [
 						{
+							component_key: "component:payments-api",
+							artifact_kind: "container-image",
+							artifact_identity: "registry.example/payments@sha256:111",
 							vulnerability_id: "CVE-2026-0001",
 							package_name: "openssl",
 							package_version: "3.0.0",
+							package_purl: null,
 							severity: "high",
+							governance_state: "open",
+							governance_reason: null,
+							governance_until_unix_ms: null,
 						},
 					],
 				}),
@@ -263,5 +295,225 @@ describe("FindingsPage", () => {
 			screen.getByRole("button", { name: "Previous Artifact Page" }),
 		);
 		expect(await screen.findByText("openssl@3.0.0")).toBeInTheDocument();
+	});
+
+	it("accepts risk for one collection finding and refreshes governance state", async () => {
+		let accepted = false;
+		const methods: string[] = [];
+
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				methods.push(init?.method ?? "GET");
+				if (url.includes("/health")) {
+					return new Response("ok", { status: 200 });
+				}
+				if (url === "/api/findings/risk-acceptance") {
+					accepted = true;
+					return new Response(
+						JSON.stringify({
+							change: "accepted",
+							governance_state: "risk-accepted",
+							governance_reason: "Compensating control in place",
+							governance_until_unix_ms: null,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/collections/")) {
+					return new Response(
+						JSON.stringify({
+							collection_key: "release:2026.05",
+							min_severity: null,
+							package_name: null,
+							total_active_findings: 1,
+							returned: 1,
+							offset: 0,
+							limit: 50,
+							active_findings: [
+								{
+									component_key: "component:payments-api",
+									artifact_kind: "container-image",
+									artifact_identity: "registry.example/payments@sha256:111",
+									vulnerability_id: "CVE-2026-0001",
+									package_name: "openssl",
+									package_version: "3.0.0",
+									package_purl: null,
+									severity: "high",
+									governance_state: accepted ? "risk-accepted" : "open",
+									governance_reason: accepted
+										? "Compensating control in place"
+										: null,
+									governance_until_unix_ms: null,
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						component_key: "component:payments-api",
+						artifact_kind: "container-image",
+						artifact_identity: "registry.example/payments@sha256:111",
+						min_severity: null,
+						package_name: null,
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
+						limit: 50,
+						active_findings: [
+							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
+								vulnerability_id: "CVE-2026-0001",
+								package_name: "openssl",
+								package_version: "3.0.0",
+								package_purl: null,
+								severity: "high",
+								governance_state: accepted ? "risk-accepted" : "open",
+								governance_reason: accepted
+									? "Compensating control in place"
+									: null,
+								governance_until_unix_ms: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<FindingsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(await screen.findByRole("button", { name: "Accept Risk" }));
+		fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), {
+			target: { value: "Compensating control in place" },
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "Submit Risk Acceptance" }),
+		);
+
+		expect(
+			await screen.findByText("Governance: risk-accepted (accepted)."),
+		).toBeInTheDocument();
+		const governedFindings = await screen.findAllByText(
+			"risk-accepted: Compensating control in place",
+		);
+		expect(governedFindings).toHaveLength(2);
+		expect(methods).toContain("POST");
+	});
+
+	it("suppresses one collection finding and refreshes governance state", async () => {
+		let suppressed = false;
+
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, _init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("/health")) {
+					return new Response("ok", { status: 200 });
+				}
+				if (url === "/api/findings/suppression") {
+					suppressed = true;
+					return new Response(
+						JSON.stringify({
+							change: "suppressed",
+							governance_state: "suppressed",
+							governance_reason: "Known upstream false alarm",
+							governance_until_unix_ms: null,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/collections/")) {
+					return new Response(
+						JSON.stringify({
+							collection_key: "release:2026.05",
+							min_severity: null,
+							package_name: null,
+							total_active_findings: 1,
+							returned: 1,
+							offset: 0,
+							limit: 50,
+							active_findings: [
+								{
+									component_key: "component:payments-api",
+									artifact_kind: "container-image",
+									artifact_identity: "registry.example/payments@sha256:111",
+									vulnerability_id: "CVE-2026-0001",
+									package_name: "openssl",
+									package_version: "3.0.0",
+									package_purl: null,
+									severity: "high",
+									governance_state: suppressed ? "suppressed" : "open",
+									governance_reason: suppressed
+										? "Known upstream false alarm"
+										: null,
+									governance_until_unix_ms: null,
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						component_key: "component:payments-api",
+						artifact_kind: "container-image",
+						artifact_identity: "registry.example/payments@sha256:111",
+						min_severity: null,
+						package_name: null,
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
+						limit: 50,
+						active_findings: [
+							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
+								vulnerability_id: "CVE-2026-0001",
+								package_name: "openssl",
+								package_version: "3.0.0",
+								package_purl: null,
+								severity: "high",
+								governance_state: suppressed ? "suppressed" : "open",
+								governance_reason: suppressed
+									? "Known upstream false alarm"
+									: null,
+								governance_until_unix_ms: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<FindingsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(await screen.findByRole("button", { name: "Suppress" }));
+		fireEvent.change(screen.getByRole("textbox", { name: "Reason" }), {
+			target: { value: "Known upstream false alarm" },
+		});
+		fireEvent.click(screen.getByRole("button", { name: "Submit Suppression" }));
+
+		expect(
+			await screen.findByText("Governance: suppressed (suppressed)."),
+		).toBeInTheDocument();
+		const suppressedFindings = await screen.findAllByText(
+			"suppressed: Known upstream false alarm",
+		);
+		expect(suppressedFindings).toHaveLength(2);
+		expect(globalThis.fetch).toHaveBeenCalled();
 	});
 });

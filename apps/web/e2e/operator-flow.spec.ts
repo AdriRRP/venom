@@ -137,4 +137,28 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByRole("cell", { name: "openssl@3.0.0" }),
 	).toBeVisible();
+	await collectionPanel.getByRole("button", { name: "Accept Risk" }).click();
+	await page
+		.getByRole("textbox", { name: "Reason" })
+		.fill("Compensating control in place");
+	await page.getByRole("button", { name: "Submit Risk Acceptance" }).click();
+	await expect(
+		collectionPanel.getByText("risk-accepted: Compensating control in place"),
+	).toBeVisible();
+
+	await collectionPanel.getByRole("button", { name: "Suppress" }).click();
+	await page
+		.getByRole("textbox", { name: "Reason" })
+		.fill("Known upstream false alarm");
+	await page.getByRole("button", { name: "Submit Suppression" }).click();
+	await expect(
+		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("suppressed");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 });

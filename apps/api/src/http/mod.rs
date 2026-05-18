@@ -1,16 +1,18 @@
 use crate::app::service::{
-    self, ActiveFindingsResponse, ApiApplication, ApiReadSnapshot, BindArtifactRequest,
-    BindArtifactResponse, CollectionActiveFindingsResponse, CollectionDetailResponse,
-    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
-    ComponentRegistrationRequest, ConfigureCollectionScanScheduleRequest,
-    ConfigureCollectionScanScheduleResponse, ConfigureIntegrationRuntimeRequest,
-    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
-    DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
-    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
-    DrainWorkerResponse, ListCollectionsResponse, ProviderScanReportRequest,
-    RecordProviderReportResponse, RegisterCollectionResponse, RegisterComponentResponse,
-    RequestCollectionScanCommand, RequestCollectionScanResponse, RequestScanCommand,
-    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
+    self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
+    ApiReadSnapshot, BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
+    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
+    CollectionRegistrationRequest, ComponentRegistrationRequest,
+    ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
+    ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
+    ConfigureProviderRequest, ConfigureProviderResponse, DrainCollectionScanWorkerCommand,
+    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
+    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
+    ListCollectionsResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RequestCollectionScanCommand,
+    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
+    RunNextScanResponse, ScanCommandStatusResponse, SuppressFindingRequest,
+    SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -127,6 +129,8 @@ pub fn build_router(state: ApiState) -> Router {
             post(configure_provider),
         )
         .route("/integration-runtime", post(configure_integration_runtime))
+        .route("/findings/risk-acceptance", post(accept_risk))
+        .route("/findings/suppression", post(suppress_finding))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route(
@@ -322,6 +326,37 @@ async fn record_provider_report(
     Ok(Json(response))
 }
 
+async fn accept_risk(
+    State(state): State<ApiState>,
+    Json(request): Json<AcceptRiskRequest>,
+) -> Result<Json<AcceptRiskResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service.accept_risk(request).await.map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn suppress_finding(
+    State(state): State<ApiState>,
+    Json(request): Json<SuppressFindingRequest>,
+) -> Result<Json<SuppressFindingResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .suppress_finding(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
 async fn request_scan(
     State(state): State<ApiState>,
     Json(request): Json<RequestScanCommand>,
@@ -464,6 +499,7 @@ struct ActiveFindingsQuery {
     artifact_kind: String,
     artifact_identity: String,
     min_severity: Option<String>,
+    governance_state: Option<String>,
     package_name: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -476,6 +512,7 @@ impl ActiveFindingsQuery {
             artifact_kind: self.artifact_kind,
             artifact_identity: self.artifact_identity,
             min_severity: self.min_severity,
+            governance_state: self.governance_state,
             package_name: self.package_name,
             offset: self.offset,
             limit: self.limit,
@@ -486,6 +523,7 @@ impl ActiveFindingsQuery {
 #[derive(Debug, Deserialize)]
 struct CollectionActiveFindingsQuery {
     min_severity: Option<String>,
+    governance_state: Option<String>,
     package_name: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -495,6 +533,7 @@ impl CollectionActiveFindingsQuery {
     fn into_request(self) -> service::CollectionActiveFindingsRequest {
         service::CollectionActiveFindingsRequest {
             min_severity: self.min_severity,
+            governance_state: self.governance_state,
             package_name: self.package_name,
             offset: self.offset,
             limit: self.limit,
@@ -739,6 +778,77 @@ mod tests {
             payload["active_findings"][0]["vulnerability_id"],
             "CVE-2026-0001"
         );
+    }
+
+    #[tokio::test]
+    async fn api_suppresses_one_active_finding_and_projects_the_state() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("suppress-finding", "state"),
+                temp_path("suppress-finding", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null,
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&governance_state=suppressed",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "suppressed"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["governance_reason"],
+            "Known upstream false alarm"
+        );
+        assert_eq!(payload["governance_state"], "suppressed");
     }
 
     #[tokio::test]
@@ -1409,6 +1519,84 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_reloads_suppressed_finding_state() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("suppression_reload");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null,
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = reloaded
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "suppressed"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["governance_reason"],
+            "Known upstream false alarm"
+        );
     }
 
     #[tokio::test]
