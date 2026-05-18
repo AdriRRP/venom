@@ -107,9 +107,7 @@ test("operator console can manage one release collection and execute one schedul
 }) => {
 	await page.goto("/operations");
 
-	await page
-		.getByRole("button", { name: "Register", exact: true })
-		.click();
+	await page.getByRole("button", { name: "Register", exact: true }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
 
 	await page.getByRole("button", { name: "Register Context Profile" }).click();

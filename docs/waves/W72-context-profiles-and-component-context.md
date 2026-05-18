@@ -47,6 +47,7 @@ durable, explicit runtime context rather than ad hoc input.
 | `W72-S03` | done | let operators manage context profiles from the console and prove the flow through browser-driven smoke | web and e2e checks |
 | `W72-S04` | done | normalize Rust formatting and close the wave on a clean committed tree | full wave gate |
 | `W72-S05` | done | remove ambiguous browser selectors so the operator smoke stays stable as the UI grows | full wave gate |
+| `W72-S06` | done | normalize the browser smoke after selector hardening so the frontend gate stays deterministic | full wave gate |
 
 ## Language impact
 
