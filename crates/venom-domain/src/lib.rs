@@ -13,7 +13,8 @@ pub use findings::{
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, FindingTracker,
     MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport, ReportedFinding,
     RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult,
+    Suppression,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,

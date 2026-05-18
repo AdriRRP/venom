@@ -55,10 +55,26 @@ impl RiskAcceptance {
     }
 }
 
+/// Explicit suppression decision owned by VENOM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suppression {
+    pub reason: Box<str>,
+}
+
+impl Suppression {
+    #[must_use]
+    pub fn new(reason: impl Into<Box<str>>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
 /// Durable governance decision for one finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindingDecision {
     RiskAccepted(RiskAcceptance),
+    Suppressed(Suppression),
 }
 
 impl FindingDecision {
@@ -66,6 +82,7 @@ impl FindingDecision {
     pub const fn state(&self) -> FindingGovernanceState {
         match self {
             Self::RiskAccepted(_) => FindingGovernanceState::RiskAccepted,
+            Self::Suppressed(_) => FindingGovernanceState::Suppressed,
         }
     }
 
@@ -73,6 +90,31 @@ impl FindingDecision {
     pub const fn risk_acceptance(&self) -> Option<&RiskAcceptance> {
         match self {
             Self::RiskAccepted(acceptance) => Some(acceptance),
+            Self::Suppressed(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn suppression(&self) -> Option<&Suppression> {
+        match self {
+            Self::RiskAccepted(_) => None,
+            Self::Suppressed(suppression) => Some(suppression),
+        }
+    }
+
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::RiskAccepted(acceptance) => Some(acceptance.reason.as_ref()),
+            Self::Suppressed(suppression) => Some(suppression.reason.as_ref()),
+        }
+    }
+
+    #[must_use]
+    pub const fn until_unix_ms(&self) -> Option<u64> {
+        match self {
+            Self::RiskAccepted(acceptance) => acceptance.until_unix_ms,
+            Self::Suppressed(_) => None,
         }
     }
 }
@@ -81,6 +123,7 @@ impl FindingDecision {
 pub enum FindingGovernanceState {
     Open,
     RiskAccepted,
+    Suppressed,
 }
 
 impl FindingGovernanceState {
@@ -89,6 +132,7 @@ impl FindingGovernanceState {
         match self {
             Self::Open => "open",
             Self::RiskAccepted => "risk-accepted",
+            Self::Suppressed => "suppressed",
         }
     }
 }
@@ -130,6 +174,30 @@ impl FindingGovernance {
         self.decisions
             .insert(finding, FindingDecision::RiskAccepted(acceptance));
     }
+
+    pub fn suppress(
+        &mut self,
+        finding: FindingRef,
+        suppression: Suppression,
+    ) -> SuppressFindingResult {
+        let next = FindingDecision::Suppressed(suppression.clone());
+        let change = if self.decision(&finding) == Some(&next) {
+            SuppressFindingChange::Unchanged
+        } else {
+            self.decisions.insert(finding, next);
+            SuppressFindingChange::Suppressed
+        };
+
+        SuppressFindingResult {
+            change,
+            suppression,
+        }
+    }
+
+    pub fn replay_suppression(&mut self, finding: FindingRef, suppression: Suppression) {
+        self.decisions
+            .insert(finding, FindingDecision::Suppressed(suppression));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,9 +222,34 @@ pub struct AcceptRiskResult {
     pub acceptance: RiskAcceptance,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuppressFindingChange {
+    Suppressed,
+    Unchanged,
+}
+
+impl SuppressFindingChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Suppressed => "suppressed",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuppressFindingResult {
+    pub change: SuppressFindingChange,
+    pub suppression: Suppression,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AcceptRiskChange, FindingGovernance, FindingRef, RiskAcceptance};
+    use super::{
+        AcceptRiskChange, FindingGovernance, FindingRef, RiskAcceptance, SuppressFindingChange,
+        Suppression,
+    };
     use crate::{ArtifactKind, ArtifactRef, PackageCoordinate};
 
     fn finding() -> FindingRef {
@@ -194,5 +287,15 @@ mod tests {
 
         assert_eq!(first.change, AcceptRiskChange::Accepted);
         assert_eq!(second.change, AcceptRiskChange::Unchanged);
+    }
+
+    #[test]
+    fn suppressing_one_finding_persists_one_decision() {
+        let mut governance = FindingGovernance::new();
+
+        let result = governance.suppress(finding(), Suppression::new("Known upstream false alarm"));
+
+        assert_eq!(result.change, SuppressFindingChange::Suppressed);
+        assert!(governance.decision(&finding()).is_some());
     }
 }

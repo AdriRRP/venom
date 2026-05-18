@@ -10,7 +10,8 @@ use crate::{
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
-    ReportedFinding, RiskAcceptance, Severity,
+    ReportedFinding, RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult,
+    Suppression,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
@@ -430,6 +431,40 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably suppress one currently active finding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingFinding`] when the finding is not
+    /// currently active, or another [`DurableStateError`] when the durable
+    /// append fails.
+    pub fn suppress_finding(
+        &mut self,
+        finding: FindingRef,
+        suppression: Suppression,
+    ) -> Result<SuppressFindingResult, DurableStateError> {
+        if !self.read_model.has_active_finding(&finding) {
+            return Err(DurableStateError::MissingFinding(
+                "cannot suppress an inactive finding".into(),
+            ));
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.suppress(finding.clone(), suppression.clone());
+        if result.change == SuppressFindingChange::Suppressed {
+            self.append_event(&DurableEvent::FindingSuppressed {
+                finding: StoredFindingRef::from(finding.clone()),
+                suppression: suppression.clone(),
+            })?;
+            candidate_read_model.suppress(finding, suppression);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(result)
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
         let file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
         let reader = BufReader::new(file);
@@ -481,6 +516,13 @@ impl DurableState {
                 acceptance,
             } => {
                 self.apply_finding_risk_accepted(finding, acceptance);
+                Ok(())
+            }
+            DurableEvent::FindingSuppressed {
+                finding,
+                suppression,
+            } => {
+                self.apply_finding_suppressed(finding, suppression);
                 Ok(())
             }
             DurableEvent::IntegrationEventPublished { event_id } => {
@@ -556,6 +598,7 @@ impl DurableState {
             DurableEvent::IntegrationRuntimeConfigured { .. }
             | DurableEvent::ProviderScanRecorded { .. }
             | DurableEvent::FindingRiskAccepted { .. }
+            | DurableEvent::FindingSuppressed { .. }
             | DurableEvent::IntegrationEventPublished { .. }
             | DurableEvent::IntegrationEventPublicationFailed { .. } => {
                 unreachable!("non-inventory durable event routed to inventory replay")
@@ -775,6 +818,13 @@ impl DurableState {
         self.read_model.replay_risk_acceptance(finding, acceptance);
     }
 
+    fn apply_finding_suppressed(&mut self, finding: StoredFindingRef, suppression: Suppression) {
+        let finding = finding.into_domain();
+        self.governance
+            .replay_suppression(finding.clone(), suppression.clone());
+        self.read_model.replay_suppression(finding, suppression);
+    }
+
     fn remove_pending_integration_event(&mut self, event_id: &str) {
         if self
             .pending_integration_events
@@ -898,6 +948,10 @@ enum DurableEvent {
     FindingRiskAccepted {
         finding: StoredFindingRef,
         acceptance: RiskAcceptance,
+    },
+    FindingSuppressed {
+        finding: StoredFindingRef,
+        suppression: Suppression,
     },
     IntegrationEventPublished {
         event_id: Box<str>,

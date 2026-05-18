@@ -42,7 +42,7 @@ flowchart LR
 | Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |
 | Execution Context | value object | The runtime and business context that changes how a finding should be interpreted. | "environment" when the richer domain meaning is intended |
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |
-| Finding Decision | value object | One explicit durable governance outcome that VENOM attaches to one canonical finding, such as a risk acceptance. | ad hoc UI-only flags |
+| Finding Decision | value object | One explicit durable governance outcome that VENOM attaches to one canonical finding, such as a risk acceptance or suppression. | ad hoc UI-only flags |
 | Finding Provider | port | A provider-specific source of findings mapped into VENOM's canonical finding model. | provider schema names as domain terms |
 | Finding Reference | value object | The canonical identity of one finding in one component and immutable artifact scope, used to attach durable governance decisions. | transient row ids as the source of truth |
 | Integration Event | value object | A canonical external event that VENOM makes available after a durable domain change becomes publishable outside the core. | broker payload shape as the domain term |

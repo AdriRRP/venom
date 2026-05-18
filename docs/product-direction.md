@@ -34,7 +34,7 @@ The platform target is:
 | Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
 | Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |
 | Contextual risk | change meaning by runtime context | `classify-finding.feature` |
-| Governance | accept, suppress, withdraw, explain | `accept-risk.feature` |
+| Governance | accept, suppress, withdraw, explain | `accept-risk.feature`, `suppress-finding.feature` |
 | Operations | answer what is active, changed, pending, and due now | `view-active-findings.feature`, `view-collection-schedules.feature` |
 | Reliability substrate | keep all of the above durable and rebuildable | usually verified by infra and acceptance gates rather than a standalone business feature |
 

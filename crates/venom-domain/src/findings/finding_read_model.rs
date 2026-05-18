@@ -1,6 +1,7 @@
 use crate::{
     ArtifactRef, CollectionScopedArtifact, FindingDecision, FindingGovernanceState, FindingRef,
     PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
+    Suppression,
 };
 use std::collections::BTreeMap;
 
@@ -180,6 +181,15 @@ impl FindingReadModel {
         self.accept_risk(finding, acceptance);
     }
 
+    pub fn suppress(&mut self, finding: FindingRef, suppression: Suppression) {
+        self.decisions
+            .insert(finding, FindingDecision::Suppressed(suppression));
+    }
+
+    pub fn replay_suppression(&mut self, finding: FindingRef, suppression: Suppression) {
+        self.suppress(finding, suppression);
+    }
+
     #[must_use]
     pub fn active_finding_count(&self, component_key: &str, artifact: &ArtifactRef) -> usize {
         self.active
@@ -351,12 +361,8 @@ impl FindingReadModel {
             .map_or((FindingGovernanceState::Open, None, None), |decision| {
                 (
                     decision.state(),
-                    decision
-                        .risk_acceptance()
-                        .map(|acceptance| acceptance.reason.clone()),
-                    decision
-                        .risk_acceptance()
-                        .and_then(|acceptance| acceptance.until_unix_ms),
+                    decision.reason().map(Into::into),
+                    decision.until_unix_ms(),
                 )
             });
 
@@ -508,6 +514,7 @@ mod tests {
     use crate::{
         ArtifactKind, ArtifactRef, CollectionScopedArtifact, EvidenceFreshness, FindingRef,
         PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
+        Suppression,
     };
     use std::time::SystemTime;
 
@@ -715,5 +722,36 @@ mod tests {
             page.findings[0].governance_until_unix_ms,
             Some(1_760_000_000_000)
         );
+    }
+
+    #[test]
+    fn suppression_is_projected_on_active_findings() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::High),
+        ]));
+
+        read_model.suppress(
+            FindingRef::new(
+                "component:payments-api",
+                artifact(),
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            ),
+            Suppression::new("Known upstream false alarm"),
+        );
+
+        let page = read_model.query_active_findings(&ActiveFindingsQuery::new(
+            "component:payments-api",
+            artifact(),
+        ));
+
+        assert_eq!(page.findings[0].governance_state.as_str(), "suppressed");
+        assert_eq!(
+            page.findings[0].governance_reason.as_deref(),
+            Some("Known upstream false alarm")
+        );
+        assert_eq!(page.findings[0].governance_until_unix_ms, None);
     }
 }

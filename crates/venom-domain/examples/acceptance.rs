@@ -10,7 +10,7 @@ use venom_domain::findings::{
     FindingChangeSet, FindingIngestion, FindingIngestionError, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
     ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity,
+    ScopedActiveFindingsQuery, Severity, Suppression,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
@@ -707,6 +707,33 @@ async fn venom_durably_accepts_risk_until(
         RiskAcceptance::new(reason)
             .until_unix_ms(u64::try_from(until_unix_ms).expect("until should fit u64")),
     ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably suppresses vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
+)]
+async fn venom_durably_suppresses_finding(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    component_key: String,
+    artifact_identity: String,
+    reason: String,
+) {
+    let finding = FindingRef::new(
+        component_key,
+        ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity),
+        vulnerability_id,
+        PackageCoordinate::new(package_name, package_version),
+    );
+    match world
+        .durable_state_mut()
+        .suppress_finding(finding, Suppression::new(reason))
+    {
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
     }
