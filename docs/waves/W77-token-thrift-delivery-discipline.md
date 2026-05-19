@@ -1,31 +1,49 @@
-Wave: W77-token-thrift-delivery-discipline
+# W77. Token-Thrift Delivery Discipline
 
-Status: done
+Wave: `W77-token-thrift-delivery-discipline`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `compact`
+Infra profile: `none`
 
-Goal
+## Goal
 
-Persist a low-token communication discipline that keeps delivery strict while reducing repeated status narration.
+Persist a low-token communication discipline that keeps delivery strict while
+reducing repeated status narration.
 
-BDD impact: none
-Agentic impact: compact
-Infra profile: none
-
-Linked features
-
-- none
-
-Slices
-
-- `W77-S01` done: compact always-on and process docs around delta-only reporting
-
-Language impact
+## Feature paths
 
 - none
 
-Invariant impact
+## Execution lanes
 
-- none
+- `unit`
 
-ADR impact
+## Owned paths
 
-- none
+- `AGENTS.md`
+- `docs/work-methodology.md`
+- `docs/documentation-model.md`
+
+## Slices
+
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W77-S01` | done | compact always-on and process docs around delta-only reporting | `unit` |
+
+## Language impact
+
+`none`
+
+## Invariant impact
+
+`none`
+
+## ADR impact
+
+`none`
+
+## Notes
+
+- The repo stays the canonical memory.
+- The chat should report deltas, not replay stable status.
