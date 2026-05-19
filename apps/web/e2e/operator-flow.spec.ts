@@ -213,7 +213,7 @@ test("findings console can query one seeded release collection", async ({
 		.selectOption("open");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
-		.click();
+		.dispatchEvent("click");
 	await collectionPanel
 		.getByRole("textbox", { name: "Reason" })
 		.fill("Accepted for this release");
