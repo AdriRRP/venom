@@ -295,6 +295,25 @@ export type BulkAcceptCollectionRiskResponse = {
 	governance_until_unix_ms: number | null;
 };
 
+export type BulkSuppressCollectionFindingsPayload = {
+	collectionKey: string;
+	minSeverity?: string;
+	packageName?: string;
+	reason: string;
+};
+
+export type BulkSuppressCollectionFindingsResponse = {
+	collection_key: string;
+	min_severity: string | null;
+	package_name: string | null;
+	targeted: number;
+	suppressed: number;
+	unchanged: number;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
+};
+
 export type SuppressFindingPayload = {
 	componentKey: string;
 	artifactKind: string;
@@ -479,6 +498,33 @@ export async function acceptCollectionFindingRisk(
 	}
 
 	return (await response.json()) as BulkAcceptCollectionRiskResponse;
+}
+
+export async function suppressCollectionFindings(
+	request: BulkSuppressCollectionFindingsPayload,
+): Promise<BulkSuppressCollectionFindingsResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/findings/suppression`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				min_severity:
+					request.minSeverity && request.minSeverity !== "all"
+						? request.minSeverity
+						: null,
+				package_name: request.packageName || null,
+				reason: request.reason,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection suppression failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as BulkSuppressCollectionFindingsResponse;
 }
 
 export async function suppressFinding(

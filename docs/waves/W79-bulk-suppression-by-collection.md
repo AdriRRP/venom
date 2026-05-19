@@ -1,7 +1,7 @@
 # W79. Bulk Suppression By Collection
 
 Wave: `W79-bulk-suppression-by-collection`
-Status: `in_progress`
+Status: `done`
 BDD impact: `create`
 Agentic impact: `none`
 Infra profile: `db`
@@ -43,7 +43,7 @@ release collection through domain, API, and UI without widening the write model
 |---|---|---|---|
 | `W79-S01` | done | add one durable batch suppression path over one filtered collection scope | `unit`, `acceptance` |
 | `W79-S02` | done | expose the batch action through API and Postgres durability | `integration` |
-| `W79-S03` | in_progress | add one operator-facing bulk suppression action to the findings console and cover it end to end | `web`, `e2e` |
+| `W79-S03` | done | add one operator-facing bulk suppression action to the findings console and cover it end to end | `web`, `e2e` |
 
 ## Language impact
 

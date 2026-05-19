@@ -259,3 +259,42 @@ test("findings console can query one seeded release collection", async ({
 		.dispatchEvent("click");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 });
+
+test("findings console can bulk suppress one seeded release collection cohort", async ({
+	page,
+	request,
+}) => {
+	await seedReleaseCollection(request);
+
+	await page.goto("/findings");
+	const collectionPanel = page.locator("section.panel").first();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("open");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await collectionPanel
+		.getByRole("textbox", { name: "Suppression reason" })
+		.fill("Known upstream false alarm");
+	await collectionPanel
+		.getByRole("button", { name: "Suppress Filtered Open Findings" })
+		.click();
+	await expect(
+		collectionPanel.getByText("Governance: suppressed (1/1 suppressed)."),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 0 open - 0 risk accepted - 1 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("suppressed");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await expect(
+		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
+});

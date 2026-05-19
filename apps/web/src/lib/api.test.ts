@@ -21,6 +21,7 @@ import {
 	registerContextProfile,
 	requestCollectionScan,
 	requestScan,
+	suppressCollectionFindings,
 	suppressFinding,
 } from "./api";
 
@@ -328,6 +329,45 @@ describe("fetchApiHealth", () => {
 		expect(calls[0]?.init?.body).toContain(
 			'"vulnerability_id":"CVE-2026-0001"',
 		);
+		expect(calls[0]?.init?.body).toContain(
+			'"reason":"Known upstream false alarm"',
+		);
+	});
+
+	it("serializes bulk suppression over one collection scope", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						min_severity: "high",
+						package_name: "openssl",
+						targeted: 1,
+						suppressed: 1,
+						unchanged: 0,
+						governance_state: "suppressed",
+						governance_reason: "Known upstream false alarm",
+						governance_until_unix_ms: null,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		await suppressCollectionFindings({
+			collectionKey: "release:2026.05",
+			minSeverity: "high",
+			packageName: "openssl",
+			reason: "Known upstream false alarm",
+		});
+
+		expect(calls[0]?.input).toBe(
+			"/api/collections/release%3A2026.05/findings/suppression",
+		);
+		expect(calls[0]?.init?.body).toContain('"min_severity":"high"');
+		expect(calls[0]?.init?.body).toContain('"package_name":"openssl"');
 		expect(calls[0]?.init?.body).toContain(
 			'"reason":"Known upstream false alarm"',
 		);

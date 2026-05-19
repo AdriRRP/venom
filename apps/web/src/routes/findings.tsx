@@ -15,6 +15,7 @@ import {
 	fetchActiveFindings,
 	fetchApiHealth,
 	fetchCollectionActiveFindings,
+	suppressCollectionFindings,
 	suppressFinding,
 } from "../lib/api";
 import { describeCollectionHealth } from "../lib/collection-health";
@@ -148,6 +149,7 @@ export function FindingsPage() {
 	const [riskFeedback, setRiskFeedback] = useState<string | null>(null);
 	const [bulkRiskReason, setBulkRiskReason] = useState("");
 	const [bulkRiskUntilUnixMs, setBulkRiskUntilUnixMs] = useState("");
+	const [bulkSuppressionReason, setBulkSuppressionReason] = useState("");
 
 	const healthQuery = useQuery({
 		queryKey: ["api-health"],
@@ -240,6 +242,33 @@ export function FindingsPage() {
 				error instanceof Error
 					? error.message
 					: "collection risk acceptance failed",
+			);
+		},
+	});
+
+	const suppressCollectionFindingsMutation = useMutation({
+		mutationFn: suppressCollectionFindings,
+		onSuccess: async (response) => {
+			setRiskFeedback(
+				`Governance: ${response.governance_state} (${response.suppressed}/${response.targeted} suppressed).`,
+			);
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: ["collection-active-findings", collectionRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["active-findings", artifactRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["release-dashboard"],
+				}),
+			]);
+		},
+		onError: (error) => {
+			setRiskFeedback(
+				error instanceof Error
+					? error.message
+					: "collection suppression failed",
 			);
 		},
 	});
@@ -558,6 +587,42 @@ export function FindingsPage() {
 						type="submit"
 					>
 						Accept Filtered Open Findings
+					</button>
+				</form>
+
+				<form
+					className="filters"
+					onSubmit={(event) => {
+						event.preventDefault();
+						void suppressCollectionFindingsMutation.mutate({
+							collectionKey: collectionRequest.collectionKey,
+							minSeverity: collectionRequest.minSeverity,
+							packageName: collectionRequest.packageName,
+							reason: bulkSuppressionReason,
+						});
+					}}
+				>
+					<label>
+						Suppress filtered open findings
+						<input readOnly value={collectionRequest.collectionKey} />
+					</label>
+					<label>
+						Suppression reason
+						<input
+							name="bulkSuppressionReason"
+							onChange={(event) => setBulkSuppressionReason(event.target.value)}
+							value={bulkSuppressionReason}
+						/>
+					</label>
+					<button
+						className="primary-button"
+						disabled={
+							collectionRequest.governanceState !== "open" ||
+							suppressCollectionFindingsMutation.isPending
+						}
+						type="submit"
+					>
+						Suppress Filtered Open Findings
 					</button>
 				</form>
 
