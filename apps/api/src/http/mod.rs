@@ -1247,6 +1247,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_bulk_suppresses_open_collection_findings() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("bulk-suppress-findings", "state"),
+                temp_path("bulk-suppress-findings", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        assert_eq!(
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            record_provider_report_with_two_findings(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "min_severity": "high",
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["targeted"], 1);
+        assert_eq!(payload["suppressed"], 1);
+        assert_eq!(payload["unchanged"], 0);
+        assert_eq!(payload["governance_state"], "suppressed");
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=suppressed&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["suppressed"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "suppressed"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["governance_reason"],
+            "Known upstream false alarm"
+        );
+    }
+
+    #[tokio::test]
     async fn api_creates_release_collections_and_tracks_membership() {
         let router = build_router(
             ApiState::open(

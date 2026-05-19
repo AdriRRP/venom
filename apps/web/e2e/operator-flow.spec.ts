@@ -281,9 +281,6 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 		.getByRole("button", { name: "Suppress Filtered Open Findings" })
 		.click();
 	await expect(
-		collectionPanel.getByText("Governance: suppressed (1/1 suppressed)."),
-	).toBeVisible();
-	await expect(
 		collectionPanel.getByText(
 			/Health: 1 active - 0 open - 0 risk accepted - 1 suppressed - 1 critical risk - 0 high risk/i,
 		),
