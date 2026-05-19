@@ -884,6 +884,9 @@ mod tests {
         assert_eq!(payload["health"]["total"], 1);
         assert_eq!(payload["health"]["open"], 1);
         assert_eq!(payload["health"]["suppressed"], 0);
+        assert_eq!(payload["bulk_governance"]["targeted"], 1);
+        assert_eq!(payload["bulk_governance"]["critical_risk"], 1);
+        assert_eq!(payload["bulk_governance"]["high_risk"], 0);
         assert_eq!(payload["total_active_findings"], 1);
         assert_eq!(
             payload["active_findings"][0]["component_key"],

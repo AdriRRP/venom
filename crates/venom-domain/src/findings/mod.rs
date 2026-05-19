@@ -10,7 +10,7 @@ pub mod finding_tracker;
 pub mod release_dashboard;
 
 pub use collection_governance_overview::{
-    CollectionGovernanceOverview, query_collection_governance_overview,
+    BulkGovernanceCohortSummary, CollectionGovernanceOverview, query_collection_governance_overview,
 };
 pub use collection_health::{CollectionHealthSummary, summarize_collection_health};
 pub use contextual_risk::{

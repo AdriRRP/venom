@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
+    BulkGovernanceCohortSummary, CollectionGovernanceOverview, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
@@ -60,6 +61,7 @@ struct AcceptanceWorld {
     last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
     last_contextual_active_findings: Vec<ContextualActiveFindingProjection>,
     last_collection_health_summary: Option<CollectionHealthSummary>,
+    last_collection_governance_overview: Option<CollectionGovernanceOverview>,
     last_release_dashboard: Option<ReleaseDashboard>,
 }
 
@@ -94,6 +96,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_scoped_active_findings_page = None;
     world.last_contextual_active_findings.clear();
     world.last_collection_health_summary = None;
+    world.last_collection_governance_overview = None;
     world.last_release_dashboard = None;
 }
 
@@ -1209,6 +1212,7 @@ async fn venom_queries_collection_governance_overview(
             .with_limit(limit),
     )
     .expect("collection governance overview should exist");
+    world.last_collection_governance_overview = Some(overview.clone());
     world.last_collection_health_summary = Some(overview.health);
     world.last_scoped_active_findings_page = Some(overview.page);
 }
@@ -2179,6 +2183,30 @@ async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld
     assert_eq!(last_collection_health_summary(world).high_risk, expected);
 }
 
+#[then(expr = "the bulk governance cohort targets {int} finding")]
+#[then(expr = "the bulk governance cohort targets {int} findings")]
+async fn the_bulk_governance_cohort_targets_findings(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_bulk_governance_cohort(world).targeted, expected);
+}
+
+#[then(expr = "the bulk governance cohort shows {int} critical risk finding")]
+#[then(expr = "the bulk governance cohort shows {int} critical risk findings")]
+async fn the_bulk_governance_cohort_shows_critical_risk_findings(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_bulk_governance_cohort(world).critical_risk, expected);
+}
+
+#[then(expr = "the bulk governance cohort shows {int} high risk finding")]
+#[then(expr = "the bulk governance cohort shows {int} high risk findings")]
+async fn the_bulk_governance_cohort_shows_high_risk_findings(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_bulk_governance_cohort(world).high_risk, expected);
+}
+
 #[then(expr = "the release dashboard manages {int} collections")]
 async fn the_release_dashboard_manages_collections(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(
@@ -2513,6 +2541,14 @@ const fn last_collection_health_summary(world: &AcceptanceWorld) -> &CollectionH
         .expect("a collection health query must be performed before assertions")
 }
 
+const fn last_bulk_governance_cohort(world: &AcceptanceWorld) -> &BulkGovernanceCohortSummary {
+    &world
+        .last_collection_governance_overview
+        .as_ref()
+        .expect("a collection governance overview query must be performed before assertions")
+        .bulk_governance
+}
+
 const fn last_registration(world: &AcceptanceWorld) -> &RegisterComponentResult {
     world
         .last_registration
@@ -2590,6 +2626,7 @@ async fn main() {
         "filter-governed-findings.feature",
         "classify-finding.feature",
         "manage-context-profiles.feature",
+        "view-bulk-governance-workbench.feature",
         "view-collection-governance.feature",
         "view-collection-health.feature",
         "view-collection-schedules.feature",

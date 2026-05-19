@@ -147,9 +147,12 @@ export function FindingsPage() {
 	const [riskReason, setRiskReason] = useState("");
 	const [riskUntilUnixMs, setRiskUntilUnixMs] = useState("");
 	const [riskFeedback, setRiskFeedback] = useState<string | null>(null);
-	const [bulkRiskReason, setBulkRiskReason] = useState("");
-	const [bulkRiskUntilUnixMs, setBulkRiskUntilUnixMs] = useState("");
-	const [bulkSuppressionReason, setBulkSuppressionReason] = useState("");
+	const [bulkGovernanceAction, setBulkGovernanceAction] = useState<
+		"accept-risk" | "suppress"
+	>("accept-risk");
+	const [bulkGovernanceReason, setBulkGovernanceReason] = useState("");
+	const [bulkGovernanceUntilUnixMs, setBulkGovernanceUntilUnixMs] =
+		useState("");
 
 	const healthQuery = useQuery({
 		queryKey: ["api-health"],
@@ -225,6 +228,8 @@ export function FindingsPage() {
 			setRiskFeedback(
 				`Governance: ${response.governance_state} (${response.accepted}/${response.targeted} accepted).`,
 			);
+			setBulkGovernanceReason("");
+			setBulkGovernanceUntilUnixMs("");
 			await Promise.all([
 				queryClient.invalidateQueries({
 					queryKey: ["collection-active-findings", collectionRequest],
@@ -252,6 +257,8 @@ export function FindingsPage() {
 			setRiskFeedback(
 				`Governance: ${response.governance_state} (${response.suppressed}/${response.targeted} suppressed).`,
 			);
+			setBulkGovernanceReason("");
+			setBulkGovernanceUntilUnixMs("");
 			await Promise.all([
 				queryClient.invalidateQueries({
 					queryKey: ["collection-active-findings", collectionRequest],
@@ -544,85 +551,88 @@ export function FindingsPage() {
 					className="filters"
 					onSubmit={(event) => {
 						event.preventDefault();
-						void acceptCollectionRiskMutation.mutate({
-							collectionKey: collectionRequest.collectionKey,
-							minSeverity: collectionRequest.minSeverity,
-							packageName: collectionRequest.packageName,
-							reason: bulkRiskReason,
-							untilUnixMs:
-								bulkRiskUntilUnixMs.trim() === ""
-									? null
-									: Number(bulkRiskUntilUnixMs),
-						});
-					}}
-				>
-					<label>
-						Accept filtered open findings
-						<input readOnly value={collectionRequest.collectionKey} />
-					</label>
-					<label>
-						Reason
-						<input
-							name="bulkRiskReason"
-							onChange={(event) => setBulkRiskReason(event.target.value)}
-							value={bulkRiskReason}
-						/>
-					</label>
-					<label>
-						Until unix ms
-						<input
-							name="bulkRiskUntilUnixMs"
-							onChange={(event) => setBulkRiskUntilUnixMs(event.target.value)}
-							placeholder="optional"
-							type="number"
-							value={bulkRiskUntilUnixMs}
-						/>
-					</label>
-					<button
-						className="primary-button"
-						disabled={
-							collectionRequest.governanceState !== "open" ||
-							acceptCollectionRiskMutation.isPending
+						if (bulkGovernanceAction === "accept-risk") {
+							void acceptCollectionRiskMutation.mutate({
+								collectionKey: collectionRequest.collectionKey,
+								minSeverity: collectionRequest.minSeverity,
+								packageName: collectionRequest.packageName,
+								reason: bulkGovernanceReason,
+								untilUnixMs:
+									bulkGovernanceUntilUnixMs.trim() === ""
+										? null
+										: Number(bulkGovernanceUntilUnixMs),
+							});
+							return;
 						}
-						type="submit"
-					>
-						Accept Filtered Open Findings
-					</button>
-				</form>
 
-				<form
-					className="filters"
-					onSubmit={(event) => {
-						event.preventDefault();
 						void suppressCollectionFindingsMutation.mutate({
 							collectionKey: collectionRequest.collectionKey,
 							minSeverity: collectionRequest.minSeverity,
 							packageName: collectionRequest.packageName,
-							reason: bulkSuppressionReason,
+							reason: bulkGovernanceReason,
 						});
 					}}
 				>
 					<label>
-						Suppress filtered open findings
+						Bulk governance workbench
 						<input readOnly value={collectionRequest.collectionKey} />
 					</label>
 					<label>
-						Suppression reason
+						Bulk governance action
+						<select
+							name="bulkGovernanceAction"
+							onChange={(event) =>
+								setBulkGovernanceAction(
+									event.target.value as "accept-risk" | "suppress",
+								)
+							}
+							value={bulkGovernanceAction}
+						>
+							<option value="accept-risk">Risk accept</option>
+							<option value="suppress">Suppress</option>
+						</select>
+					</label>
+					<label>
+						Governance reason
 						<input
-							name="bulkSuppressionReason"
-							onChange={(event) => setBulkSuppressionReason(event.target.value)}
-							value={bulkSuppressionReason}
+							name="bulkGovernanceReason"
+							onChange={(event) => setBulkGovernanceReason(event.target.value)}
+							value={bulkGovernanceReason}
 						/>
 					</label>
+					{bulkGovernanceAction === "accept-risk" ? (
+						<label>
+							Until unix ms
+							<input
+								name="bulkGovernanceUntilUnixMs"
+								onChange={(event) =>
+									setBulkGovernanceUntilUnixMs(event.target.value)
+								}
+								placeholder="optional"
+								type="number"
+								value={bulkGovernanceUntilUnixMs}
+							/>
+						</label>
+					) : null}
+					<p>
+						Target cohort:{" "}
+						{collectionFindingsQuery.data?.bulk_governance?.targeted ?? 0} open
+						findings,{" "}
+						{collectionFindingsQuery.data?.bulk_governance?.critical_risk ?? 0}{" "}
+						critical risk,{" "}
+						{collectionFindingsQuery.data?.bulk_governance?.high_risk ?? 0} high
+						risk.
+					</p>
 					<button
 						className="primary-button"
 						disabled={
 							collectionRequest.governanceState !== "open" ||
+							acceptCollectionRiskMutation.isPending ||
 							suppressCollectionFindingsMutation.isPending
 						}
 						type="submit"
 					>
-						Suppress Filtered Open Findings
+						Apply Bulk Governance
 					</button>
 				</form>
 

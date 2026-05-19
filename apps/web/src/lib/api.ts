@@ -33,12 +33,19 @@ export type ActiveFindingsResponse = {
 
 export type CollectionActiveFinding = ActiveFinding;
 
+export type BulkGovernanceCohort = {
+	targeted: number;
+	critical_risk: number;
+	high_risk: number;
+};
+
 export type CollectionActiveFindingsResponse = {
 	collection_key: string;
 	min_severity: string | null;
 	governance_state: string | null;
 	package_name: string | null;
 	health: CollectionHealth;
+	bulk_governance: BulkGovernanceCohort;
 	total_active_findings: number;
 	returned: number;
 	offset: number;
