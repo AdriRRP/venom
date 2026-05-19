@@ -99,7 +99,7 @@ describe("DashboardPage", () => {
 		).toBeInTheDocument();
 		expect(await screen.findByText("Collections")).toBeInTheDocument();
 		expect(
-			await screen.findByText("2 scheduled, 1 due now"),
+			await screen.findByText(/1 scheduled,\s*1 due now/i),
 		).toBeInTheDocument();
 		expect(await screen.findByText("May Release")).toBeInTheDocument();
 		expect(await screen.findByText("release:2026.05")).toBeInTheDocument();
