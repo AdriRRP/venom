@@ -106,6 +106,9 @@ test("operator console can manage one release collection and execute one schedul
 	page,
 }) => {
 	await page.goto("/operations");
+	const collectionDetailCard = page
+		.locator(".result-card")
+		.filter({ hasText: "Current collection detail" });
 
 	await page.getByRole("button", { name: "Register", exact: true }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
@@ -152,7 +155,7 @@ test("operator console can manage one release collection and execute one schedul
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();
 	await expect(page.getByText(/Active findings: 1\./i)).toBeVisible();
 	await expect(
-		page.getByText(
+		collectionDetailCard.getByText(
 			/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
 		),
 	).toBeVisible();
@@ -202,7 +205,9 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByText("risk-accepted: Compensating control in place"),
 	).toBeVisible();
 
-	await collectionPanel.getByRole("button", { name: "Suppress" }).click();
+	await collectionPanel
+		.getByRole("button", { name: "Suppress", exact: true })
+		.click();
 	await page
 		.getByRole("textbox", { name: "Reason" })
 		.fill("Known upstream false alarm");
