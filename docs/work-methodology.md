@@ -20,6 +20,18 @@ Deliver VENOM through a workflow that is simple, verifiable, and easy for humans
 12. Run the full wave gate on the clean committed tree.
 13. Push immediately.
 
+## Reporting discipline
+
+Use the chat as a delta channel, not as a log stream.
+
+Rules:
+
+- report what changed, what failed, or what needs a decision
+- do not restate stable repo state unless it changed or blocks the work
+- summarize verification by gate outcome unless a failing detail matters
+- prefer one active wave and one active PR by default
+- if a stable repeated status pattern appears, move it into repo docs or scripts instead of repeating it in chat
+
 ## Definitions
 
 ### Wave
@@ -203,6 +215,10 @@ Expected action:
 For question `6`, use this rule:
 
 - if a new operator-facing shape appears, prefer a dedicated rebuildable projection or explicit read snapshot over widening the write side ad hoc
+
+Communication threshold:
+
+- if a detail is already persisted canonically in the repo and did not change in this slice, do not restate it in the close-out
 
 ## Frontend visual discipline
 

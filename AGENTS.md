@@ -15,6 +15,9 @@ Build VENOM through small, verifiable, provider-agnostic changes.
 7. Leave owned documentation current before considering work complete.
 8. If you detect a stable repeated workflow, convert it into a script or skill instead of re-explaining it again later.
 9. If you detect overlapping guidance, compact or unify it unless there is a strong reason not to.
+10. Report by delta: describe only what changed, failed, or needs a decision.
+11. Prefer gate outcomes over command transcripts unless a failing detail matters.
+12. Use the repo as canonical memory; do not restate stable project state when it has not changed.
 
 ## Read order
 
@@ -46,6 +49,14 @@ Before closing a wave, explicitly check:
 - BDD impact
 - reusable workflow impact
 - documentation compaction opportunity
+
+## Communication discipline
+
+- Keep progress updates short and delta-only.
+- Do not repeat branch, PR, URL, or clean-tree state unless it changed or is blocking.
+- Prefer `slice gate green` or `wave gate green` over replaying command output.
+- Only surface raw failing details when they help diagnose or decide the next step.
+- Default to one wave and one PR at a time unless stack depth is clearly worth the extra context cost.
 
 ## Documentation policy
 
