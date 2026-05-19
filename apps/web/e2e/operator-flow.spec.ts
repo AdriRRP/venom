@@ -228,6 +228,10 @@ test("findings console can query one seeded release collection", async ({
 			/Health: 1 active - 0 open - 1 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
 		),
 	).toBeVisible();
+	await collectionPanel.getByRole("button", { name: "All (1)" }).click();
+	await expect(
+		collectionPanel.getByText("risk-accepted: Accepted for this release"),
+	).toBeVisible();
 
 	await collectionPanel
 		.getByRole("button", { name: "Suppress", exact: true })
