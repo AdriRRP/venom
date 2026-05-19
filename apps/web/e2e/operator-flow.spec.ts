@@ -216,7 +216,7 @@ test("findings console can query one seeded release collection", async ({
 		.dispatchEvent("click");
 	await expect(
 		collectionPanel.getByText(
-			"Target cohort: 1 open findings, 1 critical risk, 0 high risk.",
+			/Target cohort: 1 open findings, 1 critical risk, 0 high risk\./i,
 		),
 	).toBeVisible();
 	await collectionPanel
@@ -281,7 +281,7 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 		.dispatchEvent("click");
 	await expect(
 		collectionPanel.getByText(
-			"Target cohort: 1 open findings, 1 critical risk, 0 high risk.",
+			/Target cohort: 1 open findings, 1 critical risk, 0 high risk\./i,
 		),
 	).toBeVisible();
 	await collectionPanel
