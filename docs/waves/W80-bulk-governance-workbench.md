@@ -45,7 +45,7 @@ the currently filtered open cohort.
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W80-S01` | done | define the debt-closure sequence and add one dedicated bulk-governance cohort projection to the domain | `unit`, `acceptance` |
-| `W80-S02` | planned | expose the bulk-governance workbench summary through the collection findings API | `integration` |
+| `W80-S02` | done | expose the bulk-governance workbench summary through the collection findings API | `integration` |
 | `W80-S03` | planned | replace the duplicated bulk forms with one operator workbench flow in the findings console | `web`, `e2e` |
 
 ## Language impact

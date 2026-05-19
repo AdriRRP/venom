@@ -236,6 +236,7 @@ impl ApiReadSnapshot {
             governance_state: request.governance_state,
             package_name: request.package_name,
             health: CollectionHealthItem::from(overview.health),
+            bulk_governance: BulkGovernanceCohortItem::from(overview.bulk_governance),
             total_active_findings: overview.page.total,
             returned: overview.page.returned,
             offset: overview.page.offset,
@@ -1901,11 +1902,29 @@ pub struct CollectionActiveFindingsResponse {
     pub governance_state: Option<String>,
     pub package_name: Option<String>,
     pub health: CollectionHealthItem,
+    pub bulk_governance: BulkGovernanceCohortItem,
     pub total_active_findings: usize,
     pub returned: usize,
     pub offset: usize,
     pub limit: usize,
     pub active_findings: Vec<CollectionActiveFindingItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkGovernanceCohortItem {
+    pub targeted: usize,
+    pub critical_risk: usize,
+    pub high_risk: usize,
+}
+
+impl From<venom_domain::BulkGovernanceCohortSummary> for BulkGovernanceCohortItem {
+    fn from(value: venom_domain::BulkGovernanceCohortSummary) -> Self {
+        Self {
+            targeted: value.targeted,
+            critical_risk: value.critical_risk,
+            high_risk: value.high_risk,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
