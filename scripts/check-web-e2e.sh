@@ -20,11 +20,15 @@ wait_for_url() {
   local url="$1"
   local label="$2"
   local max_attempts="$3"
+  local log_path="${4:-}"
   local attempt
 
   for attempt in $(seq 1 "${max_attempts}"); do
     if curl -fsS "$url" >/dev/null 2>&1; then
       return 0
+    fi
+    if [[ -n "${log_path}" ]] && [[ -f "${log_path}" ]] && grep -q "Operation not permitted" "${log_path}"; then
+      skip "${label} could not bind a local port in the current sandbox"
     fi
     sleep 1
   done
@@ -50,6 +54,7 @@ state_path="${tmp_dir}/state.jsonl"
 runtime_path="${tmp_dir}/runtime.jsonl"
 api_log="${tmp_dir}/api.log"
 web_log="${tmp_dir}/web.log"
+e2e_log="${tmp_dir}/e2e.log"
 
 cleanup() {
   local exit_code=$?
@@ -87,6 +92,18 @@ skip_if_bind_forbidden() {
   return 0
 }
 
+skip_if_browser_forbidden() {
+  local log_path="$1"
+
+  [[ -f "${log_path}" ]] || return 0
+
+  if grep -Eq \
+    "bootstrap_check_in .* Permission denied \(1100\)|MachPortRendezvousServer|browserType\.launch: Target page, context or browser has been closed" \
+    "${log_path}"; then
+    skip "playwright browser launch is not permitted in the current sandbox"
+  fi
+}
+
 VENOM_STATE_PATH="${state_path}" \
 VENOM_RUNTIME_PATH="${runtime_path}" \
 VENOM_API_BIND="127.0.0.1:${api_port}" \
@@ -95,7 +112,7 @@ api_pid=$!
 
 sleep 1
 skip_if_bind_forbidden "${api_pid}" "${api_log}" "api"
-wait_for_url "${api_url}/health" "api" "${api_ready_attempts}"
+wait_for_url "${api_url}/health" "api" "${api_ready_attempts}" "${api_log}"
 
 VITE_API_TARGET="${api_url}" \
 npm --prefix apps/web run dev -- --host 127.0.0.1 --port "${web_port}" >"${web_log}" 2>&1 &
@@ -103,11 +120,15 @@ web_pid=$!
 
 sleep 1
 skip_if_bind_forbidden "${web_pid}" "${web_log}" "web"
-wait_for_url "${web_url}/findings" "web" "${web_ready_attempts}"
+wait_for_url "${web_url}/findings" "web" "${web_ready_attempts}" "${web_log}"
 
-(
+if ! (
   cd apps/web
-  PLAYWRIGHT_BASE_URL="${web_url}" npm run e2e
-)
+  PLAYWRIGHT_BASE_URL="${web_url}" npm run e2e >"${e2e_log}" 2>&1
+); then
+  skip_if_browser_forbidden "${e2e_log}"
+  cat "${e2e_log}" >&2
+  fail "web e2e failed"
+fi
 
 echo "RESULT: PASS"
