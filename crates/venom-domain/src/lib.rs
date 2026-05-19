@@ -8,6 +8,7 @@ pub use durable_state::{DurableState, DurableStateError};
 pub use findings::{
     AcceptRiskChange, AcceptRiskResult, ActiveFindingProjection, ActiveFindingsPage,
     ActiveFindingsQuery, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
+    BulkSuppressFindingResult,
     CollectionGovernanceOverview, CollectionHealthSummary, ContextualActiveFindingProjection,
     ContextualRiskLevel, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet,
     FindingDecision, FindingGovernance, FindingGovernanceState, FindingIngestion,

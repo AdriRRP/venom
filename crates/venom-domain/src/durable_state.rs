@@ -1,7 +1,7 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, BulkAcceptRiskResult, CollectionRegistration, ComponentRegistration,
+    BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
@@ -565,6 +565,56 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably suppress one filtered open cohort of findings inside one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingCollection`] when the collection is
+    /// unknown, or another [`DurableStateError`] when the durable append fails.
+    pub fn suppress_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        suppression: Suppression,
+    ) -> Result<BulkSuppressFindingResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
+        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result = candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            if result.change == SuppressFindingChange::Suppressed {
+                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
+                changed_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let suppressed = changed_findings.len();
+        if suppressed > 0 {
+            self.append_event(&DurableEvent::FindingsSuppressed {
+                findings: changed_findings,
+                suppression: suppression.clone(),
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(BulkSuppressFindingResult {
+            targeted,
+            suppressed,
+            unchanged: targeted.saturating_sub(suppressed),
+            suppression,
+        })
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
         let file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
         let reader = BufReader::new(file);
@@ -634,6 +684,15 @@ impl DurableState {
                 suppression,
             } => {
                 self.apply_finding_suppressed(finding, suppression);
+                Ok(())
+            }
+            DurableEvent::FindingsSuppressed {
+                findings,
+                suppression,
+            } => {
+                for finding in findings {
+                    self.apply_finding_suppressed(finding, suppression.clone());
+                }
                 Ok(())
             }
             DurableEvent::IntegrationEventPublished { event_id } => {
@@ -722,6 +781,7 @@ impl DurableState {
             | DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::FindingsRiskAccepted { .. }
             | DurableEvent::FindingSuppressed { .. }
+            | DurableEvent::FindingsSuppressed { .. }
             | DurableEvent::IntegrationEventPublished { .. }
             | DurableEvent::IntegrationEventPublicationFailed { .. } => {
                 unreachable!("non-inventory durable event routed to inventory replay")
@@ -1127,6 +1187,10 @@ enum DurableEvent {
     },
     FindingSuppressed {
         finding: StoredFindingRef,
+        suppression: Suppression,
+    },
+    FindingsSuppressed {
+        findings: Vec<StoredFindingRef>,
         suppression: Suppression,
     },
     IntegrationEventPublished {

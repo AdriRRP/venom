@@ -252,6 +252,14 @@ pub struct SuppressFindingResult {
     pub suppression: Suppression,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkSuppressFindingResult {
+    pub targeted: usize,
+    pub suppressed: usize,
+    pub unchanged: usize,
+    pub suppression: Suppression,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
