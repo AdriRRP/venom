@@ -42,8 +42,8 @@ release collection through domain, API, and UI without widening the write model
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
 | `W79-S01` | done | add one durable batch suppression path over one filtered collection scope | `unit`, `acceptance` |
-| `W79-S02` | in_progress | expose the batch action through API and Postgres durability | `integration` |
-| `W79-S03` | planned | add one operator-facing bulk suppression action to the findings console and cover it end to end | `web`, `e2e` |
+| `W79-S02` | done | expose the batch action through API and Postgres durability | `integration` |
+| `W79-S03` | in_progress | add one operator-facing bulk suppression action to the findings console and cover it end to end | `web`, `e2e` |
 
 ## Language impact
 

@@ -7,10 +7,11 @@ use venom_domain::findings::finding_provider_contract::{
 };
 use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
-    EvidenceFreshness, FindingChangeSet, FindingGovernance, FindingIngestion, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery,
-    SuppressFindingChange, SuppressFindingResult, Suppression,
+    BulkSuppressFindingResult, EvidenceFreshness, FindingChangeSet, FindingGovernance,
+    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding, RiskAcceptance,
+    ScanRequest, ScopedActiveFindingsQuery, SuppressFindingChange, SuppressFindingResult,
+    Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -650,6 +651,86 @@ impl PostgresStore {
         }
 
         Ok(result)
+    }
+
+    /// Durably suppress one filtered open cohort of findings in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the collection is unknown or the durable
+    /// write fails.
+    pub async fn suppress_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        suppression: Suppression,
+    ) -> Result<BulkSuppressFindingResult, String> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
+        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result = candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            if result.change == SuppressFindingChange::Suppressed {
+                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
+                changed_findings.push(finding.finding);
+            }
+        }
+
+        let suppressed = changed_findings.len();
+        if suppressed > 0 {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| format!("postgres suppression batch begin failed: {error}"))?;
+
+            for finding in &changed_findings {
+                sqlx::query(&format!(
+                    concat!(
+                        "INSERT INTO {} ",
+                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
+                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                        "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
+                    ),
+                    self.names.finding_suppressions
+                ))
+                .bind(finding.component_key.as_ref())
+                .bind(artifact_kind_name(finding.artifact.kind))
+                .bind(finding.artifact.identity.as_ref())
+                .bind(finding.vulnerability_id.as_ref())
+                .bind(finding.package.name.as_ref())
+                .bind(finding.package.version.as_ref())
+                .bind(finding.package.purl.as_deref().unwrap_or(""))
+                .bind(suppression.reason.as_ref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("postgres finding suppression batch upsert failed: {error}"))?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(BulkSuppressFindingResult {
+            targeted,
+            suppressed,
+            unchanged: targeted.saturating_sub(suppressed),
+            suppression,
+        })
     }
 
     #[must_use]

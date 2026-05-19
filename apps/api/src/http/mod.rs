@@ -2,8 +2,9 @@ use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
     ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
     BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
-    CollectionActiveFindingsResponse, CollectionDetailResponse, CollectionMembershipRequest,
-    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    BulkSuppressFindingsRequest, BulkSuppressFindingsResponse, CollectionActiveFindingsResponse,
+    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
+    CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
     ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
@@ -133,6 +134,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/findings/risk-acceptance",
             post(accept_collection_risk),
+        )
+        .route(
+            "/collections/{collection_key}/findings/suppression",
+            post(suppress_collection_findings),
         )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
@@ -432,6 +437,24 @@ async fn suppress_finding(
         let mut service = state.inner.service.lock().await;
         let response = service
             .suppress_finding(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn suppress_collection_findings(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<BulkSuppressFindingsRequest>,
+) -> Result<Json<BulkSuppressFindingsResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .suppress_findings_for_collection(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
