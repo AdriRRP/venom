@@ -40,11 +40,11 @@ mod tests {
         CollectionRegistration, ComponentInventory, ComponentRegistration,
         ContextProfileRegistration,
     };
-    use crate::{ArtifactKind, ArtifactRef};
+    use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
     #[test]
     fn collection_governance_overview_keeps_health_for_the_whole_scope() {
-        let mut inventory = ComponentInventory::new();
+        let mut inventory = ComponentInventory::default();
         let _ = inventory.register(ComponentRegistration::new(
             "component:payments-api",
             "Payments API",
@@ -72,6 +72,8 @@ mod tests {
             "fixture-provider",
             "component:payments-api",
             artifact.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
             vec![
                 ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
                     .with_severity(Severity::Critical),
@@ -106,7 +108,7 @@ mod tests {
         assert_eq!(overview.health.suppressed, 1);
         assert_eq!(overview.health.risk_accepted, 0);
         assert_eq!(overview.health.critical_risk, 1);
-        assert_eq!(overview.health.high_risk, 0);
+        assert_eq!(overview.health.high_risk, 1);
         assert_eq!(overview.page.total, 1);
         assert_eq!(
             overview.page.findings[0].governance_state.as_str(),

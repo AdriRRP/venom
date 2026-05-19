@@ -463,7 +463,8 @@ export function FindingsPage() {
 						}}
 						type="button"
 					>
-						Risk Accepted ({collectionFindingsQuery.data?.health.risk_accepted ?? 0})
+						Risk Accepted (
+						{collectionFindingsQuery.data?.health.risk_accepted ?? 0})
 					</button>
 					<button
 						className="secondary-button"

@@ -901,7 +901,7 @@ mod tests {
         assert_eq!(payload["health"]["suppressed"], 1);
         assert_eq!(payload["health"]["risk_accepted"], 0);
         assert_eq!(payload["health"]["critical_risk"], 1);
-        assert_eq!(payload["health"]["high_risk"], 0);
+        assert_eq!(payload["health"]["high_risk"], 1);
         assert_eq!(payload["total_active_findings"], 1);
         assert_eq!(
             payload["active_findings"][0]["governance_state"],

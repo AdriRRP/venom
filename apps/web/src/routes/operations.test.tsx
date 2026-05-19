@@ -429,6 +429,50 @@ describe("OperationsPage", () => {
 			if (url === "/api/health") {
 				return new Response("ok", { status: 200 });
 			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								scan_schedule: null,
+								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [{ component_key: "component:payments-api" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/scan-commands/cmd-1") {
 				return new Response(
 					JSON.stringify({
