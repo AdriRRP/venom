@@ -16,7 +16,7 @@ pub use findings::{
     ReleaseDashboard, ReleaseDashboardCollection, ReleaseDashboardSummary, ReportedFinding,
     RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
-    build_release_dashboard, contextual_risk_level, contextualize_active_findings,
+    BulkAcceptRiskResult, build_release_dashboard, contextual_risk_level, contextualize_active_findings,
     query_collection_governance_overview, summarize_collection_health,
 };
 pub use integration::{

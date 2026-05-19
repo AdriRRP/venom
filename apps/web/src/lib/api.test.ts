@@ -1,4 +1,5 @@
 import {
+	acceptCollectionFindingRisk,
 	acceptFindingRisk,
 	addCollectionComponent,
 	assignContextProfile,
@@ -251,6 +252,47 @@ describe("fetchApiHealth", () => {
 		);
 		expect(calls[0]?.init?.body).toContain(
 			'"reason":"Compensating control in place"',
+		);
+		expect(calls[0]?.init?.body).toContain('"until_unix_ms":1760000000000');
+	});
+
+	it("serializes bulk risk acceptance over one collection scope", async () => {
+		const calls: Array<{ input: string; init?: RequestInit }> = [];
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				calls.push({ input: String(input), init });
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						min_severity: "critical",
+						package_name: "openssl",
+						targeted: 2,
+						accepted: 2,
+						unchanged: 0,
+						governance_state: "risk-accepted",
+						governance_reason: "Accepted for this release",
+						governance_until_unix_ms: 1760000000000,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		await acceptCollectionFindingRisk({
+			collectionKey: "release:2026.05",
+			minSeverity: "critical",
+			packageName: "openssl",
+			reason: "Accepted for this release",
+			untilUnixMs: 1760000000000,
+		});
+
+		expect(calls[0]?.input).toBe(
+			"/api/collections/release%3A2026.05/findings/risk-acceptance",
+		);
+		expect(calls[0]?.init?.body).toContain('"min_severity":"critical"');
+		expect(calls[0]?.init?.body).toContain('"package_name":"openssl"');
+		expect(calls[0]?.init?.body).toContain(
+			'"reason":"Accepted for this release"',
 		);
 		expect(calls[0]?.init?.body).toContain('"until_unix_ms":1760000000000');
 	});

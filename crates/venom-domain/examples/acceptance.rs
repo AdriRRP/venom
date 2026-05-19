@@ -882,6 +882,51 @@ async fn venom_durably_accepts_risk_until(
 }
 
 #[when(
+    expr = "VENOM durably accepts risk for open findings in collection {string} with minimum severity {string} and reason {string}"
+)]
+async fn venom_durably_accepts_risk_for_open_collection_findings(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    min_severity: String,
+    reason: String,
+) {
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(FindingGovernanceState::Open)
+        .with_min_severity(parse_severity(&min_severity));
+    match world
+        .durable_state_mut()
+        .accept_risk_for_collection(&collection_key, &query, RiskAcceptance::new(reason))
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably accepts risk for open findings in collection {string} with minimum severity {string} and reason {string} until unix ms {int}"
+)]
+async fn venom_durably_accepts_risk_for_open_collection_findings_until(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    min_severity: String,
+    reason: String,
+    until_unix_ms: usize,
+) {
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(FindingGovernanceState::Open)
+        .with_min_severity(parse_severity(&min_severity));
+    match world.durable_state_mut().accept_risk_for_collection(
+        &collection_key,
+        &query,
+        RiskAcceptance::new(reason)
+            .until_unix_ms(u64::try_from(until_unix_ms).expect("until should fit u64")),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
     expr = "VENOM durably suppresses vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
 )]
 async fn venom_durably_suppresses_finding(
@@ -2515,6 +2560,8 @@ async fn main() {
         "schedule-collection-scan.feature",
         "request-scan.feature",
         "report-finding.feature",
+        "accept-risk.feature",
+        "bulk-accept-risk.feature",
         "suppress-finding.feature",
         "filter-governed-findings.feature",
         "classify-finding.feature",

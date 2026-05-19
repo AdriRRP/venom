@@ -275,6 +275,26 @@ export type AcceptRiskResponse = {
 	governance_until_unix_ms: number | null;
 };
 
+export type BulkAcceptCollectionRiskPayload = {
+	collectionKey: string;
+	minSeverity?: string;
+	packageName?: string;
+	reason: string;
+	untilUnixMs?: number | null;
+};
+
+export type BulkAcceptCollectionRiskResponse = {
+	collection_key: string;
+	min_severity: string | null;
+	package_name: string | null;
+	targeted: number;
+	accepted: number;
+	unchanged: number;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
+};
+
 export type SuppressFindingPayload = {
 	componentKey: string;
 	artifactKind: string;
@@ -431,6 +451,34 @@ export async function acceptFindingRisk(
 	}
 
 	return (await response.json()) as AcceptRiskResponse;
+}
+
+export async function acceptCollectionFindingRisk(
+	request: BulkAcceptCollectionRiskPayload,
+): Promise<BulkAcceptCollectionRiskResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/findings/risk-acceptance`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				min_severity:
+					request.minSeverity && request.minSeverity !== "all"
+						? request.minSeverity
+						: null,
+				package_name: request.packageName || null,
+				reason: request.reason,
+				until_unix_ms: request.untilUnixMs ?? null,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection risk acceptance failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as BulkAcceptCollectionRiskResponse;
 }
 
 export async function suppressFinding(
