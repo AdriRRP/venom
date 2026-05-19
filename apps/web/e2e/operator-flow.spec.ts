@@ -236,9 +236,9 @@ test("findings console can query one seeded release collection", async ({
 	await collectionPanel
 		.getByRole("button", { name: "Suppress", exact: true })
 		.click();
-	await page
-		.getByRole("textbox", { name: "Reason" })
-		.fill("Known upstream false alarm");
+	await page.locator('input[name="riskReason"]').fill(
+		"Known upstream false alarm",
+	);
 	await page.getByRole("button", { name: "Submit Suppression" }).click();
 	await expect(
 		collectionPanel.getByText("suppressed: Known upstream false alarm"),
