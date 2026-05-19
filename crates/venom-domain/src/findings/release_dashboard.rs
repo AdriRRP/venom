@@ -1,6 +1,6 @@
+use crate::FindingReadModel;
 use crate::findings::{CollectionHealthSummary, summarize_collection_health};
 use crate::inventory::{CollectionScanSchedule, ComponentInventory};
-use crate::FindingReadModel;
 
 /// One operator-facing executive dashboard over managed release collections.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,10 +196,16 @@ mod tests {
         assert_eq!(dashboard.summary.risk_accepted_findings, 0);
         assert_eq!(dashboard.summary.critical_risk_findings, 1);
         assert_eq!(dashboard.summary.high_risk_findings, 1);
-        assert_eq!(dashboard.collections[0].collection_key.as_ref(), "release:2026.05");
+        assert_eq!(
+            dashboard.collections[0].collection_key.as_ref(),
+            "release:2026.05"
+        );
         assert!(dashboard.collections[0].due_now);
         assert_eq!(dashboard.collections[0].health.total, 2);
-        assert_eq!(dashboard.collections[1].collection_key.as_ref(), "release:2026.06");
+        assert_eq!(
+            dashboard.collections[1].collection_key.as_ref(),
+            "release:2026.06"
+        );
         assert_eq!(dashboard.collections[1].health.total, 0);
     }
 }

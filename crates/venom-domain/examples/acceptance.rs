@@ -9,8 +9,8 @@ use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    ReleaseDashboard, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
+    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity, Suppression, build_release_dashboard,
     contextualize_active_findings, query_collection_governance_overview,
     summarize_collection_health,
@@ -1110,10 +1110,7 @@ async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection
 }
 
 #[when(expr = "VENOM queries the release dashboard at unix ms {int}")]
-async fn venom_queries_the_release_dashboard(
-    world: &mut AcceptanceWorld,
-    now_unix_ms: usize,
-) {
+async fn venom_queries_the_release_dashboard(world: &mut AcceptanceWorld, now_unix_ms: usize) {
     world.last_release_dashboard = Some(build_release_dashboard(
         world.durable_state_ref().ingestion().inventory(),
         world.durable_state_ref().read_model(),
@@ -2115,10 +2112,7 @@ async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld
 }
 
 #[then(expr = "the release dashboard manages {int} collections")]
-async fn the_release_dashboard_manages_collections(
-    world: &mut AcceptanceWorld,
-    expected: usize,
-) {
+async fn the_release_dashboard_manages_collections(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(
         world
             .last_release_dashboard
@@ -2166,10 +2160,7 @@ async fn the_release_dashboard_shows_collections_due_now(
 
 #[then(expr = "the release dashboard shows {int} active finding")]
 #[then(expr = "the release dashboard shows {int} active findings")]
-async fn the_release_dashboard_shows_active_findings(
-    world: &mut AcceptanceWorld,
-    expected: usize,
-) {
+async fn the_release_dashboard_shows_active_findings(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(
         world
             .last_release_dashboard
@@ -2183,10 +2174,7 @@ async fn the_release_dashboard_shows_active_findings(
 
 #[then(expr = "the release dashboard shows {int} open finding")]
 #[then(expr = "the release dashboard shows {int} open findings")]
-async fn the_release_dashboard_shows_open_findings(
-    world: &mut AcceptanceWorld,
-    expected: usize,
-) {
+async fn the_release_dashboard_shows_open_findings(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(
         world
             .last_release_dashboard
@@ -2250,10 +2238,7 @@ async fn the_release_dashboard_shows_high_risk_findings(
 }
 
 #[then(expr = "the first dashboard collection is {string}")]
-async fn the_first_dashboard_collection_is(
-    world: &mut AcceptanceWorld,
-    expected: String,
-) {
+async fn the_first_dashboard_collection_is(world: &mut AcceptanceWorld, expected: String) {
     assert_eq!(
         world
             .last_release_dashboard
@@ -2269,10 +2254,7 @@ async fn the_first_dashboard_collection_is(
 }
 
 #[then(expr = "the first dashboard collection is due {string}")]
-async fn the_first_dashboard_collection_is_due(
-    world: &mut AcceptanceWorld,
-    expected: String,
-) {
+async fn the_first_dashboard_collection_is_due(world: &mut AcceptanceWorld, expected: String) {
     assert_eq!(
         world
             .last_release_dashboard
