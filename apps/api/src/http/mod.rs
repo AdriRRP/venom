@@ -1176,7 +1176,7 @@ mod tests {
                         json!({
                             "min_severity": "high",
                             "reason": "Accepted for this release",
-                            "until_unix_ms": 1760000000000u64
+                            "until_unix_ms": 1_760_000_000_000_u64
                         })
                         .to_string(),
                     ))
