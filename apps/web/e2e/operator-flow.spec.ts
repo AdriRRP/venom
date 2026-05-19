@@ -209,7 +209,7 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByRole("cell", { name: "Internet Production" }),
 	).toBeVisible();
 	await collectionPanel
-		.getByRole("combobox", { name: "Governance" })
+		.getByRole("combobox", { name: "Governance", exact: true })
 		.selectOption("open");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
@@ -257,7 +257,7 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByRole("button", { name: "Suppressed (1)" }),
 	).toBeVisible();
 	await collectionPanel
-		.getByRole("combobox", { name: "Governance" })
+		.getByRole("combobox", { name: "Governance", exact: true })
 		.selectOption("suppressed");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
@@ -274,7 +274,7 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 	await page.goto("/findings");
 	const collectionPanel = page.locator("section.panel").first();
 	await collectionPanel
-		.getByRole("combobox", { name: "Governance" })
+		.getByRole("combobox", { name: "Governance", exact: true })
 		.selectOption("open");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
@@ -299,7 +299,7 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 		),
 	).toBeVisible();
 	await collectionPanel
-		.getByRole("combobox", { name: "Governance" })
+		.getByRole("combobox", { name: "Governance", exact: true })
 		.selectOption("suppressed");
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
