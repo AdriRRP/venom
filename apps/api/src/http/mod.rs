@@ -1,10 +1,9 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
     ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
-    BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
-    BulkAcceptRiskRequest, BulkAcceptRiskResponse, CollectionDetailResponse,
-    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
-    ComponentRegistrationRequest,
+    BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
+    CollectionActiveFindingsResponse, CollectionDetailResponse, CollectionMembershipRequest,
+    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
     ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
@@ -1143,11 +1142,22 @@ mod tests {
             .expect("api state should open"),
         );
 
-        assert_eq!(register_payments_component(router.clone()).await.status(), StatusCode::OK);
-        assert_eq!(bind_owned_artifact(router.clone()).await.status(), StatusCode::OK);
-        assert_eq!(register_release_collection(router.clone()).await.status(), StatusCode::OK);
         assert_eq!(
-            add_payments_component_to_collection(router.clone()).await.status(),
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
@@ -1207,7 +1217,10 @@ mod tests {
         assert_eq!(payload["total_active_findings"], 1);
         assert_eq!(payload["health"]["open"], 1);
         assert_eq!(payload["health"]["risk_accepted"], 1);
-        assert_eq!(payload["active_findings"][0]["vulnerability_id"], "CVE-2026-0001");
+        assert_eq!(
+            payload["active_findings"][0]["vulnerability_id"],
+            "CVE-2026-0001"
+        );
     }
 
     #[tokio::test]
@@ -2057,11 +2070,22 @@ mod tests {
                 .expect("postgres api state should open"),
         );
 
-        assert_eq!(register_payments_component(router.clone()).await.status(), StatusCode::OK);
-        assert_eq!(bind_owned_artifact(router.clone()).await.status(), StatusCode::OK);
-        assert_eq!(register_release_collection(router.clone()).await.status(), StatusCode::OK);
         assert_eq!(
-            add_payments_component_to_collection(router.clone()).await.status(),
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
@@ -2114,7 +2138,10 @@ mod tests {
         assert_eq!(payload["total_active_findings"], 1);
         assert_eq!(payload["health"]["open"], 1);
         assert_eq!(payload["health"]["risk_accepted"], 1);
-        assert_eq!(payload["active_findings"][0]["governance_state"], "risk-accepted");
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "risk-accepted"
+        );
     }
 
     #[tokio::test]

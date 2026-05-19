@@ -893,10 +893,11 @@ async fn venom_durably_accepts_risk_for_open_collection_findings(
     let query = ScopedActiveFindingsQuery::new()
         .with_governance_state(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
-    match world
-        .durable_state_mut()
-        .accept_risk_for_collection(&collection_key, &query, RiskAcceptance::new(reason))
-    {
+    match world.durable_state_mut().accept_risk_for_collection(
+        &collection_key,
+        &query,
+        RiskAcceptance::new(reason),
+    ) {
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
     }

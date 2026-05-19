@@ -495,7 +495,9 @@ impl DurableState {
                     format!("unknown collection: {collection_key}").into_boxed_str(),
                 )
             })?;
-        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();

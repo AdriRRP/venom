@@ -529,7 +529,9 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -547,11 +549,10 @@ impl PostgresStore {
 
         let accepted = changed.len();
         if accepted > 0 {
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|error| format!("postgres risk acceptance batch begin failed: {error}"))?;
+            let mut tx =
+                self.pool.begin().await.map_err(|error| {
+                    format!("postgres risk acceptance batch begin failed: {error}")
+                })?;
 
             for finding in &changed {
                 sqlx::query(&format!(
@@ -586,9 +587,9 @@ impl PostgresStore {
                 })?;
             }
 
-            tx.commit()
-                .await
-                .map_err(|error| format!("postgres risk acceptance batch commit failed: {error}"))?;
+            tx.commit().await.map_err(|error| {
+                format!("postgres risk acceptance batch commit failed: {error}")
+            })?;
 
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
