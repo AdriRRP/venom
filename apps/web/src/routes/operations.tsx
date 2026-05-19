@@ -6,6 +6,7 @@ import {
 	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
+	configureCollectionSource,
 	configureProvider,
 	drainCollectionScanWorker,
 	drainScanWorker,
@@ -14,6 +15,7 @@ import {
 	fetchCollections,
 	fetchContextProfiles,
 	fetchScanCommandStatus,
+	materializeCollectionSource,
 	registerCollection,
 	registerComponent,
 	registerContextProfile,
@@ -41,6 +43,13 @@ function describeCollectionSchedule(
 	return `${dueNow ? "due now" : "due later"} - every ${cadenceMinutes} minutes (${freshness}) - ${lastRunLabel} - ${lastEnqueuedLabel}`;
 }
 
+function describeCollectionSource(
+	mode: string,
+	componentCount: number,
+): string {
+	return `${mode} - ${componentCount} declared components`;
+}
+
 export function OperationsPage() {
 	const queryClient = useQueryClient();
 	const [operatorState, setOperatorState] = useState({
@@ -54,6 +63,8 @@ export function OperationsPage() {
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
+		collectionSourceMode: "replace",
+		collectionSourceComponentKeys: "component:payments-api",
 		cadenceMinutes: "60",
 		maxCollections: "8",
 		artifactKind: "container-image",
@@ -120,6 +131,26 @@ export function OperationsPage() {
 			addCollectionComponent(request.collectionKey, {
 				componentKey: request.componentKey,
 			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
+	const configureCollectionSourceMutation = useMutation({
+		mutationFn: configureCollectionSource,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
+	const materializeCollectionSourceMutation = useMutation({
+		mutationFn: materializeCollectionSource,
 		onSuccess: () => {
 			void queryClient.invalidateQueries({ queryKey: ["collections"] });
 			void queryClient.invalidateQueries({
@@ -619,6 +650,13 @@ export function OperationsPage() {
 									<li key={collection.collection_key}>
 										{collection.collection_key} ({collection.name}) -{" "}
 										{collection.members} members -{" "}
+										{collection.source
+											? describeCollectionSource(
+													collection.source.mode,
+													collection.source.component_count,
+												)
+											: "manual source"}{" "}
+										-{" "}
 										{collection.scan_schedule
 											? describeCollectionSchedule(
 													collection.scan_schedule.cadence_minutes,
@@ -668,6 +706,13 @@ export function OperationsPage() {
 									<p>No schedule configured.</p>
 								)}
 								<p>
+									Source:{" "}
+									{collectionDetailQuery.data.source
+										? `${collectionDetailQuery.data.source.mode} from ${collectionDetailQuery.data.source.component_keys.length} declared components`
+										: "manual only"}
+									.
+								</p>
+								<p>
 									Health:{" "}
 									{describeCollectionHealth(collectionDetailQuery.data.health)}.
 								</p>
@@ -681,6 +726,113 @@ export function OperationsPage() {
 							<p>No collection detail loaded yet.</p>
 						)}
 					</div>
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Release Scope</p>
+							<h2>Configure Collection Source</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void configureCollectionSourceMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								kind: "component-list",
+								mode: operatorState.collectionSourceMode,
+								componentKeys: operatorState.collectionSourceComponentKeys
+									.split(/\s+/)
+									.map((value) => value.trim())
+									.filter(Boolean),
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input
+								name="sourceCollectionKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionKey: event.target.value,
+									}))
+								}
+								value={operatorState.collectionKey}
+							/>
+						</label>
+						<label>
+							Mode
+							<select
+								name="collectionSourceMode"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionSourceMode: event.target.value,
+									}))
+								}
+								value={operatorState.collectionSourceMode}
+							>
+								<option value="replace">replace</option>
+								<option value="reconcile">reconcile</option>
+							</select>
+						</label>
+						<label className="mutation-span-full">
+							Declared component keys
+							<textarea
+								name="collectionSourceComponentKeys"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										collectionSourceComponentKeys: event.target.value,
+									}))
+								}
+								rows={4}
+								value={operatorState.collectionSourceComponentKeys}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Configure Collection Source
+						</button>
+					</form>
+					<div className="mutation-grid">
+						<button
+							className="secondary-button"
+							onClick={() =>
+								void materializeCollectionSourceMutation.mutateAsync(
+									operatorState.collectionKey,
+								)
+							}
+							type="button"
+						>
+							Materialize Collection Source
+						</button>
+					</div>
+					{configureCollectionSourceMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection source</strong>
+							<p>
+								Change: {configureCollectionSourceMutation.data.change}. Source:{" "}
+								{configureCollectionSourceMutation.data.source
+									? `${configureCollectionSourceMutation.data.source.mode} from ${configureCollectionSourceMutation.data.source.component_keys.length} declared components`
+									: "none"}
+								.
+							</p>
+						</div>
+					) : null}
+					{materializeCollectionSourceMutation.data ? (
+						<div className="result-card">
+							<strong>Last source materialization</strong>
+							<p>
+								Change: {materializeCollectionSourceMutation.data.change}.
+								Members: {materializeCollectionSourceMutation.data.members}.
+								Added: {materializeCollectionSourceMutation.data.added}.
+								Removed: {materializeCollectionSourceMutation.data.removed}.
+							</p>
+						</div>
+					) : null}
 				</section>
 
 				<section className="panel">

@@ -1,7 +1,7 @@
 # W81. Source-Driven Collections
 
 Wave: `W81-source-driven-collections`
-Status: `in_progress`
+Status: `done`
 BDD impact: `extend`
 Agentic impact: `none`
 Infra profile: `db`
@@ -43,9 +43,9 @@ materialization flow.
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W81-S01` | in_progress | add one declared collection source model with deterministic replace or reconcile materialization in domain and durable replay | `unit`, `acceptance` |
-| `W81-S02` | planned | expose collection source configuration and materialization through API and Postgres durability | `integration` |
-| `W81-S03` | planned | operate one source-driven collection from the UI and cover the flow with browser smoke | `web`, `e2e` |
+| `W81-S01` | done | add one declared collection source model with deterministic replace or reconcile materialization in domain and durable replay | `unit`, `acceptance` |
+| `W81-S02` | done | expose collection source configuration and materialization through API and Postgres durability | `integration` |
+| `W81-S03` | done | operate one source-driven collection from the UI and cover the flow with browser smoke | `web`, `e2e` |
 
 ## Language impact
 

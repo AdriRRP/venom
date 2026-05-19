@@ -145,6 +145,7 @@ describe("OperationsPage", () => {
 								collection_key: "release:2026.05",
 								name: "May Release",
 								members: 1,
+								source: null,
 								scan_schedule: null,
 								due_now: false,
 								health: {
@@ -176,6 +177,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						source: null,
 						scan_schedule: null,
 						health: {
 							total: 0,
@@ -209,8 +211,8 @@ describe("OperationsPage", () => {
 			await screen.findByText(/Change: added\. Members: 1\./i),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/component:payments-api/i),
-		).toBeInTheDocument();
+			await screen.findAllByText(/component:payments-api/i),
+		).not.toHaveLength(0);
 		expect(
 			await screen.findByText(
 				/Total: 1\. Scheduled: 0\. Due now: 0\. Active findings: 0\./i,
@@ -221,6 +223,121 @@ describe("OperationsPage", () => {
 				/0 active - 0 open - 0 risk accepted - 0 suppressed - 0 critical risk - 0 high risk/i,
 			),
 		).toHaveLength(2);
+	});
+
+	it("configures and materializes one collection source", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections/release%3A2026.05/source") {
+				return new Response(
+					JSON.stringify({
+						change: "configured",
+						source: {
+							kind: "component-list",
+							mode: "replace",
+							component_keys: ["component:payments-api"],
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05/source/materialize") {
+				return new Response(
+					JSON.stringify({
+						change: "materialized",
+						members: 1,
+						added: 1,
+						removed: 0,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								source: {
+									kind: "component-list",
+									mode: "replace",
+									component_count: 1,
+								},
+								scan_schedule: null,
+								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						source: {
+							kind: "component-list",
+							mode: "replace",
+							component_keys: ["component:payments-api"],
+						},
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [{ component_key: "component:payments-api" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Configure Collection Source" }),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Materialize Collection Source" }),
+		);
+
+		expect(
+			await screen.findByText(
+				/Change: configured\. Source: replace from 1 declared components\./i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/Change: materialized\. Members: 1\. Added: 1\. Removed: 0\./i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/replace - 1 declared components/i),
+		).toBeInTheDocument();
 	});
 
 	it("configures one collection scan schedule and runs the scheduler", async () => {
@@ -250,6 +367,7 @@ describe("OperationsPage", () => {
 								collection_key: "release:2026.05",
 								name: "May Release",
 								members: 1,
+								source: null,
 								scan_schedule: {
 									cadence_minutes: 60,
 									freshness: "deterministic",
@@ -277,6 +395,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						source: null,
 						scan_schedule: {
 							cadence_minutes: 60,
 							freshness: "deterministic",
@@ -438,6 +557,7 @@ describe("OperationsPage", () => {
 								collection_key: "release:2026.05",
 								name: "May Release",
 								members: 1,
+								source: null,
 								scan_schedule: null,
 								due_now: false,
 								health: {
@@ -459,6 +579,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						source: null,
 						scan_schedule: null,
 						health: {
 							total: 0,
