@@ -20,6 +20,8 @@ The preferred low-token agent shape for this repo is:
 5. scripts for repeated deterministic work
 6. at most a very small optional skill set for orchestration that cannot be reduced to a script
 
+The chat should carry only the delta for the current turn. Stable project memory belongs in the repo, not in repeated assistant narration.
+
 ## Operating principles
 
 1. One concept, one canonical document.
@@ -28,6 +30,7 @@ The preferred low-token agent shape for this repo is:
 4. Put steps in methods or runbooks, not in reference docs.
 5. Update docs in the same wave that changes meaning.
 6. Improve the system when repeated friction becomes visible.
+7. Prefer persistent repo memory over repeated conversational recap.
 
 ## Document types
 
@@ -156,6 +159,13 @@ Default set:
 - `on-demand`: BDD model, methodology, active wave doc, ADRs, documentation model
 - `on-demand when planning`: product direction
 - `rare`: runbooks, legacy analysis
+
+## Chat policy
+
+- Report by delta.
+- Prefer gate outcomes over command transcripts.
+- Do not use the conversation as a rolling status ledger.
+- If a repeated explanation becomes necessary, compact it into a canonical doc, script, or skill.
 
 ## Not required
 
