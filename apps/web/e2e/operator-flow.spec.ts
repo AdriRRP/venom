@@ -164,7 +164,7 @@ test("operator console can manage one release collection and execute one schedul
 	await expect(
 		page.getByRole("heading", { level: 2, name: "Release Dashboard" }),
 	).toBeVisible();
-	await expect(page.getByText("1 scheduled, 1 due now")).toBeVisible();
+	await expect(page.getByText(/1 scheduled,\s*1 due now/i)).toBeVisible();
 	await expect(page.getByText("May Release")).toBeVisible();
 	await expect(
 		page.getByText(
