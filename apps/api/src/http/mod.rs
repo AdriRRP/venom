@@ -12,12 +12,11 @@ use crate::app::service::{
     DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
-    MaterializeCollectionSourceResponse, ProviderScanReportRequest,
-    RecordProviderReportResponse, RegisterCollectionResponse, RegisterComponentResponse,
-    RegisterContextProfileResponse, ReleaseDashboardResponse, RequestCollectionScanCommand,
-    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse,
-    RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
-    SuppressFindingRequest, SuppressFindingResponse,
+    MaterializeCollectionSourceResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RegisterContextProfileResponse,
+    ReleaseDashboardResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
+    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
+    ScanCommandStatusResponse, SuppressFindingRequest, SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -1525,7 +1524,10 @@ mod tests {
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["source"]["kind"], "component-list");
         assert_eq!(payload["source"]["mode"], "replace");
-        assert_eq!(payload["source"]["component_keys"][0], "component:payments-api");
+        assert_eq!(
+            payload["source"]["component_keys"][0],
+            "component:payments-api"
+        );
     }
 
     #[tokio::test]

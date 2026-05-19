@@ -1359,8 +1359,8 @@ impl ComponentInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration,
-        CollectionSource, CollectionSourceMode, ComponentInventory, ComponentListCollectionSource,
+        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration, CollectionSource,
+        CollectionSourceMode, ComponentInventory, ComponentListCollectionSource,
         ComponentRegistration, ConfigureCollectionScanScheduleChange,
         ConfigureCollectionSourceChange, ConfigureProviderChange, ContextProfileRegistration,
         MaterializeCollectionSourceChange, RegisterCollectionChange, RegisterComponentChange,
@@ -1853,8 +1853,14 @@ mod tests {
         );
         let result = inventory.materialize_collection_source("release:2026.05");
 
-        assert_eq!(source_result.change, ConfigureCollectionSourceChange::Configured);
-        assert_eq!(result.change, MaterializeCollectionSourceChange::Materialized);
+        assert_eq!(
+            source_result.change,
+            ConfigureCollectionSourceChange::Configured
+        );
+        assert_eq!(
+            result.change,
+            MaterializeCollectionSourceChange::Materialized
+        );
         assert_eq!(result.added, 1);
         assert_eq!(result.removed, 1);
         assert_eq!(
@@ -1887,7 +1893,10 @@ mod tests {
 
         let result = inventory.materialize_collection_source("release:2026.05");
 
-        assert_eq!(result.change, MaterializeCollectionSourceChange::Materialized);
+        assert_eq!(
+            result.change,
+            MaterializeCollectionSourceChange::Materialized
+        );
         assert_eq!(result.added, 1);
         assert_eq!(result.removed, 0);
         assert_eq!(

@@ -599,10 +599,7 @@ async fn venom_durably_configures_collection_source(
 }
 
 #[when(expr = "VENOM materializes the source of collection {string}")]
-async fn venom_materializes_collection_source(
-    world: &mut AcceptanceWorld,
-    collection_key: String,
-) {
+async fn venom_materializes_collection_source(world: &mut AcceptanceWorld, collection_key: String) {
     world.last_collection_source_materialization = Some(
         world
             .ingestion
@@ -1478,7 +1475,10 @@ async fn collection_has_source_over_components(
         })
         .expect("collection source must exist before assertions");
     assert_eq!(source.mode(), parse_collection_source_mode(&mode));
-    assert_eq!(source.component_keys(), parse_component_keys(&component_keys));
+    assert_eq!(
+        source.component_keys(),
+        parse_component_keys(&component_keys)
+    );
 }
 
 #[then(expr = "the artifact {string} belongs to component {string}")]

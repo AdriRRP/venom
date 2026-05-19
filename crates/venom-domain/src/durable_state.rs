@@ -5,17 +5,17 @@ use crate::{
     CollectionSource, CollectionSourceMode, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
-    ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
-    EvidenceFreshness, FindingChangeSet, FindingGovernance, FindingIngestion,
-    FindingIngestionError, FindingReadModel, FindingRef, IntegrationEventPublicationFailure,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, MaterializeCollectionSourceChange,
-    MaterializeCollectionSourceResult, PackageCoordinate, PendingIntegrationEvent,
-    ProviderScanReport, PublishIntegrationEventsResult, RegisterCollectionChange,
-    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
-    RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
-    RemoveCollectionComponentResult, ReportedFinding, RiskAcceptance, ScopedActiveFindingsQuery,
-    Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
+    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
+    MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
+    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
+    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
+    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
+    SuppressFindingResult, Suppression,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
@@ -335,7 +335,8 @@ impl DurableState {
         source: CollectionSource,
     ) -> Result<ConfigureCollectionSourceResult, DurableStateError> {
         let mut candidate_inventory = self.ingestion.inventory().clone();
-        let result = candidate_inventory.configure_collection_source(collection_key, source.clone());
+        let result =
+            candidate_inventory.configure_collection_source(collection_key, source.clone());
         if result.change == ConfigureCollectionSourceChange::Configured {
             self.append_event(&DurableEvent::CollectionSourceConfigured {
                 collection_key: collection_key.into(),
@@ -1042,11 +1043,7 @@ impl DurableState {
             self.apply_collection_component_added(collection_key, component_key.as_ref(), line)?;
         }
         for component_key in removed_component_keys {
-            self.apply_collection_component_removed(
-                collection_key,
-                component_key.as_ref(),
-                line,
-            )?;
+            self.apply_collection_component_removed(collection_key, component_key.as_ref(), line)?;
         }
         Ok(())
     }

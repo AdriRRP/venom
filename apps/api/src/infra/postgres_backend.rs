@@ -263,7 +263,8 @@ impl PostgresStore {
         source: CollectionSource,
     ) -> Result<ConfigureCollectionSourceResult, String> {
         let mut candidate_inventory = self.ingestion.inventory().clone();
-        let result = candidate_inventory.configure_collection_source(collection_key, source.clone());
+        let result =
+            candidate_inventory.configure_collection_source(collection_key, source.clone());
         if result.change == ConfigureCollectionSourceChange::Configured {
             sqlx::query(&format!(
                 concat!(
@@ -1897,15 +1898,13 @@ impl PostgresStore {
     }
 
     async fn load_collection_sources(&mut self) -> Result<(), String> {
-        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>)>(
-            &format!(
-                concat!(
-                    "SELECT collection_key, source_kind, mode, component_keys FROM {} ",
-                    "ORDER BY collection_key"
-                ),
-                self.names.collection_sources
+        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>)>(&format!(
+            concat!(
+                "SELECT collection_key, source_kind, mode, component_keys FROM {} ",
+                "ORDER BY collection_key"
             ),
-        )
+            self.names.collection_sources
+        ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collection sources load failed: {error}"))?;
@@ -2572,12 +2571,11 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
-        ArtifactKind, ArtifactRef, CollectionRegistration, CollectionSource,
-        CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
-        EvidenceFreshness, FindingProvider, FindingProviderError, IntegrationEvent,
-        IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
-        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RunNextScanResult,
-        ScanCommandStatus,
+        ArtifactKind, ArtifactRef, CollectionRegistration, CollectionSource, CollectionSourceMode,
+        ComponentListCollectionSource, ComponentRegistration, EvidenceFreshness, FindingProvider,
+        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
+        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+        ReportedFinding, RunNextScanResult, ScanCommandStatus,
     };
 
     fn postgres_test_url() -> Option<String> {
