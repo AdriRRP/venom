@@ -14,6 +14,9 @@ The platform target is:
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
 - query active findings over one closed release collection without reconstructing scope by hand
+- work governed findings in one release-scoped workbench without losing the collection health context
+- see one compact health summary for every managed release collection
+- see one deterministic contextual risk level derived from execution context on active findings views
 - see which release collections are due now, which are scheduled next, and what the last scheduler pass materialized
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings

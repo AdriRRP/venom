@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
 	addCollectionComponent,
+	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
 	configureProvider,
@@ -11,12 +12,15 @@ import {
 	fetchApiHealth,
 	fetchCollectionDetail,
 	fetchCollections,
+	fetchContextProfiles,
 	fetchScanCommandStatus,
 	registerCollection,
 	registerComponent,
+	registerContextProfile,
 	requestCollectionScan,
 	requestScan,
 } from "../lib/api";
+import { describeCollectionHealth } from "../lib/collection-health";
 
 function describeCollectionSchedule(
 	cadenceMinutes: number,
@@ -42,6 +46,11 @@ export function OperationsPage() {
 	const [operatorState, setOperatorState] = useState({
 		componentKey: "component:payments-api",
 		name: "Payments API",
+		contextProfileKey: "context:internet-prod",
+		contextProfileName: "Internet Production",
+		contextInternetExposed: true,
+		contextProduction: true,
+		contextMissionCritical: true,
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
@@ -90,6 +99,20 @@ export function OperationsPage() {
 				queryKey: ["collection-detail", operatorState.collectionKey],
 			});
 		},
+	});
+
+	const registerContextProfileMutation = useMutation({
+		mutationFn: registerContextProfile,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["context-profiles"] });
+		},
+	});
+
+	const assignContextProfileMutation = useMutation({
+		mutationFn: (request: { componentKey: string; profileKey: string }) =>
+			assignContextProfile(request.componentKey, {
+				profileKey: request.profileKey,
+			}),
 	});
 
 	const addCollectionComponentMutation = useMutation({
@@ -164,13 +187,19 @@ export function OperationsPage() {
 
 	const drainWorkerMutation = useMutation({
 		mutationFn: drainScanWorker,
-		onSuccess: (data) => {
+		onSuccess: async (data) => {
 			if (data.last_command_id) {
 				setOperatorState((current) => ({
 					...current,
 					commandId: data.last_command_id ?? current.commandId,
 				}));
 			}
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: ["collections"] }),
+				queryClient.invalidateQueries({
+					queryKey: ["collection-detail", operatorState.collectionKey],
+				}),
+			]);
 		},
 	});
 
@@ -197,18 +226,37 @@ export function OperationsPage() {
 		refetchInterval: 15_000,
 	});
 
+	const contextProfilesQuery = useQuery({
+		queryKey: ["context-profiles"],
+		queryFn: fetchContextProfiles,
+		refetchInterval: 15_000,
+	});
+
 	const scheduledCollectionSummary = useMemo(() => {
 		const collections = collectionsQuery.data?.collections ?? [];
 		const scheduled = collections.filter(
 			(collection) => collection.scan_schedule !== null,
 		);
 		const dueNow = scheduled.filter((collection) => collection.due_now);
+		const activeFindings = collections.reduce(
+			(total, collection) => total + collection.health.total,
+			0,
+		);
 		return {
 			total: collections.length,
 			scheduled: scheduled.length,
 			dueNow: dueNow.length,
+			activeFindings,
 		};
 	}, [collectionsQuery.data]);
+
+	const contextProfilesSummary = useMemo(() => {
+		const profiles = contextProfilesQuery.data?.profiles ?? [];
+		return {
+			total: contextProfilesQuery.data?.managed_context_profiles ?? 0,
+			profiles,
+		};
+	}, [contextProfilesQuery.data]);
 
 	return (
 		<AppShell apiHealth={healthLabel} currentView="operations">
@@ -279,6 +327,164 @@ export function OperationsPage() {
 							<p>
 								Change: {registerComponentMutation.data.change}. Managed
 								components: {registerComponentMutation.data.managed_components}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Context</p>
+							<h2>Register Context Profile</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void registerContextProfileMutation.mutateAsync({
+								profileKey: operatorState.contextProfileKey,
+								name: operatorState.contextProfileName,
+								internetExposed: operatorState.contextInternetExposed,
+								production: operatorState.contextProduction,
+								missionCritical: operatorState.contextMissionCritical,
+							});
+						}}
+					>
+						<label>
+							Profile key
+							<input
+								name="contextProfileKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextProfileKey: event.target.value,
+									}))
+								}
+								value={operatorState.contextProfileKey}
+							/>
+						</label>
+						<label>
+							Name
+							<input
+								name="contextProfileName"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextProfileName: event.target.value,
+									}))
+								}
+								value={operatorState.contextProfileName}
+							/>
+						</label>
+						<label>
+							<input
+								checked={operatorState.contextInternetExposed}
+								name="contextInternetExposed"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextInternetExposed: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							Internet exposed
+						</label>
+						<label>
+							<input
+								checked={operatorState.contextProduction}
+								name="contextProduction"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextProduction: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							Production
+						</label>
+						<label>
+							<input
+								checked={operatorState.contextMissionCritical}
+								name="contextMissionCritical"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextMissionCritical: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							Mission critical
+						</label>
+						<button className="primary-button" type="submit">
+							Register Context Profile
+						</button>
+					</form>
+					{registerContextProfileMutation.data ? (
+						<div className="result-card">
+							<strong>Last context profile change</strong>
+							<p>
+								Change: {registerContextProfileMutation.data.change}. Managed
+								context profiles:{" "}
+								{registerContextProfileMutation.data.managed_context_profiles}.
+							</p>
+						</div>
+					) : null}
+					<div className="result-card">
+						<strong>Context profiles</strong>
+						<p>Total: {contextProfilesSummary.total}.</p>
+						<ul>
+							{contextProfilesSummary.profiles.map((profile) => (
+								<li key={profile.profile_key}>
+									{profile.profile_key}: {profile.name} (
+									{profile.internet_exposed ? "internet" : "internal"},{" "}
+									{profile.production ? "production" : "non-production"},{" "}
+									{profile.mission_critical ? "critical" : "non-critical"})
+								</li>
+							))}
+						</ul>
+					</div>
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Context</p>
+							<h2>Assign Context Profile</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void assignContextProfileMutation.mutateAsync({
+								componentKey: operatorState.componentKey,
+								profileKey: operatorState.contextProfileKey,
+							});
+						}}
+					>
+						<label>
+							Component key
+							<input readOnly value={operatorState.componentKey} />
+						</label>
+						<label>
+							Profile key
+							<input readOnly value={operatorState.contextProfileKey} />
+						</label>
+						<button className="primary-button" type="submit">
+							Assign Context Profile
+						</button>
+					</form>
+					{assignContextProfileMutation.data ? (
+						<div className="result-card">
+							<strong>Last context assignment</strong>
+							<p>
+								Change: {assignContextProfileMutation.data.change}. Profile:{" "}
+								{assignContextProfileMutation.data.profile_key}.
 							</p>
 						</div>
 					) : null}
@@ -404,7 +610,8 @@ export function OperationsPage() {
 						<p>
 							Total: {scheduledCollectionSummary.total}. Scheduled:{" "}
 							{scheduledCollectionSummary.scheduled}. Due now:{" "}
-							{scheduledCollectionSummary.dueNow}.
+							{scheduledCollectionSummary.dueNow}. Active findings:{" "}
+							{scheduledCollectionSummary.activeFindings}.
 						</p>
 						{collectionsQuery.data ? (
 							<ul>
@@ -420,7 +627,8 @@ export function OperationsPage() {
 													collection.scan_schedule.last_materialized_at_unix_ms,
 													collection.scan_schedule.last_enqueued_commands,
 												)
-											: "manual only"}
+											: "manual only"}{" "}
+										- {describeCollectionHealth(collection.health)}
 									</li>
 								))}
 							</ul>
@@ -459,6 +667,10 @@ export function OperationsPage() {
 								) : (
 									<p>No schedule configured.</p>
 								)}
+								<p>
+									Health:{" "}
+									{describeCollectionHealth(collectionDetailQuery.data.health)}.
+								</p>
 								<ul>
 									{collectionDetailQuery.data.members.map((member) => (
 										<li key={member.component_key}>{member.component_key}</li>

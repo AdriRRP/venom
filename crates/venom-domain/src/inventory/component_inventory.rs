@@ -114,6 +114,117 @@ pub struct ConfigureProviderResult {
     pub provider_key: Option<Box<str>>,
 }
 
+/// Canonical registration request for one reusable execution-context profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextProfileRegistration {
+    /// Stable profile identity inside VENOM.
+    pub profile_key: Box<str>,
+    /// Human-readable profile name.
+    pub name: Box<str>,
+    /// Whether the workload is exposed to untrusted network paths.
+    pub internet_exposed: bool,
+    /// Whether the workload is part of production runtime.
+    pub production: bool,
+    /// Whether the workload is mission-critical for the operator.
+    pub mission_critical: bool,
+}
+
+impl ContextProfileRegistration {
+    #[must_use]
+    pub fn new(
+        profile_key: impl Into<Box<str>>,
+        name: impl Into<Box<str>>,
+        internet_exposed: bool,
+        production: bool,
+        mission_critical: bool,
+    ) -> Self {
+        Self {
+            profile_key: profile_key.into(),
+            name: name.into(),
+            internet_exposed,
+            production,
+            mission_critical,
+        }
+    }
+}
+
+/// Observable outcome of one context profile registration attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterContextProfileChange {
+    /// The profile key was new and is now managed.
+    Registered,
+    /// The same profile was registered again with the same canonical data.
+    Unchanged,
+    /// The profile key already exists with conflicting canonical data.
+    Rejected,
+}
+
+impl RegisterContextProfileChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of one context profile registration command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterContextProfileResult {
+    /// Observable state change caused by the profile registration attempt.
+    pub change: RegisterContextProfileChange,
+    /// Total number of managed context profiles after the operation.
+    pub managed_context_profiles: usize,
+}
+
+/// Operator-facing snapshot of one managed execution-context profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedContextProfile {
+    /// Stable profile identity inside VENOM.
+    pub profile_key: Box<str>,
+    /// Human-readable profile name.
+    pub name: Box<str>,
+    /// Whether the workload is exposed to untrusted network paths.
+    pub internet_exposed: bool,
+    /// Whether the workload is part of production runtime.
+    pub production: bool,
+    /// Whether the workload is mission-critical for the operator.
+    pub mission_critical: bool,
+}
+
+/// Observable outcome of assigning one context profile to one managed component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignContextProfileChange {
+    /// The component now uses the context profile.
+    Assigned,
+    /// The exact same assignment already existed.
+    Unchanged,
+    /// The assignment was rejected because the component or profile is missing.
+    Rejected,
+}
+
+impl AssignContextProfileChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of assigning one context profile to one managed component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignContextProfileResult {
+    /// Observable state change caused by the assignment attempt.
+    pub change: AssignContextProfileChange,
+    /// Assigned profile key after the operation when the component exists.
+    pub profile_key: Option<Box<str>>,
+}
+
 /// Canonical registration request for one managed collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionRegistration {
@@ -315,6 +426,7 @@ struct ComponentRecord {
     registration: ComponentRegistration,
     artifacts: BTreeSet<ArtifactRef>,
     provider_key: Option<Box<str>>,
+    context_profile_key: Option<Box<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +434,11 @@ struct CollectionRecord {
     registration: CollectionRegistration,
     component_keys: BTreeSet<Box<str>>,
     scan_schedule: Option<CollectionScanSchedule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextProfileRecord {
+    registration: ContextProfileRegistration,
 }
 
 /// Minimal in-memory inventory of managed components and their immutable artifacts.
@@ -334,6 +451,7 @@ struct CollectionRecord {
 pub struct ComponentInventory {
     components: BTreeMap<Box<str>, ComponentRecord>,
     collections: BTreeMap<Box<str>, CollectionRecord>,
+    context_profiles: BTreeMap<Box<str>, ContextProfileRecord>,
 }
 
 impl ComponentInventory {
@@ -353,6 +471,7 @@ impl ComponentInventory {
                         registration,
                         artifacts: BTreeSet::new(),
                         provider_key: None,
+                        context_profile_key: None,
                     },
                 );
                 RegisterComponentChange::Registered
@@ -425,6 +544,65 @@ impl ComponentInventory {
         ConfigureProviderResult {
             change,
             provider_key: record.provider_key.clone(),
+        }
+    }
+
+    /// Register one reusable execution-context profile.
+    #[must_use]
+    pub fn register_context_profile(
+        &mut self,
+        registration: ContextProfileRegistration,
+    ) -> RegisterContextProfileResult {
+        let change = match self.context_profiles.get(registration.profile_key.as_ref()) {
+            Some(existing) if existing.registration == registration => {
+                RegisterContextProfileChange::Unchanged
+            }
+            Some(_) => RegisterContextProfileChange::Rejected,
+            None => {
+                let key = registration.profile_key.clone();
+                self.context_profiles
+                    .insert(key, ContextProfileRecord { registration });
+                RegisterContextProfileChange::Registered
+            }
+        };
+
+        RegisterContextProfileResult {
+            change,
+            managed_context_profiles: self.context_profiles.len(),
+        }
+    }
+
+    /// Assign one managed context profile to one managed component.
+    #[must_use]
+    pub fn assign_context_profile(
+        &mut self,
+        component_key: &str,
+        profile_key: &str,
+    ) -> AssignContextProfileResult {
+        if !self.context_profiles.contains_key(profile_key) {
+            return AssignContextProfileResult {
+                change: AssignContextProfileChange::Rejected,
+                profile_key: None,
+            };
+        }
+
+        let Some(record) = self.components.get_mut(component_key) else {
+            return AssignContextProfileResult {
+                change: AssignContextProfileChange::Rejected,
+                profile_key: None,
+            };
+        };
+
+        let change = if record.context_profile_key.as_deref() == Some(profile_key) {
+            AssignContextProfileChange::Unchanged
+        } else {
+            record.context_profile_key = Some(profile_key.into());
+            AssignContextProfileChange::Assigned
+        };
+
+        AssignContextProfileResult {
+            change,
+            profile_key: record.context_profile_key.clone(),
         }
     }
 
@@ -642,6 +820,54 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn assigned_context_profile(&self, component_key: &str) -> Option<&str> {
+        self.components
+            .get(component_key)
+            .and_then(|record| record.context_profile_key.as_deref())
+    }
+
+    #[must_use]
+    pub fn managed_component_context_profile(
+        &self,
+        component_key: &str,
+    ) -> Option<ManagedContextProfile> {
+        self.assigned_context_profile(component_key)
+            .and_then(|profile_key| self.context_profile(profile_key))
+    }
+
+    #[must_use]
+    pub fn managed_context_profiles(&self) -> usize {
+        self.context_profiles.len()
+    }
+
+    #[must_use]
+    pub fn context_profiles(&self) -> Vec<ManagedContextProfile> {
+        self.context_profiles
+            .values()
+            .map(|record| ManagedContextProfile {
+                profile_key: record.registration.profile_key.clone(),
+                name: record.registration.name.clone(),
+                internet_exposed: record.registration.internet_exposed,
+                production: record.registration.production,
+                mission_critical: record.registration.mission_critical,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn context_profile(&self, profile_key: &str) -> Option<ManagedContextProfile> {
+        self.context_profiles
+            .get(profile_key)
+            .map(|record| ManagedContextProfile {
+                profile_key: record.registration.profile_key.clone(),
+                name: record.registration.name.clone(),
+                internet_exposed: record.registration.internet_exposed,
+                production: record.registration.production,
+                mission_critical: record.registration.mission_critical,
+            })
+    }
+
+    #[must_use]
     pub fn bound_artifact_refs(&self, component_key: &str) -> Option<Vec<ArtifactRef>> {
         self.components.get(component_key).map(|record| {
             record
@@ -807,8 +1033,8 @@ mod tests {
     use super::{
         AddCollectionComponentChange, BindArtifactChange, CollectionRegistration,
         ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
-        ConfigureProviderChange, RegisterCollectionChange, RegisterComponentChange,
-        RemoveCollectionComponentChange,
+        ConfigureProviderChange, ContextProfileRegistration, RegisterCollectionChange,
+        RegisterComponentChange, RegisterContextProfileChange, RemoveCollectionComponentChange,
     };
     use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
@@ -957,6 +1183,78 @@ mod tests {
 
         assert_eq!(result.change, ConfigureProviderChange::Rejected);
         assert!(result.provider_key.is_none());
+    }
+
+    #[test]
+    fn new_context_profile_is_registered() {
+        let mut inventory = ComponentInventory::default();
+
+        let result = inventory.register_context_profile(ContextProfileRegistration::new(
+            "context:internet-prod",
+            "Internet Production",
+            true,
+            true,
+            true,
+        ));
+
+        assert_eq!(result.change, RegisterContextProfileChange::Registered);
+        assert_eq!(result.managed_context_profiles, 1);
+        assert_eq!(
+            inventory.assigned_context_profile("component:payments-api"),
+            None
+        );
+        assert_eq!(
+            inventory
+                .context_profile("context:internet-prod")
+                .expect("profile should exist")
+                .name
+                .as_ref(),
+            "Internet Production"
+        );
+    }
+
+    #[test]
+    fn same_context_profile_registration_is_idempotent() {
+        let mut inventory = ComponentInventory::default();
+        let registration = ContextProfileRegistration::new(
+            "context:internet-prod",
+            "Internet Production",
+            true,
+            true,
+            true,
+        );
+
+        let _ = inventory.register_context_profile(registration.clone());
+        let result = inventory.register_context_profile(registration);
+
+        assert_eq!(result.change, RegisterContextProfileChange::Unchanged);
+        assert_eq!(result.managed_context_profiles, 1);
+    }
+
+    #[test]
+    fn managed_component_can_assign_one_context_profile() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.register_context_profile(ContextProfileRegistration::new(
+            "context:internet-prod",
+            "Internet Production",
+            true,
+            true,
+            true,
+        ));
+
+        let result =
+            inventory.assign_context_profile("component:payments-api", "context:internet-prod");
+
+        assert_eq!(result.change.as_str(), "assigned");
+        assert_eq!(result.profile_key.as_deref(), Some("context:internet-prod"));
+        assert_eq!(
+            inventory.assigned_context_profile("component:payments-api"),
+            Some("context:internet-prod")
+        );
     }
 
     #[test]

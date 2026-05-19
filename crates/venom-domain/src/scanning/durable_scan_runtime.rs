@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Minimal durable queue for canonical scan requests.
@@ -553,11 +554,13 @@ enum DurableScanEvent {
 }
 
 fn next_command_id() -> Box<str> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("current time should be after unix epoch")
         .as_nanos();
-    format!("scan-command-{nanos}").into_boxed_str()
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("scan-command-{nanos}-{counter}").into_boxed_str()
 }
 
 #[cfg(test)]

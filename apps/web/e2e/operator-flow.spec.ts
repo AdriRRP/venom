@@ -17,6 +17,29 @@ async function seedReleaseCollection(request: APIRequestContext) {
 	);
 
 	await expectOk(
+		await request.post("/api/context-profiles", {
+			data: {
+				profile_key: "context:internet-prod",
+				name: "Internet Production",
+				internet_exposed: true,
+				production: true,
+				mission_critical: true,
+			},
+		}),
+	);
+
+	await expectOk(
+		await request.post(
+			"/api/components/component%3Apayments-api/context-profile",
+			{
+				data: {
+					profile_key: "context:internet-prod",
+				},
+			},
+		),
+	);
+
+	await expectOk(
 		await request.post("/api/collections", {
 			data: {
 				collection_key: "release:2026.05",
@@ -83,9 +106,25 @@ test("operator console can manage one release collection and execute one schedul
 	page,
 }) => {
 	await page.goto("/operations");
+	const collectionDetailCard = page
+		.locator(".result-card")
+		.filter({ hasText: "Current collection detail" });
 
-	await page.getByRole("button", { name: "Register" }).click();
+	await page.getByRole("button", { name: "Register", exact: true }).click();
 	await expect(page.getByText(/Managed components: 1\./i)).toBeVisible();
+
+	await page.getByRole("button", { name: "Register Context Profile" }).click();
+	await expect(page.getByText(/Managed context profiles: 1\./i)).toBeVisible();
+	await expect(
+		page.getByText(
+			/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+		),
+	).toBeVisible();
+
+	await page.getByRole("button", { name: "Assign Context Profile" }).click();
+	await expect(
+		page.getByText(/Change: assigned\. Profile: context:internet-prod\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Create Collection" }).click();
 	await expect(page.getByText(/Managed collections: 1\./i)).toBeVisible();
@@ -114,6 +153,12 @@ test("operator console can manage one release collection and execute one schedul
 
 	await page.getByRole("button", { name: "Run Worker" }).click();
 	await expect(page.getByText(/Processed: 1\./i)).toBeVisible();
+	await expect(page.getByText(/Active findings: 1\./i)).toBeVisible();
+	await expect(
+		collectionDetailCard.getByText(
+			/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
 });
 
 test("findings console can query one seeded release collection", async ({
@@ -129,6 +174,14 @@ test("findings console can query one seeded release collection", async ({
 	).toHaveValue("release:2026.05");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
 	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("button", { name: "Open (1)" }),
+	).toBeVisible();
+	await expect(
 		collectionPanel.getByRole("cell", { name: "component:payments-api" }),
 	).toBeVisible();
 	await expect(
@@ -136,6 +189,12 @@ test("findings console can query one seeded release collection", async ({
 	).toBeVisible();
 	await expect(
 		collectionPanel.getByRole("cell", { name: "openssl@3.0.0" }),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("cell", { name: "critical" }),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("cell", { name: "Internet Production" }),
 	).toBeVisible();
 	await collectionPanel.getByRole("button", { name: "Accept Risk" }).click();
 	await page
@@ -146,13 +205,23 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByText("risk-accepted: Compensating control in place"),
 	).toBeVisible();
 
-	await collectionPanel.getByRole("button", { name: "Suppress" }).click();
+	await collectionPanel
+		.getByRole("button", { name: "Suppress", exact: true })
+		.click();
 	await page
 		.getByRole("textbox", { name: "Reason" })
 		.fill("Known upstream false alarm");
 	await page.getByRole("button", { name: "Submit Suppression" }).click();
 	await expect(
 		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 0 open - 0 risk accepted - 1 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByRole("button", { name: "Suppressed (1)" }),
 	).toBeVisible();
 	await collectionPanel
 		.getByRole("combobox", { name: "Governance" })

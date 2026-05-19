@@ -66,6 +66,70 @@ describe("OperationsPage", () => {
 		expect(await screen.findByText(/Change: registered/i)).toBeInTheDocument();
 	});
 
+	it("registers one context profile and assigns it to one managed component", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/context-profiles") {
+				return new Response(
+					JSON.stringify({
+						change: "registered",
+						managed_context_profiles: 1,
+						profiles: [
+							{
+								profile_key: "context:internet-prod",
+								name: "Internet Production",
+								internet_exposed: true,
+								production: true,
+								mission_critical: true,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/components/component%3Apayments-api/context-profile") {
+				return new Response(
+					JSON.stringify({
+						change: "assigned",
+						profile_key: "context:internet-prod",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Register Context Profile" }),
+		);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Assign Context Profile" }),
+		);
+
+		expect(
+			await screen.findByText(/Managed context profiles: 1\./i),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				/Change: assigned\. Profile: context:internet-prod\./i,
+			),
+		).toBeInTheDocument();
+	});
+
 	it("creates one collection and adds one managed component", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);
@@ -83,6 +147,14 @@ describe("OperationsPage", () => {
 								members: 1,
 								scan_schedule: null,
 								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
 							},
 						],
 						change: "created",
@@ -105,6 +177,14 @@ describe("OperationsPage", () => {
 						collection_key: "release:2026.05",
 						name: "May Release",
 						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
 						members: [{ component_key: "component:payments-api" }],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -132,8 +212,15 @@ describe("OperationsPage", () => {
 			await screen.findByText(/component:payments-api/i),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/Total: 1\. Scheduled: 0\. Due now: 0\./i),
+			await screen.findByText(
+				/Total: 1\. Scheduled: 0\. Due now: 0\. Active findings: 0\./i,
+			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findAllByText(
+				/0 active - 0 open - 0 risk accepted - 0 suppressed - 0 critical risk - 0 high risk/i,
+			),
+		).toHaveLength(2);
 	});
 
 	it("configures one collection scan schedule and runs the scheduler", async () => {
@@ -171,6 +258,14 @@ describe("OperationsPage", () => {
 									last_enqueued_commands: 1,
 								},
 								due_now: false,
+								health: {
+									total: 1,
+									open: 1,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 1,
+									high_risk: 0,
+								},
 							},
 						],
 					}),
@@ -188,6 +283,14 @@ describe("OperationsPage", () => {
 							next_due_at_unix_ms: 1000,
 							last_materialized_at_unix_ms: 1500,
 							last_enqueued_commands: 1,
+						},
+						health: {
+							total: 1,
+							open: 1,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 1,
+							high_risk: 0,
 						},
 						members: [{ component_key: "component:payments-api" }],
 					}),
@@ -231,7 +334,9 @@ describe("OperationsPage", () => {
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/Scheduled: 1\. Due now: 0\./i),
+			await screen.findByText(
+				/Scheduled: 1\. Due now: 0\. Active findings: 1\./i,
+			),
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
@@ -243,6 +348,11 @@ describe("OperationsPage", () => {
 				/Last run at 1500\. Last enqueued commands: 1\./i,
 			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findAllByText(
+				/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+			),
+		).toHaveLength(2);
 	});
 
 	it("requests one canonical scan from the operator flow", async () => {
@@ -318,6 +428,50 @@ describe("OperationsPage", () => {
 			const url = String(input);
 			if (url === "/api/health") {
 				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								scan_schedule: null,
+								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [{ component_key: "component:payments-api" }],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
 			}
 			if (url === "/api/scan-commands/cmd-1") {
 				return new Response(

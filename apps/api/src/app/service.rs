@@ -6,17 +6,20 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    AcceptRiskResult, ActiveFindingProjection, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingResult, Suppression,
+    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
+    ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
+    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
+use venom_domain::inventory::{ContextProfileRegistration, ManagedContextProfile};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -86,8 +89,7 @@ impl ApiReadSnapshot {
         );
         let query = build_active_findings_query(&request, artifact)?;
         let page = self.read_model.query_active_findings(&query);
-        let findings = page
-            .findings
+        let findings = contextualize_active_findings(&self.inventory, page.findings)
             .into_iter()
             .map(ActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
@@ -118,14 +120,18 @@ impl ApiReadSnapshot {
             .inventory
             .collection_operations_summaries(now_unix_ms)
             .into_iter()
-            .map(|collection| CollectionSummary {
-                collection_key: collection.collection_key.into(),
-                name: collection.name.into(),
-                members: collection.members,
-                scan_schedule: collection
-                    .scan_schedule
-                    .map(CollectionScanScheduleItem::from),
-                due_now: collection.due_now,
+            .map(|collection| {
+                let health = self.collection_health_summary(collection.collection_key.as_ref());
+                CollectionSummary {
+                    collection_key: collection.collection_key.into(),
+                    name: collection.name.into(),
+                    members: collection.members,
+                    scan_schedule: collection
+                        .scan_schedule
+                        .map(CollectionScanScheduleItem::from),
+                    due_now: collection.due_now,
+                    health: CollectionHealthItem::from(health),
+                }
             })
             .collect::<Vec<_>>();
         let managed_collections = collections.len();
@@ -159,6 +165,7 @@ impl ApiReadSnapshot {
             scan_schedule: collection
                 .scan_schedule
                 .map(CollectionScanScheduleItem::from),
+            health: CollectionHealthItem::from(self.collection_health_summary(collection_key)),
             members: collection
                 .component_keys
                 .into_iter()
@@ -167,6 +174,21 @@ impl ApiReadSnapshot {
                 })
                 .collect(),
         })
+    }
+
+    /// Query the operator-facing catalog of managed execution-context profiles.
+    #[must_use]
+    pub fn list_context_profiles(&self) -> ListContextProfilesResponse {
+        let profiles = self
+            .inventory
+            .context_profiles()
+            .into_iter()
+            .map(ContextProfileItem::from)
+            .collect::<Vec<_>>();
+        ListContextProfilesResponse {
+            managed_context_profiles: profiles.len(),
+            profiles,
+        }
     }
 
     /// Query active findings over one closed managed collection scope.
@@ -180,16 +202,17 @@ impl ApiReadSnapshot {
         collection_key: &str,
         request: CollectionActiveFindingsRequest,
     ) -> Result<CollectionActiveFindingsResponse, ApiApplicationError> {
-        let scope = self
-            .inventory
-            .collection_scoped_artifacts(collection_key)
-            .ok_or_else(|| {
-                ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
-            })?;
         let query = build_scoped_active_findings_query(&request)?;
-        let page = self.read_model.query_scoped_active_findings(&scope, &query);
-        let findings = page
-            .findings
+        let overview = query_collection_governance_overview(
+            &self.inventory,
+            &self.read_model,
+            collection_key,
+            &query,
+        )
+        .ok_or_else(|| {
+            ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
+        })?;
+        let findings = contextualize_active_findings(&self.inventory, overview.page.findings)
             .into_iter()
             .map(CollectionActiveFindingItem::from_projection)
             .collect::<Vec<_>>();
@@ -199,12 +222,20 @@ impl ApiReadSnapshot {
             min_severity: request.min_severity,
             governance_state: request.governance_state,
             package_name: request.package_name,
-            total_active_findings: page.total,
-            returned: page.returned,
-            offset: page.offset,
-            limit: page.limit,
+            health: CollectionHealthItem::from(overview.health),
+            total_active_findings: overview.page.total,
+            returned: overview.page.returned,
+            offset: overview.page.offset,
+            limit: overview.page.limit,
             active_findings: findings,
         })
+    }
+
+    fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthSummary {
+        self.inventory
+            .collection_scoped_artifacts(collection_key)
+            .map(|scope| summarize_collection_health(&self.inventory, &self.read_model, &scope))
+            .unwrap_or_default()
     }
 }
 
@@ -335,6 +366,39 @@ impl ApiApplication {
         Ok(RegisterComponentResponse {
             change: result.change.as_str().to_owned(),
             managed_components: result.managed_components,
+        })
+    }
+
+    /// Register one reusable execution-context profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
+    pub async fn register_context_profile(
+        &mut self,
+        request: ContextProfileRegistrationRequest,
+    ) -> Result<RegisterContextProfileResponse, ApiApplicationError> {
+        let registration = ContextProfileRegistration::new(
+            request.profile_key,
+            request.name,
+            request.internet_exposed,
+            request.production,
+            request.mission_critical,
+        );
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .register_context_profile(registration)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .register_context_profile(registration)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(RegisterContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            managed_context_profiles: result.managed_context_profiles,
         })
     }
 
@@ -529,6 +593,33 @@ impl ApiApplication {
         Ok(ConfigureProviderResponse {
             change: result.change.as_str().to_owned(),
             provider_key: result.provider_key.map(Into::into),
+        })
+    }
+
+    /// Assign one managed execution-context profile to one managed component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable write fails.
+    pub async fn assign_context_profile(
+        &mut self,
+        component_key: &str,
+        request: AssignContextProfileRequest,
+    ) -> Result<AssignContextProfileResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_context_profile(component_key, &request.profile_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_context_profile(component_key, &request.profile_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(AssignContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            profile_key: result.profile_key.map(Into::into),
         })
     }
 
@@ -1193,6 +1284,48 @@ pub struct RegisterComponentResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ContextProfileRegistrationRequest {
+    pub profile_key: String,
+    pub name: String,
+    pub internet_exposed: bool,
+    pub production: bool,
+    pub mission_critical: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterContextProfileResponse {
+    pub change: String,
+    pub managed_context_profiles: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextProfileItem {
+    pub profile_key: String,
+    pub name: String,
+    pub internet_exposed: bool,
+    pub production: bool,
+    pub mission_critical: bool,
+}
+
+impl From<ManagedContextProfile> for ContextProfileItem {
+    fn from(value: ManagedContextProfile) -> Self {
+        Self {
+            profile_key: value.profile_key.into(),
+            name: value.name.into(),
+            internet_exposed: value.internet_exposed,
+            production: value.production,
+            mission_critical: value.mission_critical,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListContextProfilesResponse {
+    pub managed_context_profiles: usize,
+    pub profiles: Vec<ContextProfileItem>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CollectionRegistrationRequest {
     pub collection_key: String,
     pub name: String,
@@ -1228,6 +1361,7 @@ pub struct CollectionSummary {
     pub members: usize,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub due_now: bool,
+    pub health: CollectionHealthItem,
 }
 
 #[derive(Debug, Serialize)]
@@ -1235,7 +1369,31 @@ pub struct CollectionDetailResponse {
     pub collection_key: String,
     pub name: String,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub health: CollectionHealthItem,
     pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CollectionHealthItem {
+    pub total: usize,
+    pub open: usize,
+    pub risk_accepted: usize,
+    pub suppressed: usize,
+    pub critical_risk: usize,
+    pub high_risk: usize,
+}
+
+impl From<CollectionHealthSummary> for CollectionHealthItem {
+    fn from(value: CollectionHealthSummary) -> Self {
+        Self {
+            total: value.total,
+            open: value.open,
+            risk_accepted: value.risk_accepted,
+            suppressed: value.suppressed,
+            critical_risk: value.critical_risk,
+            high_risk: value.high_risk,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1285,6 +1443,17 @@ pub struct ConfigureProviderRequest {
 pub struct ConfigureProviderResponse {
     pub change: String,
     pub provider_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignContextProfileRequest {
+    pub profile_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssignContextProfileResponse {
+    pub change: String,
+    pub profile_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1443,13 +1612,16 @@ pub struct ActiveFindingItem {
     pub package_version: String,
     pub package_purl: Option<String>,
     pub severity: String,
+    pub contextual_risk: String,
+    pub context_profile_key: Option<String>,
+    pub context_profile_name: Option<String>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
 }
 
 impl ActiveFindingItem {
-    fn from_projection(value: ActiveFindingProjection) -> Self {
+    fn from_projection(value: ContextualActiveFindingProjection) -> Self {
         Self {
             component_key: value.finding.component_key.into(),
             artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
@@ -1459,6 +1631,9 @@ impl ActiveFindingItem {
             package_version: value.finding.package.version.into(),
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
+            contextual_risk: value.contextual_risk.as_str().to_owned(),
+            context_profile_key: value.context_profile_key.map(Into::into),
+            context_profile_name: value.context_profile_name.map(Into::into),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,
@@ -1481,6 +1656,7 @@ pub struct CollectionActiveFindingsResponse {
     pub min_severity: Option<String>,
     pub governance_state: Option<String>,
     pub package_name: Option<String>,
+    pub health: CollectionHealthItem,
     pub total_active_findings: usize,
     pub returned: usize,
     pub offset: usize,
@@ -1498,13 +1674,16 @@ pub struct CollectionActiveFindingItem {
     pub package_version: String,
     pub package_purl: Option<String>,
     pub severity: String,
+    pub contextual_risk: String,
+    pub context_profile_key: Option<String>,
+    pub context_profile_name: Option<String>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
 }
 
 impl CollectionActiveFindingItem {
-    fn from_projection(value: ActiveFindingProjection) -> Self {
+    fn from_projection(value: ContextualActiveFindingProjection) -> Self {
         Self {
             component_key: value.finding.component_key.into(),
             artifact_kind: artifact_kind_name(value.finding.artifact.kind).to_owned(),
@@ -1514,6 +1693,9 @@ impl CollectionActiveFindingItem {
             package_version: value.finding.package.version.into(),
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
+            contextual_risk: value.contextual_risk.as_str().to_owned(),
+            context_profile_key: value.context_profile_key.map(Into::into),
+            context_profile_name: value.context_profile_name.map(Into::into),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,

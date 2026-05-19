@@ -32,6 +32,14 @@ describe("FindingsPage", () => {
 						collection_key: "release:2026.05",
 						min_severity: null,
 						package_name: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
 						total_active_findings: 0,
 						returned: 0,
 						offset: 0,
@@ -98,6 +106,14 @@ describe("FindingsPage", () => {
 						min_severity: "high",
 						governance_state: "suppressed",
 						package_name: "openssl",
+						health: {
+							total: 3,
+							open: 1,
+							risk_accepted: 1,
+							suppressed: 1,
+							critical_risk: 1,
+							high_risk: 1,
+						},
 						total_active_findings: 1,
 						returned: 1,
 						offset: 0,
@@ -112,6 +128,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: "open",
 								governance_reason: null,
 								governance_until_unix_ms: null,
@@ -184,6 +203,20 @@ describe("FindingsPage", () => {
 				"container-image:registry.example/payments@sha256:111",
 			),
 		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "critical" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "Internet Production" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				"Health: 3 active - 1 open - 1 risk accepted - 1 suppressed - 1 critical risk - 1 high risk",
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("button", { name: "Suppressed (1)" }),
+		).toBeInTheDocument();
 	});
 
 	it("moves between artifact pages with bounded controls", async () => {
@@ -198,6 +231,14 @@ describe("FindingsPage", () => {
 						collection_key: "release:2026.05",
 						min_severity: null,
 						package_name: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
 						total_active_findings: 0,
 						returned: 0,
 						offset: 0,
@@ -229,6 +270,9 @@ describe("FindingsPage", () => {
 								package_version: "1.3.1",
 								package_purl: null,
 								severity: "medium",
+								contextual_risk: "medium",
+								context_profile_key: null,
+								context_profile_name: null,
 								governance_state: "open",
 								governance_reason: null,
 								governance_until_unix_ms: null,
@@ -259,6 +303,9 @@ describe("FindingsPage", () => {
 							package_version: "3.0.0",
 							package_purl: null,
 							severity: "high",
+							contextual_risk: "high",
+							context_profile_key: null,
+							context_profile_name: null,
 							governance_state: "open",
 							governance_reason: null,
 							governance_until_unix_ms: null,
@@ -326,6 +373,14 @@ describe("FindingsPage", () => {
 							collection_key: "release:2026.05",
 							min_severity: null,
 							package_name: null,
+							health: {
+								total: 1,
+								open: accepted ? 0 : 1,
+								risk_accepted: accepted ? 1 : 0,
+								suppressed: 0,
+								critical_risk: 1,
+								high_risk: 0,
+							},
 							total_active_findings: 1,
 							returned: 1,
 							offset: 0,
@@ -340,6 +395,9 @@ describe("FindingsPage", () => {
 									package_version: "3.0.0",
 									package_purl: null,
 									severity: "high",
+									contextual_risk: accepted ? "critical" : "critical",
+									context_profile_key: "context:internet-prod",
+									context_profile_name: "Internet Production",
 									governance_state: accepted ? "risk-accepted" : "open",
 									governance_reason: accepted
 										? "Compensating control in place"
@@ -372,6 +430,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: accepted ? "critical" : "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: accepted ? "risk-accepted" : "open",
 								governance_reason: accepted
 									? "Compensating control in place"
@@ -436,6 +497,14 @@ describe("FindingsPage", () => {
 							collection_key: "release:2026.05",
 							min_severity: null,
 							package_name: null,
+							health: {
+								total: 1,
+								open: suppressed ? 0 : 1,
+								risk_accepted: 0,
+								suppressed: suppressed ? 1 : 0,
+								critical_risk: 1,
+								high_risk: 0,
+							},
 							total_active_findings: 1,
 							returned: 1,
 							offset: 0,
@@ -450,6 +519,9 @@ describe("FindingsPage", () => {
 									package_version: "3.0.0",
 									package_purl: null,
 									severity: "high",
+									contextual_risk: suppressed ? "critical" : "critical",
+									context_profile_key: "context:internet-prod",
+									context_profile_name: "Internet Production",
 									governance_state: suppressed ? "suppressed" : "open",
 									governance_reason: suppressed
 										? "Known upstream false alarm"
@@ -482,6 +554,9 @@ describe("FindingsPage", () => {
 								package_version: "3.0.0",
 								package_purl: null,
 								severity: "high",
+								contextual_risk: suppressed ? "critical" : "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
 								governance_state: suppressed ? "suppressed" : "open",
 								governance_reason: suppressed
 									? "Known upstream false alarm"

@@ -1,17 +1,18 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
-    ArtifactRef, BindArtifactChange, BindArtifactResult, CollectionRegistration,
-    ComponentRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureIntegrationRuntimeChange,
-    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
-    EvidenceFreshness, FindingChangeSet, FindingGovernance, FindingIngestion,
-    FindingIngestionError, FindingReadModel, FindingRef, IntegrationEventPublicationFailure,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
-    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
+    BindArtifactResult, CollectionRegistration, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
+    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
+    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
-    RegisterComponentResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
-    ReportedFinding, RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult,
-    Suppression, findings::finding_read_model::canonicalize_reported_findings,
+    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
+    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
+    RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -206,6 +207,48 @@ impl DurableState {
             self.append_event(&DurableEvent::ComponentProviderConfigured {
                 component_key: component_key.into(),
                 provider_key,
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably register one reusable execution-context profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn register_context_profile(
+        &mut self,
+        registration: ContextProfileRegistration,
+    ) -> Result<RegisterContextProfileResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_context_profile(registration.clone());
+        if result.change == RegisterContextProfileChange::Registered {
+            self.append_event(&DurableEvent::ContextProfileRegistered {
+                registration: StoredContextProfileRegistration::from(registration),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one managed context profile to one managed component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn assign_context_profile(
+        &mut self,
+        component_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignContextProfileResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_context_profile(component_key, profile_key);
+        if result.change == AssignContextProfileChange::Assigned {
+            self.append_event(&DurableEvent::ComponentContextProfileAssigned {
+                component_key: component_key.into(),
+                profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
@@ -493,8 +536,10 @@ impl DurableState {
     fn apply_event(&mut self, event: DurableEvent, line: usize) -> Result<(), DurableStateError> {
         match event {
             DurableEvent::ComponentRegistered { .. }
+            | DurableEvent::ContextProfileRegistered { .. }
             | DurableEvent::ArtifactBound { .. }
             | DurableEvent::ComponentProviderConfigured { .. }
+            | DurableEvent::ComponentContextProfileAssigned { .. }
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
             | DurableEvent::CollectionComponentRemoved { .. }
@@ -551,6 +596,17 @@ impl DurableState {
             } => {
                 self.apply_provider_configured(component_key.as_ref(), provider_key.as_ref(), line)
             }
+            DurableEvent::ContextProfileRegistered { registration } => {
+                self.apply_context_profile_registered(registration, line)
+            }
+            DurableEvent::ComponentContextProfileAssigned {
+                component_key,
+                profile_key,
+            } => self.apply_context_profile_assigned(
+                component_key.as_ref(),
+                profile_key.as_ref(),
+                line,
+            ),
             DurableEvent::CollectionRegistered { registration } => {
                 self.apply_collection_registered(registration, line)
             }
@@ -675,6 +731,45 @@ impl DurableState {
             RegisterCollectionChange::Rejected => Err(DurableStateError::CorruptHistory {
                 line,
                 reason: "conflicting collection registration".into(),
+            }),
+        }
+    }
+
+    fn apply_context_profile_registered(
+        &mut self,
+        registration: StoredContextProfileRegistration,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .register_context_profile(registration.into_domain());
+        match result.change {
+            RegisterContextProfileChange::Registered | RegisterContextProfileChange::Unchanged => {
+                Ok(())
+            }
+            RegisterContextProfileChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "conflicting context profile registration".into(),
+            }),
+        }
+    }
+
+    fn apply_context_profile_assigned(
+        &mut self,
+        component_key: &str,
+        profile_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .assign_context_profile(component_key, profile_key);
+        match result.change {
+            AssignContextProfileChange::Assigned | AssignContextProfileChange::Unchanged => Ok(()),
+            AssignContextProfileChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid component context profile assignment".into(),
             }),
         }
     }
@@ -905,6 +1000,9 @@ enum DurableEvent {
     ComponentRegistered {
         registration: StoredComponentRegistration,
     },
+    ContextProfileRegistered {
+        registration: StoredContextProfileRegistration,
+    },
     CollectionRegistered {
         registration: StoredCollectionRegistration,
     },
@@ -915,6 +1013,10 @@ enum DurableEvent {
     ComponentProviderConfigured {
         component_key: Box<str>,
         provider_key: Box<str>,
+    },
+    ComponentContextProfileAssigned {
+        component_key: Box<str>,
+        profile_key: Box<str>,
     },
     CollectionComponentAdded {
         collection_key: Box<str>,
@@ -987,6 +1089,39 @@ impl StoredComponentRegistration {
 struct StoredCollectionRegistration {
     collection_key: Box<str>,
     name: Box<str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredContextProfileRegistration {
+    profile_key: Box<str>,
+    name: Box<str>,
+    internet_exposed: bool,
+    production: bool,
+    mission_critical: bool,
+}
+
+impl From<ContextProfileRegistration> for StoredContextProfileRegistration {
+    fn from(value: ContextProfileRegistration) -> Self {
+        Self {
+            profile_key: value.profile_key,
+            name: value.name,
+            internet_exposed: value.internet_exposed,
+            production: value.production,
+            mission_critical: value.mission_critical,
+        }
+    }
+}
+
+impl StoredContextProfileRegistration {
+    fn into_domain(self) -> ContextProfileRegistration {
+        ContextProfileRegistration::new(
+            self.profile_key,
+            self.name,
+            self.internet_exposed,
+            self.production,
+            self.mission_critical,
+        )
+    }
 }
 
 impl From<CollectionRegistration> for StoredCollectionRegistration {

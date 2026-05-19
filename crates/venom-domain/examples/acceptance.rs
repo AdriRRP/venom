@@ -6,15 +6,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, EvidenceFreshness,
-    FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
-    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
-    ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression,
+    ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
+    ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
+    FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
+    RiskAcceptance, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
+    Suppression, contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
-    ComponentRegistration, ConfigureCollectionScanScheduleResult,
+    ComponentRegistration, ConfigureCollectionScanScheduleResult, ContextProfileRegistration,
     ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
 };
 use venom_domain::scanning::{
@@ -55,6 +57,8 @@ struct AcceptanceWorld {
     last_durable_error: Option<String>,
     last_active_findings_page: Option<ActiveFindingsPage>,
     last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
+    last_contextual_active_findings: Vec<ContextualActiveFindingProjection>,
+    last_collection_health_summary: Option<CollectionHealthSummary>,
 }
 
 #[given("no managed components")]
@@ -86,6 +90,8 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_durable_error = None;
     world.last_active_findings_page = None;
     world.last_scoped_active_findings_page = None;
+    world.last_contextual_active_findings.clear();
+    world.last_collection_health_summary = None;
 }
 
 #[given("a new durable state")]
@@ -180,6 +186,29 @@ async fn a_provider_scan_report_with_one_finding(
 }
 
 #[given(
+    expr = "a provider scan report with vulnerability {string} in package {string} version {string} and severity {string}"
+)]
+#[when(
+    expr = "a provider scan report with vulnerability {string} in package {string} version {string} and severity {string}"
+)]
+async fn a_provider_scan_report_with_one_finding_and_severity(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    severity: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(vulnerability_id, package_name, package_version)
+                .with_severity(parse_severity(&severity)),
+        ],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
     expr = "a provider scan report with a critical vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
 )]
 #[when(
@@ -203,6 +232,37 @@ async fn a_provider_scan_report_with_critical_and_low_findings(
                 critical_package_version,
             )
             .with_severity(Severity::Critical),
+            build_finding(low_vulnerability_id, low_package_name, low_package_version)
+                .with_severity(Severity::Low),
+        ],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
+    expr = "a provider scan report with a medium vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+#[when(
+    expr = "a provider scan report with a medium vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+async fn a_provider_scan_report_with_medium_and_low_findings(
+    world: &mut AcceptanceWorld,
+    medium_vulnerability_id: String,
+    medium_package_name: String,
+    medium_package_version: String,
+    low_vulnerability_id: String,
+    low_package_name: String,
+    low_package_version: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(
+                medium_vulnerability_id,
+                medium_package_name,
+                medium_package_version,
+            )
+            .with_severity(Severity::Medium),
             build_finding(low_vulnerability_id, low_package_name, low_package_version)
                 .with_severity(Severity::Low),
         ],
@@ -336,6 +396,47 @@ async fn venom_durably_registers_component(
             world.last_registration = None;
             world.last_durable_error = Some(error.as_str().to_owned());
         }
+    }
+}
+
+#[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed, production, and mission critical"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed, production, and mission critical"
+)]
+async fn venom_durably_registers_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world
+        .durable_state_mut()
+        .register_context_profile(ContextProfileRegistration::new(
+            profile_key,
+            name,
+            true,
+            true,
+            true,
+        )) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(expr = "VENOM durably assigns context profile {string} to component {string}")]
+#[when(expr = "VENOM durably assigns context profile {string} to component {string}")]
+async fn venom_durably_assigns_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    component_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .assign_context_profile(&component_key, &profile_key)
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
     }
 }
 
@@ -572,6 +673,71 @@ async fn venom_lists_durable_collection_schedules(world: &mut AcceptanceWorld, n
         .collection_operations_summaries(
             u64::try_from(now_unix_ms).expect("current time should fit u64"),
         );
+}
+
+#[then(expr = "the durable state shows {int} managed context profile")]
+#[then(expr = "the durable state shows {int} managed context profiles")]
+async fn the_durable_state_shows_managed_context_profiles(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .managed_context_profiles(),
+        expected
+    );
+}
+
+#[then(expr = "the durable state shows context profile {string} is named {string}")]
+async fn the_durable_state_shows_context_profile_name(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    expected_name: String,
+) {
+    let profile = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .context_profile(&profile_key)
+        .expect("context profile should exist");
+    assert_eq!(profile.name.as_ref(), expected_name.as_str());
+}
+
+#[then(expr = "the durable state shows component {string} uses context profile {string}")]
+async fn the_durable_state_shows_component_context_profile(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    profile_key: String,
+) {
+    assert_eq!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .assigned_context_profile(&component_key),
+        Some(profile_key.as_str())
+    );
+}
+
+#[then(
+    expr = "the durable state shows context profile {string} is internet exposed, production, and mission critical"
+)]
+async fn the_durable_state_shows_context_profile_flags(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+) {
+    let profile = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .context_profile(&profile_key)
+        .expect("context profile should exist");
+    assert!(profile.internet_exposed);
+    assert!(profile.production);
+    assert!(profile.mission_critical);
 }
 
 #[when(
@@ -819,6 +985,33 @@ async fn venom_queries_active_findings_for_component_and_artifact(
 }
 
 #[when(
+    expr = "VENOM queries contextual active findings for component {string} and artifact {string} with minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_contextual_active_findings_for_component_and_artifact(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    artifact_identity: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    let query = ActiveFindingsQuery::new(component_key, artifact)
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_active_findings(&query);
+    world.last_contextual_active_findings = contextualize_active_findings(
+        world.durable_state_ref().ingestion().inventory(),
+        page.findings.clone(),
+    );
+    world.last_active_findings_page = Some(page);
+}
+
+#[when(
     expr = "VENOM queries active findings for component {string} and artifact {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
 )]
 async fn venom_queries_active_findings_for_component_and_artifact_with_governance(
@@ -897,6 +1090,47 @@ async fn venom_queries_active_findings_for_collection_with_governance(
         .read_model()
         .query_scoped_active_findings(&scope, &query);
     world.last_scoped_active_findings_page = Some(page);
+}
+
+#[when(expr = "VENOM queries collection health for {string}")]
+async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection_key: String) {
+    let durable_state = world.durable_state_ref();
+    let inventory = durable_state.ingestion().inventory();
+    let scope = inventory
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before collection health query");
+    world.last_collection_health_summary = Some(summarize_collection_health(
+        inventory,
+        durable_state.read_model(),
+        &scope,
+    ));
+}
+
+#[when(
+    expr = "VENOM queries collection governance overview for {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_collection_governance_overview(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    governance_state: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let durable_state = world.durable_state_ref();
+    let overview = query_collection_governance_overview(
+        durable_state.ingestion().inventory(),
+        durable_state.read_model(),
+        &collection_key,
+        &ScopedActiveFindingsQuery::new()
+            .with_governance_state(parse_governance_state(&governance_state))
+            .with_min_severity(parse_severity(&min_severity))
+            .with_offset(offset)
+            .with_limit(limit),
+    )
+    .expect("collection governance overview should exist");
+    world.last_collection_health_summary = Some(overview.health);
+    world.last_scoped_active_findings_page = Some(overview.page);
 }
 
 #[then(expr = "the component {string} is under management")]
@@ -1758,6 +1992,113 @@ async fn the_first_scoped_active_finding_governance_reason_is(
     );
 }
 
+#[then(expr = "the first contextual active finding raw severity is {string}")]
+async fn the_first_contextual_active_finding_raw_severity_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        severity_name(
+            world
+                .last_contextual_active_findings
+                .first()
+                .expect("a contextual active findings query must be performed before assertions")
+                .severity,
+        ),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first contextual active finding risk is {string}")]
+async fn the_first_contextual_active_finding_risk_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .contextual_risk
+            .as_str(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "the first contextual active finding context profile is {string}")]
+async fn the_first_contextual_active_finding_context_profile_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .and_then(|finding| finding.context_profile_key.as_deref()),
+        Some(expected.as_str())
+    );
+}
+
+#[then("the first contextual active finding has no context profile")]
+async fn the_first_contextual_active_finding_has_no_context_profile(world: &mut AcceptanceWorld) {
+    assert!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .context_profile_key
+            .is_none()
+    );
+}
+
+#[then(expr = "the collection health total active findings is {int}")]
+async fn the_collection_health_total_active_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_collection_health_summary(world).total, expected);
+}
+
+#[then(expr = "the collection health open findings is {int}")]
+async fn the_collection_health_open_findings_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_collection_health_summary(world).open, expected);
+}
+
+#[then(expr = "the collection health suppressed findings is {int}")]
+async fn the_collection_health_suppressed_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(last_collection_health_summary(world).suppressed, expected);
+}
+
+#[then(expr = "the collection health risk accepted findings is {int}")]
+async fn the_collection_health_risk_accepted_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).risk_accepted,
+        expected
+    );
+}
+
+#[then(expr = "the collection health critical risk findings is {int}")]
+async fn the_collection_health_critical_risk_findings_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        last_collection_health_summary(world).critical_risk,
+        expected
+    );
+}
+
+#[then(expr = "the collection health high risk findings is {int}")]
+async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(last_collection_health_summary(world).high_risk, expected);
+}
+
 fn build_finding(
     vulnerability_id: String,
     package_name: String,
@@ -1909,6 +2250,13 @@ const fn last_change_set(world: &AcceptanceWorld) -> &FindingChangeSet {
         .expect("a provider scan report must be recorded before assertions")
 }
 
+const fn last_collection_health_summary(world: &AcceptanceWorld) -> &CollectionHealthSummary {
+    world
+        .last_collection_health_summary
+        .as_ref()
+        .expect("a collection health query must be performed before assertions")
+}
+
 const fn last_registration(world: &AcceptanceWorld) -> &RegisterComponentResult {
     world
         .last_registration
@@ -1958,6 +2306,17 @@ fn parse_governance_state(value: &str) -> FindingGovernanceState {
     }
 }
 
+const fn severity_name(value: Severity) -> &'static str {
+    match value {
+        Severity::Unknown => "unknown",
+        Severity::None => "none",
+        Severity::Low => "low",
+        Severity::Medium => "medium",
+        Severity::High => "high",
+        Severity::Critical => "critical",
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let base = format!("{}/../../features", env!("CARGO_MANIFEST_DIR"));
@@ -1970,6 +2329,10 @@ async fn main() {
         "report-finding.feature",
         "suppress-finding.feature",
         "filter-governed-findings.feature",
+        "classify-finding.feature",
+        "manage-context-profiles.feature",
+        "view-collection-governance.feature",
+        "view-collection-health.feature",
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {

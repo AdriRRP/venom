@@ -7,13 +7,16 @@ pub mod scanning;
 pub use durable_state::{DurableState, DurableStateError};
 pub use findings::{
     AcceptRiskChange, AcceptRiskResult, ActiveFindingProjection, ActiveFindingsPage,
-    ActiveFindingsQuery, ArtifactKind, ArtifactRef, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
-    EvidenceFreshness, FindingChangeSet, FindingDecision, FindingGovernance,
-    FindingGovernanceState, FindingIngestion, FindingIngestionError, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, FindingTracker,
-    MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
+    ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionGovernanceOverview,
+    CollectionHealthSummary, ContextualActiveFindingProjection, ContextualRiskLevel,
+    DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, EvidenceFreshness, FindingChangeSet, FindingDecision,
+    FindingGovernance, FindingGovernanceState, FindingIngestion, FindingIngestionError,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
+    FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT, PackageCoordinate, ProviderScanReport,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    contextual_risk_level, contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,
@@ -21,12 +24,14 @@ pub use integration::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 pub use inventory::{
-    AddCollectionComponentChange, AddCollectionComponentResult, BindArtifactChange,
-    BindArtifactResult, CollectionRegistration, CollectionScanSchedule, CollectionScopedArtifact,
-    ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureProviderChange, ConfigureProviderResult,
-    ManagedCollection, ManagedCollectionOperationsSummary, RegisterCollectionChange,
-    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
+    AddCollectionComponentChange, AddCollectionComponentResult, AssignContextProfileChange,
+    AssignContextProfileResult, BindArtifactChange, BindArtifactResult, CollectionRegistration,
+    CollectionScanSchedule, CollectionScopedArtifact, ComponentInventory, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
+    ManagedCollection, ManagedCollectionOperationsSummary, ManagedContextProfile,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
     RemoveCollectionComponentChange, RemoveCollectionComponentResult,
 };
 pub use scanning::{
