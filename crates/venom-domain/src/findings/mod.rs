@@ -7,6 +7,7 @@ pub mod finding_provider;
 pub mod finding_provider_contract;
 pub mod finding_read_model;
 pub mod finding_tracker;
+pub mod release_dashboard;
 
 pub use collection_governance_overview::{
     CollectionGovernanceOverview, query_collection_governance_overview,
@@ -32,3 +33,7 @@ pub use finding_read_model::{
     ScopedActiveFinding, ScopedActiveFindingsPage, ScopedActiveFindingsQuery,
 };
 pub use finding_tracker::{FindingChangeSet, FindingTracker};
+pub use release_dashboard::{
+    ReleaseDashboard, ReleaseDashboardCollection, ReleaseDashboardSummary,
+    build_release_dashboard,
+};

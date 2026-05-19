@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import type { PropsWithChildren } from "react";
 
 export type ApiHealthState = "healthy" | "unhealthy" | "loading";
-export type AppShellView = "findings" | "operations";
+export type AppShellView = "dashboard" | "findings" | "operations";
 
 type AppShellProps = PropsWithChildren<{
 	apiHealth: ApiHealthState;
@@ -21,6 +21,14 @@ export function AppShell({ apiHealth, currentView, children }: AppShellProps) {
 					</p>
 				</div>
 				<nav aria-label="Primary" className="sidebar-nav">
+					<Link
+						className={
+							currentView === "dashboard" ? "nav-link active" : "nav-link"
+						}
+						to="/dashboard"
+					>
+						Release Dashboard
+					</Link>
 					<Link
 						className={
 							currentView === "findings" ? "nav-link active" : "nav-link"

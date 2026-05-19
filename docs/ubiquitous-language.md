@@ -33,6 +33,7 @@ flowchart LR
 | API Read Snapshot | value object | A refreshed read-only snapshot that serves operator-facing API queries without borrowing the mutable write service directly. | read endpoints coupled to the write lock path |
 | Active Finding Projection | read model | A rebuildable operator-facing view of the findings currently active for one component and one artifact. | treating transient in-memory state as the source of truth |
 | Read Model | model role | A rebuildable query-oriented model shaped for one operator or integration view rather than for durable business mutation. | directly reusing mutable write state as the default query shape |
+| Release Dashboard | read model | One executive operator-facing view that aggregates managed release collections, schedule state, collection health, and elevated contextual risk into one compact release board. | treating collection list payloads as a dashboard by accident |
 | Classification | process | The act of deciding how a finding should be treated in context. | generic "triage" when a domain state change is meant |
 | Collection | entity | A closed explicit grouping of managed components operated as one release or platform scope. | "group", "universe" as the default term |
 | Collection Health | read model | A compact operator-facing summary of one collection's active findings, governance distribution, and elevated contextual risk counts. | reconstructing release health manually from raw findings tables |

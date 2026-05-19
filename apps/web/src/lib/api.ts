@@ -135,6 +135,32 @@ export type ListCollectionsResponse = {
 	collections: CollectionSummary[];
 };
 
+export type ReleaseDashboardSummary = {
+	managed_collections: number;
+	scheduled_collections: number;
+	due_now_collections: number;
+	total_active_findings: number;
+	open_findings: number;
+	risk_accepted_findings: number;
+	suppressed_findings: number;
+	critical_risk_findings: number;
+	high_risk_findings: number;
+};
+
+export type ReleaseDashboardCollection = {
+	collection_key: string;
+	name: string;
+	members: number;
+	due_now: boolean;
+	scan_schedule: CollectionScanSchedule | null;
+	health: CollectionHealth;
+};
+
+export type ReleaseDashboardResponse = {
+	summary: ReleaseDashboardSummary;
+	collections: ReleaseDashboardCollection[];
+};
+
 export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
@@ -509,6 +535,16 @@ export async function fetchCollections(): Promise<ListCollectionsResponse> {
 		throw new Error(`collections query failed with status ${response.status}`);
 	}
 	return (await response.json()) as ListCollectionsResponse;
+}
+
+export async function fetchReleaseDashboard(): Promise<ReleaseDashboardResponse> {
+	const response = await fetch("/api/dashboard/releases");
+	if (!response.ok) {
+		throw new Error(
+			`release dashboard query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ReleaseDashboardResponse;
 }
 
 export async function fetchCollectionDetail(

@@ -159,6 +159,18 @@ test("operator console can manage one release collection and execute one schedul
 			/1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
 		),
 	).toBeVisible();
+
+	await page.getByRole("link", { name: "Release Dashboard" }).click();
+	await expect(
+		page.getByRole("heading", { level: 2, name: "Release Dashboard" }),
+	).toBeVisible();
+	await expect(page.getByText("1 scheduled, 1 due now")).toBeVisible();
+	await expect(page.getByText("May Release")).toBeVisible();
+	await expect(
+		page.getByText(
+			/Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
 });
 
 test("findings console can query one seeded release collection", async ({

@@ -9,8 +9,9 @@ use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    PackageCoordinate, ProviderScanReport, ReleaseDashboard, ReportedFinding, RiskAcceptance,
+    ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    build_release_dashboard,
     contextualize_active_findings, query_collection_governance_overview,
     summarize_collection_health,
 };
@@ -139,6 +140,18 @@ impl ApiReadSnapshot {
             managed_collections,
             collections,
         })
+    }
+
+    /// Query one executive release dashboard over managed collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the current system time cannot be read.
+    pub fn release_dashboard(&self) -> Result<ReleaseDashboardResponse, ApiApplicationError> {
+        let now_unix_ms = current_unix_millis()?;
+        Ok(ReleaseDashboardResponse::from_dashboard(
+            build_release_dashboard(&self.inventory, &self.read_model, now_unix_ms),
+        ))
     }
 
     /// Query one managed collection detail by key.
@@ -1355,6 +1368,25 @@ pub struct ListCollectionsResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ReleaseDashboardResponse {
+    pub summary: ReleaseDashboardSummaryItem,
+    pub collections: Vec<ReleaseDashboardCollectionItem>,
+}
+
+impl ReleaseDashboardResponse {
+    fn from_dashboard(dashboard: ReleaseDashboard) -> Self {
+        Self {
+            summary: ReleaseDashboardSummaryItem::from(dashboard.summary),
+            collections: dashboard
+                .collections
+                .into_iter()
+                .map(ReleaseDashboardCollectionItem::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct CollectionSummary {
     pub collection_key: String,
     pub name: String,
@@ -1371,6 +1403,58 @@ pub struct CollectionDetailResponse {
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub health: CollectionHealthItem,
     pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReleaseDashboardSummaryItem {
+    pub managed_collections: usize,
+    pub scheduled_collections: usize,
+    pub due_now_collections: usize,
+    pub total_active_findings: usize,
+    pub open_findings: usize,
+    pub risk_accepted_findings: usize,
+    pub suppressed_findings: usize,
+    pub critical_risk_findings: usize,
+    pub high_risk_findings: usize,
+}
+
+impl From<venom_domain::ReleaseDashboardSummary> for ReleaseDashboardSummaryItem {
+    fn from(value: venom_domain::ReleaseDashboardSummary) -> Self {
+        Self {
+            managed_collections: value.managed_collections,
+            scheduled_collections: value.scheduled_collections,
+            due_now_collections: value.due_now_collections,
+            total_active_findings: value.total_active_findings,
+            open_findings: value.open_findings,
+            risk_accepted_findings: value.risk_accepted_findings,
+            suppressed_findings: value.suppressed_findings,
+            critical_risk_findings: value.critical_risk_findings,
+            high_risk_findings: value.high_risk_findings,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReleaseDashboardCollectionItem {
+    pub collection_key: String,
+    pub name: String,
+    pub members: usize,
+    pub due_now: bool,
+    pub scan_schedule: Option<CollectionScanScheduleItem>,
+    pub health: CollectionHealthItem,
+}
+
+impl From<venom_domain::ReleaseDashboardCollection> for ReleaseDashboardCollectionItem {
+    fn from(value: venom_domain::ReleaseDashboardCollection) -> Self {
+        Self {
+            collection_key: value.collection_key.into(),
+            name: value.name.into(),
+            members: value.members,
+            due_now: value.due_now,
+            scan_schedule: value.scan_schedule.map(CollectionScanScheduleItem::from),
+            health: CollectionHealthItem::from(value.health),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
