@@ -1,7 +1,7 @@
 # W80. Bulk Governance Workbench
 
 Wave: `W80-bulk-governance-workbench`
-Status: `in_progress`
+Status: `done`
 BDD impact: `create`
 Agentic impact: `docs`
 Infra profile: `none`
@@ -46,7 +46,7 @@ the currently filtered open cohort.
 |---|---|---|---|
 | `W80-S01` | done | define the debt-closure sequence and add one dedicated bulk-governance cohort projection to the domain | `unit`, `acceptance` |
 | `W80-S02` | done | expose the bulk-governance workbench summary through the collection findings API | `integration` |
-| `W80-S03` | planned | replace the duplicated bulk forms with one operator workbench flow in the findings console | `web`, `e2e` |
+| `W80-S03` | done | replace the duplicated bulk forms with one operator workbench flow in the findings console | `web`, `e2e` |
 
 ## Language impact
 

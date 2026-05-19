@@ -214,11 +214,16 @@ test("findings console can query one seeded release collection", async ({
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
 		.dispatchEvent("click");
+	await expect(
+		collectionPanel.getByText(
+			"Target cohort: 1 open findings, 1 critical risk, 0 high risk.",
+		),
+	).toBeVisible();
 	await collectionPanel
-		.locator('input[name="bulkRiskReason"]')
+		.getByRole("textbox", { name: "Governance reason" })
 		.fill("Accepted for this release");
 	await collectionPanel
-		.getByRole("button", { name: "Accept Filtered Open Findings" })
+		.getByRole("button", { name: "Apply Bulk Governance" })
 		.click();
 	await expect(
 		collectionPanel.getByText("Governance: risk-accepted (1/1 accepted)."),
@@ -274,11 +279,19 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 	await collectionPanel
 		.getByRole("button", { name: "Query Collection" })
 		.dispatchEvent("click");
+	await expect(
+		collectionPanel.getByText(
+			"Target cohort: 1 open findings, 1 critical risk, 0 high risk.",
+		),
+	).toBeVisible();
 	await collectionPanel
-		.getByRole("textbox", { name: "Suppression reason" })
+		.getByRole("combobox", { name: "Bulk governance action" })
+		.selectOption("suppress");
+	await collectionPanel
+		.getByRole("textbox", { name: "Governance reason" })
 		.fill("Known upstream false alarm");
 	await collectionPanel
-		.getByRole("button", { name: "Suppress Filtered Open Findings" })
+		.getByRole("button", { name: "Apply Bulk Governance" })
 		.click();
 	await expect(
 		collectionPanel.getByText(
