@@ -1,7 +1,8 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
     ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
-    BindArtifactRequest, BindArtifactResponse, CollectionActiveFindingsResponse,
+    BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
+    BulkSuppressFindingsRequest, BulkSuppressFindingsResponse, CollectionActiveFindingsResponse,
     CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
     CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
@@ -129,6 +130,14 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/findings/active",
             get(list_collection_active_findings),
+        )
+        .route(
+            "/collections/{collection_key}/findings/risk-acceptance",
+            post(accept_collection_risk),
+        )
+        .route(
+            "/collections/{collection_key}/findings/suppression",
+            post(suppress_collection_findings),
         )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
@@ -402,6 +411,24 @@ async fn accept_risk(
     Ok(Json(response))
 }
 
+async fn accept_collection_risk(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<BulkAcceptRiskRequest>,
+) -> Result<Json<BulkAcceptRiskResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .accept_risk_for_collection(&collection_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
 async fn suppress_finding(
     State(state): State<ApiState>,
     Json(request): Json<SuppressFindingRequest>,
@@ -410,6 +437,24 @@ async fn suppress_finding(
         let mut service = state.inner.service.lock().await;
         let response = service
             .suppress_finding(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn suppress_collection_findings(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<BulkSuppressFindingsRequest>,
+) -> Result<Json<BulkSuppressFindingsResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .suppress_findings_for_collection(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
@@ -1108,6 +1153,191 @@ mod tests {
             "Known upstream false alarm"
         );
         assert_eq!(payload["governance_state"], "suppressed");
+    }
+
+    #[tokio::test]
+    async fn api_bulk_accepts_risk_for_open_collection_findings() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("bulk-accept-risk", "state"),
+                temp_path("bulk-accept-risk", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        assert_eq!(
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            record_provider_report_with_two_findings(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/risk-acceptance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "min_severity": "high",
+                            "reason": "Accepted for this release",
+                            "until_unix_ms": 1_760_000_000_000_u64
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk acceptance request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["targeted"], 1);
+        assert_eq!(payload["accepted"], 1);
+        assert_eq!(payload["unchanged"], 0);
+        assert_eq!(payload["governance_state"], "risk-accepted");
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=risk-accepted&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["risk_accepted"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["vulnerability_id"],
+            "CVE-2026-0001"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_bulk_suppresses_open_collection_findings() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("bulk-suppress-findings", "state"),
+                temp_path("bulk-suppress-findings", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        assert_eq!(
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            record_provider_report_with_two_findings(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "min_severity": "high",
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["targeted"], 1);
+        assert_eq!(payload["suppressed"], 1);
+        assert_eq!(payload["unchanged"], 0);
+        assert_eq!(payload["governance_state"], "suppressed");
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=suppressed&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["suppressed"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "suppressed"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["governance_reason"],
+            "Known upstream false alarm"
+        );
     }
 
     #[tokio::test]
@@ -1942,6 +2172,92 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["governance_reason"],
             "Known upstream false alarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_reloads_bulk_risk_accepted_collection_findings() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("bulk_risk_acceptance_reload");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        assert_eq!(
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            record_provider_report_with_two_findings(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/risk-acceptance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "min_severity": "high",
+                            "reason": "Accepted for this release"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk acceptance request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("reloaded postgres api state should open"),
+        );
+        let response = reloaded
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=risk-accepted&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["health"]["open"], 1);
+        assert_eq!(payload["health"]["risk_accepted"], 1);
+        assert_eq!(
+            payload["active_findings"][0]["governance_state"],
+            "risk-accepted"
         );
     }
 

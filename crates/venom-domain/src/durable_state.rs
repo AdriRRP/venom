@@ -1,17 +1,19 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, CollectionRegistration, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
-    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureIntegrationRuntimeChange,
+    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
+    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
+    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
     RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
-    RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
+    SuppressFindingResult, Suppression,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
@@ -473,6 +475,63 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably accept risk for all open active findings matched inside one collection scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingCollection`] when the collection is
+    /// unknown, or another [`DurableStateError`] when the durable append fails.
+    pub fn accept_risk_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        acceptance: RiskAcceptance,
+    ) -> Result<BulkAcceptRiskResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| {
+                DurableStateError::MissingCollection(
+                    format!("unknown collection: {collection_key}").into_boxed_str(),
+                )
+            })?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            if result.change == AcceptRiskChange::Accepted {
+                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
+                changed_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let accepted = changed_findings.len();
+        if accepted > 0 {
+            self.append_event(&DurableEvent::FindingsRiskAccepted {
+                findings: changed_findings,
+                acceptance: acceptance.clone(),
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(BulkAcceptRiskResult {
+            targeted,
+            accepted,
+            unchanged: targeted.saturating_sub(accepted),
+            acceptance,
+        })
+    }
+
     /// Durably suppress one currently active finding.
     ///
     /// # Errors
@@ -505,6 +564,59 @@ impl DurableState {
         }
 
         Ok(result)
+    }
+
+    /// Durably suppress one filtered open cohort of findings inside one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingCollection`] when the collection is
+    /// unknown, or another [`DurableStateError`] when the durable append fails.
+    pub fn suppress_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        suppression: Suppression,
+    ) -> Result<BulkSuppressFindingResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            if result.change == SuppressFindingChange::Suppressed {
+                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
+                changed_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let suppressed = changed_findings.len();
+        if suppressed > 0 {
+            self.append_event(&DurableEvent::FindingsSuppressed {
+                findings: changed_findings,
+                suppression: suppression.clone(),
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+        }
+
+        Ok(BulkSuppressFindingResult {
+            targeted,
+            suppressed,
+            unchanged: targeted.saturating_sub(suppressed),
+            suppression,
+        })
     }
 
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
@@ -562,11 +674,29 @@ impl DurableState {
                 self.apply_finding_risk_accepted(finding, acceptance);
                 Ok(())
             }
+            DurableEvent::FindingsRiskAccepted {
+                findings,
+                acceptance,
+            } => {
+                for finding in findings {
+                    self.apply_finding_risk_accepted(finding, acceptance.clone());
+                }
+                Ok(())
+            }
             DurableEvent::FindingSuppressed {
                 finding,
                 suppression,
             } => {
                 self.apply_finding_suppressed(finding, suppression);
+                Ok(())
+            }
+            DurableEvent::FindingsSuppressed {
+                findings,
+                suppression,
+            } => {
+                for finding in findings {
+                    self.apply_finding_suppressed(finding, suppression.clone());
+                }
                 Ok(())
             }
             DurableEvent::IntegrationEventPublished { event_id } => {
@@ -653,7 +783,9 @@ impl DurableState {
             DurableEvent::IntegrationRuntimeConfigured { .. }
             | DurableEvent::ProviderScanRecorded { .. }
             | DurableEvent::FindingRiskAccepted { .. }
+            | DurableEvent::FindingsRiskAccepted { .. }
             | DurableEvent::FindingSuppressed { .. }
+            | DurableEvent::FindingsSuppressed { .. }
             | DurableEvent::IntegrationEventPublished { .. }
             | DurableEvent::IntegrationEventPublicationFailed { .. } => {
                 unreachable!("non-inventory durable event routed to inventory replay")
@@ -958,6 +1090,7 @@ pub enum DurableStateError {
     Serialize(serde_json::Error),
     CorruptHistory { line: usize, reason: Box<str> },
     Ingestion(FindingIngestionError),
+    MissingCollection(Box<str>),
     MissingFinding(Box<str>),
     Time(String),
 }
@@ -971,6 +1104,7 @@ impl DurableStateError {
             Self::CorruptHistory { .. } => "corrupt-history",
             Self::Ingestion(FindingIngestionError::UnmanagedComponent) => "unmanaged-component",
             Self::Ingestion(FindingIngestionError::UnmanagedArtifact) => "unmanaged-artifact",
+            Self::MissingCollection(_) => "missing-collection",
             Self::MissingFinding(_) => "missing-finding",
             Self::Time(_) => "invalid-time",
         }
@@ -986,6 +1120,7 @@ impl core::fmt::Display for DurableStateError {
                 write!(f, "corrupt history at line {line}: {reason}")
             }
             Self::Ingestion(error) => write!(f, "ingestion error: {}", error.as_str()),
+            Self::MissingCollection(error) => write!(f, "missing collection: {error}"),
             Self::MissingFinding(error) => write!(f, "missing finding: {error}"),
             Self::Time(error) => write!(f, "time error: {error}"),
         }
@@ -1050,8 +1185,16 @@ enum DurableEvent {
         finding: StoredFindingRef,
         acceptance: RiskAcceptance,
     },
+    FindingsRiskAccepted {
+        findings: Vec<StoredFindingRef>,
+        acceptance: RiskAcceptance,
+    },
     FindingSuppressed {
         finding: StoredFindingRef,
+        suppression: Suppression,
+    },
+    FindingsSuppressed {
+        findings: Vec<StoredFindingRef>,
         suppression: Suppression,
     },
     IntegrationEventPublished {

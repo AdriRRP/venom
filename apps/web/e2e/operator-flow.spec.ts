@@ -208,20 +208,36 @@ test("findings console can query one seeded release collection", async ({
 	await expect(
 		collectionPanel.getByRole("cell", { name: "Internet Production" }),
 	).toBeVisible();
-	await collectionPanel.getByRole("button", { name: "Accept Risk" }).click();
-	await page
-		.getByRole("textbox", { name: "Reason" })
-		.fill("Compensating control in place");
-	await page.getByRole("button", { name: "Submit Risk Acceptance" }).click();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("open");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await collectionPanel
+		.locator('input[name="bulkRiskReason"]')
+		.fill("Accepted for this release");
+	await collectionPanel
+		.getByRole("button", { name: "Accept Filtered Open Findings" })
+		.click();
 	await expect(
-		collectionPanel.getByText("risk-accepted: Compensating control in place"),
+		collectionPanel.getByText("Governance: risk-accepted (1/1 accepted)."),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 0 open - 1 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await collectionPanel.getByRole("button", { name: "All (1)" }).click();
+	await expect(
+		collectionPanel.getByText("risk-accepted: Accepted for this release"),
 	).toBeVisible();
 
 	await collectionPanel
 		.getByRole("button", { name: "Suppress", exact: true })
 		.click();
 	await page
-		.getByRole("textbox", { name: "Reason" })
+		.locator('input[name="riskReason"]')
 		.fill("Known upstream false alarm");
 	await page.getByRole("button", { name: "Submit Suppression" }).click();
 	await expect(
@@ -242,4 +258,40 @@ test("findings console can query one seeded release collection", async ({
 		.getByRole("button", { name: "Query Collection" })
 		.dispatchEvent("click");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
+});
+
+test("findings console can bulk suppress one seeded release collection cohort", async ({
+	page,
+	request,
+}) => {
+	await seedReleaseCollection(request);
+
+	await page.goto("/findings");
+	const collectionPanel = page.locator("section.panel").first();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("open");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await collectionPanel
+		.getByRole("textbox", { name: "Suppression reason" })
+		.fill("Known upstream false alarm");
+	await collectionPanel
+		.getByRole("button", { name: "Suppress Filtered Open Findings" })
+		.click();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 0 open - 0 risk accepted - 1 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance" })
+		.selectOption("suppressed");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await expect(
+		collectionPanel.getByText("suppressed: Known upstream false alarm"),
+	).toBeVisible();
 });

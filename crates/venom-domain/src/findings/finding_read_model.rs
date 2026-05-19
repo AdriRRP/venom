@@ -315,6 +315,29 @@ impl FindingReadModel {
     ) -> ScopedActiveFindingsPage {
         let offset = query.offset;
         let limit = normalize_page_limit(query.limit);
+        let filtered = self.collect_scoped_active_findings(scope, query);
+        let total = filtered.len();
+        let page = filtered
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+
+        ScopedActiveFindingsPage {
+            total,
+            returned: page.len(),
+            offset,
+            limit,
+            findings: page,
+        }
+    }
+
+    #[must_use]
+    pub fn collect_scoped_active_findings(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        query: &ScopedActiveFindingsQuery,
+    ) -> Vec<ScopedActiveFinding> {
         let mut filtered = scope
             .iter()
             .flat_map(|scope_item| {
@@ -358,11 +381,8 @@ impl FindingReadModel {
             )
         });
 
-        let total = filtered.len();
-        let page = filtered
+        filtered
             .into_iter()
-            .skip(offset)
-            .take(limit)
             .map(|(scope_item, finding)| {
                 self.project_active_finding(
                     scope_item.component_key.clone(),
@@ -370,15 +390,7 @@ impl FindingReadModel {
                     finding,
                 )
             })
-            .collect::<Vec<_>>();
-
-        ScopedActiveFindingsPage {
-            total,
-            returned: page.len(),
-            offset,
-            limit,
-            findings: page,
-        }
+            .collect()
     }
 
     pub fn visit_scoped_active_findings(

@@ -222,6 +222,14 @@ pub struct AcceptRiskResult {
     pub acceptance: RiskAcceptance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkAcceptRiskResult {
+    pub targeted: usize,
+    pub accepted: usize,
+    pub unchanged: usize,
+    pub acceptance: RiskAcceptance,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuppressFindingChange {
     Suppressed,
@@ -241,6 +249,14 @@ impl SuppressFindingChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuppressFindingResult {
     pub change: SuppressFindingChange,
+    pub suppression: Suppression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkSuppressFindingResult {
+    pub targeted: usize,
+    pub suppressed: usize,
+    pub unchanged: usize,
     pub suppression: Suppression,
 }
 

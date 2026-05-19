@@ -6,12 +6,13 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
-    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
-    ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReleaseDashboard, ReportedFinding, RiskAcceptance,
-    ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
-    build_release_dashboard, contextualize_active_findings, query_collection_governance_overview,
+    AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
+    BulkSuppressFindingResult, CollectionHealthSummary, ContextualActiveFindingProjection,
+    EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
+    ReleaseDashboard, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery,
+    Severity, SuppressFindingResult, Suppression, build_release_dashboard,
+    contextualize_active_findings, query_collection_governance_overview,
     summarize_collection_health,
 };
 use venom_domain::integration::{
@@ -765,6 +766,125 @@ impl ApiApplication {
             governance_state: "risk-accepted".to_owned(),
             governance_reason: result.acceptance.reason.into(),
             governance_until_unix_ms: result.acceptance.until_unix_ms,
+        })
+    }
+
+    /// Accept risk for all open active findings matched inside one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the collection
+    /// is unknown, or the durable write fails.
+    pub async fn accept_risk_for_collection(
+        &mut self,
+        collection_key: &str,
+        request: BulkAcceptRiskRequest,
+    ) -> Result<BulkAcceptRiskResponse, ApiApplicationError> {
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "risk acceptance reason must not be empty".to_owned(),
+            ));
+        }
+        let acceptance = request.until_unix_ms.map_or_else(
+            || RiskAcceptance::new(request.reason.clone()),
+            |until_unix_ms| {
+                RiskAcceptance::new(request.reason.clone()).until_unix_ms(until_unix_ms)
+            },
+        );
+        let query = build_bulk_collection_governance_query(
+            request.min_severity.as_deref(),
+            request.package_name.as_deref(),
+        )?;
+
+        let result: BulkAcceptRiskResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .accept_risk_for_collection(collection_key, &query, acceptance.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingCollection(reason) => {
+                        ApiApplicationError::NotFound(reason.into())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .accept_risk_for_collection(collection_key, &query, acceptance.clone())
+                .await
+                .map_err(|error| {
+                    if error.starts_with("unknown collection:") {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(BulkAcceptRiskResponse {
+            collection_key: collection_key.to_owned(),
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            targeted: result.targeted,
+            accepted: result.accepted,
+            unchanged: result.unchanged,
+            governance_state: "risk-accepted".to_owned(),
+            governance_reason: result.acceptance.reason.into(),
+            governance_until_unix_ms: result.acceptance.until_unix_ms,
+        })
+    }
+
+    /// Suppress one filtered open cohort of findings inside one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the collection
+    /// is unknown, or the durable write fails.
+    pub async fn suppress_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        request: BulkSuppressFindingsRequest,
+    ) -> Result<BulkSuppressFindingsResponse, ApiApplicationError> {
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "suppression reason must not be empty".to_owned(),
+            ));
+        }
+        let query = build_bulk_collection_governance_query(
+            request.min_severity.as_deref(),
+            request.package_name.as_deref(),
+        )?;
+        let suppression = Suppression::new(request.reason.clone());
+
+        let result: BulkSuppressFindingResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .suppress_findings_for_collection(collection_key, &query, suppression.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingCollection(_) => {
+                        ApiApplicationError::NotFound(error.to_string())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .suppress_findings_for_collection(collection_key, &query, suppression.clone())
+                .await
+                .map_err(|error| {
+                    if error.starts_with("unknown collection:") {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(BulkSuppressFindingsResponse {
+            collection_key: collection_key.to_owned(),
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            targeted: result.targeted,
+            suppressed: result.suppressed,
+            unchanged: result.unchanged,
+            governance_state: "suppressed".to_owned(),
+            governance_reason: result.suppression.reason.into(),
+            governance_until_unix_ms: None,
         })
     }
 
@@ -1639,6 +1759,47 @@ pub struct AcceptRiskResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BulkAcceptRiskRequest {
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub reason: String,
+    pub until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkAcceptRiskResponse {
+    pub collection_key: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub targeted: usize,
+    pub accepted: usize,
+    pub unchanged: usize,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkSuppressFindingsRequest {
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkSuppressFindingsResponse {
+    pub collection_key: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub targeted: usize,
+    pub suppressed: usize,
+    pub unchanged: usize,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SuppressFindingRequest {
     pub component_key: String,
     pub artifact_kind: String,
@@ -2068,6 +2229,23 @@ fn build_scoped_active_findings_query(
     }
     if let Some(limit) = request.limit {
         query = query.with_limit(limit);
+    }
+    Ok(query)
+}
+
+fn build_bulk_collection_governance_query(
+    min_severity: Option<&str>,
+    package_name: Option<&str>,
+) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
+    let mut query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(FindingGovernanceState::Open)
+        .with_offset(0)
+        .with_limit(200);
+    if let Some(min_severity) = min_severity {
+        query = query.with_min_severity(parse_severity(min_severity)?);
+    }
+    if let Some(package_name) = package_name {
+        query = query.with_package_name(package_name);
     }
     Ok(query)
 }

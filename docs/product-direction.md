@@ -15,6 +15,7 @@ The platform target is:
 - define closed release collections as canonical scan scope and schedule periodic scans over them
 - query active findings over one closed release collection without reconstructing scope by hand
 - work governed findings in one release-scoped workbench without losing the collection health context
+- apply one explicit governance action to a filtered open cohort inside one release collection
 - see one executive release dashboard that compresses schedule state, collection health, governed findings, and elevated contextual risk
 - see one compact health summary for every managed release collection
 - see one deterministic contextual risk level derived from execution context on active findings views
