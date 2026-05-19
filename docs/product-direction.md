@@ -13,6 +13,7 @@ The platform target is:
 
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
+- derive one managed release collection from one declared source with explicit replace or reconcile semantics
 - query active findings over one closed release collection without reconstructing scope by hand
 - work governed findings in one release-scoped workbench without losing the collection health context
 - see one explicit bulk-governance cohort summary before acting over one filtered open release scope

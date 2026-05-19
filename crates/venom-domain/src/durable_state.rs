@@ -2,18 +2,20 @@ use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
     BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration,
-    ComponentRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureIntegrationRuntimeChange,
-    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
-    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
-    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
-    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
-    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
-    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
-    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
-    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
-    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
-    SuppressFindingResult, Suppression,
+    CollectionSource, CollectionSourceMode, ComponentRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
+    ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
+    EvidenceFreshness, FindingChangeSet, FindingGovernance, FindingIngestion,
+    FindingIngestionError, FindingReadModel, FindingRef, IntegrationEventPublicationFailure,
+    IntegrationEventPublisher, IntegrationRuntimeConfig, MaterializeCollectionSourceChange,
+    MaterializeCollectionSourceResult, PackageCoordinate, PendingIntegrationEvent,
+    ProviderScanReport, PublishIntegrationEventsResult, RegisterCollectionChange,
+    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
+    RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
+    RemoveCollectionComponentResult, ReportedFinding, RiskAcceptance, ScopedActiveFindingsQuery,
+    Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
@@ -316,6 +318,50 @@ impl DurableState {
             self.append_event(&DurableEvent::CollectionComponentRemoved {
                 collection_key: collection_key.into(),
                 component_key: component_key.into(),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably configure one declared source for one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn configure_collection_source(
+        &mut self,
+        collection_key: &str,
+        source: CollectionSource,
+    ) -> Result<ConfigureCollectionSourceResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_collection_source(collection_key, source.clone());
+        if result.change == ConfigureCollectionSourceChange::Configured {
+            self.append_event(&DurableEvent::CollectionSourceConfigured {
+                collection_key: collection_key.into(),
+                source: StoredCollectionSource::from(source),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably materialize one declared source into collection membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn materialize_collection_source(
+        &mut self,
+        collection_key: &str,
+    ) -> Result<MaterializeCollectionSourceResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.materialize_collection_source(collection_key);
+        if result.change == MaterializeCollectionSourceChange::Materialized {
+            self.append_event(&DurableEvent::CollectionSourceMaterialized {
+                collection_key: collection_key.into(),
+                added_component_keys: result.added_component_keys.clone(),
+                removed_component_keys: result.removed_component_keys.clone(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
@@ -655,6 +701,8 @@ impl DurableState {
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
             | DurableEvent::CollectionComponentRemoved { .. }
+            | DurableEvent::CollectionSourceConfigured { .. }
+            | DurableEvent::CollectionSourceMaterialized { .. }
             | DurableEvent::CollectionScanScheduleConfigured { .. }
             | DurableEvent::CollectionScanScheduleMaterialized { .. } => {
                 self.apply_inventory_event(event, line)
@@ -754,6 +802,24 @@ impl DurableState {
             } => self.apply_collection_component_removed(
                 collection_key.as_ref(),
                 component_key.as_ref(),
+                line,
+            ),
+            DurableEvent::CollectionSourceConfigured {
+                collection_key,
+                source,
+            } => self.apply_collection_source_configured(
+                collection_key.as_ref(),
+                source.into_domain(),
+                line,
+            ),
+            DurableEvent::CollectionSourceMaterialized {
+                collection_key,
+                added_component_keys,
+                removed_component_keys,
+            } => self.apply_collection_source_materialized(
+                collection_key.as_ref(),
+                added_component_keys,
+                removed_component_keys,
                 line,
             ),
             DurableEvent::CollectionScanScheduleConfigured {
@@ -943,6 +1009,46 @@ impl DurableState {
                 reason: "invalid collection membership removal".into(),
             }),
         }
+    }
+
+    fn apply_collection_source_configured(
+        &mut self,
+        collection_key: &str,
+        source: CollectionSource,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .configure_collection_source(collection_key, source);
+        match result.change {
+            ConfigureCollectionSourceChange::Configured
+            | ConfigureCollectionSourceChange::Unchanged => Ok(()),
+            ConfigureCollectionSourceChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid collection source configuration".into(),
+            }),
+        }
+    }
+
+    fn apply_collection_source_materialized(
+        &mut self,
+        collection_key: &str,
+        added_component_keys: Vec<Box<str>>,
+        removed_component_keys: Vec<Box<str>>,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        for component_key in added_component_keys {
+            self.apply_collection_component_added(collection_key, component_key.as_ref(), line)?;
+        }
+        for component_key in removed_component_keys {
+            self.apply_collection_component_removed(
+                collection_key,
+                component_key.as_ref(),
+                line,
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_collection_scan_schedule_configured(
@@ -1161,6 +1267,15 @@ enum DurableEvent {
         collection_key: Box<str>,
         component_key: Box<str>,
     },
+    CollectionSourceConfigured {
+        collection_key: Box<str>,
+        source: StoredCollectionSource,
+    },
+    CollectionSourceMaterialized {
+        collection_key: Box<str>,
+        added_component_keys: Vec<Box<str>>,
+        removed_component_keys: Vec<Box<str>>,
+    },
     CollectionScanScheduleConfigured {
         collection_key: Box<str>,
         cadence_minutes: u32,
@@ -1279,6 +1394,65 @@ impl From<CollectionRegistration> for StoredCollectionRegistration {
 impl StoredCollectionRegistration {
     fn into_domain(self) -> CollectionRegistration {
         CollectionRegistration::new(self.collection_key, self.name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum StoredCollectionSource {
+    ComponentList {
+        mode: StoredCollectionSourceMode,
+        component_keys: Vec<Box<str>>,
+    },
+}
+
+impl From<CollectionSource> for StoredCollectionSource {
+    fn from(value: CollectionSource) -> Self {
+        match value {
+            CollectionSource::ComponentList(source) => Self::ComponentList {
+                mode: StoredCollectionSourceMode::from(source.mode),
+                component_keys: source.component_keys,
+            },
+        }
+    }
+}
+
+impl StoredCollectionSource {
+    fn into_domain(self) -> CollectionSource {
+        match self {
+            Self::ComponentList {
+                mode,
+                component_keys,
+            } => CollectionSource::ComponentList(crate::ComponentListCollectionSource::new(
+                mode.into_domain(),
+                component_keys,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredCollectionSourceMode {
+    Replace,
+    Reconcile,
+}
+
+impl From<CollectionSourceMode> for StoredCollectionSourceMode {
+    fn from(value: CollectionSourceMode) -> Self {
+        match value {
+            CollectionSourceMode::Replace => Self::Replace,
+            CollectionSourceMode::Reconcile => Self::Reconcile,
+        }
+    }
+}
+
+impl StoredCollectionSourceMode {
+    const fn into_domain(self) -> CollectionSourceMode {
+        match self {
+            Self::Replace => CollectionSourceMode::Replace,
+            Self::Reconcile => CollectionSourceMode::Reconcile,
+        }
     }
 }
 
