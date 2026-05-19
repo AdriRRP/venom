@@ -2270,7 +2270,7 @@ fn parse_collection_source(
     let component_keys = request
         .component_keys
         .into_iter()
-        .map(|component_key| component_key.into_boxed_str())
+        .map(String::into_boxed_str)
         .collect::<Vec<_>>();
 
     if component_keys.is_empty() {
