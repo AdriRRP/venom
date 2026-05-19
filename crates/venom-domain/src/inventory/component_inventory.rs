@@ -997,11 +997,13 @@ impl ComponentInventory {
         let change = if added_component_keys.is_empty() && removed_component_keys.is_empty() {
             MaterializeCollectionSourceChange::Unchanged
         } else {
-            self.collections
-                .get_mut(collection_key)
-                .expect("collection existence checked above")
-                .component_keys = next_component_keys;
-            MaterializeCollectionSourceChange::Materialized
+            match self.collections.get_mut(collection_key) {
+                Some(record) => {
+                    record.component_keys = next_component_keys;
+                    MaterializeCollectionSourceChange::Materialized
+                }
+                None => MaterializeCollectionSourceChange::Rejected,
+            }
         };
 
         let members = self.collection_member_count(collection_key);
