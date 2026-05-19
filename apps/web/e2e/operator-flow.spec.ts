@@ -215,7 +215,7 @@ test("findings console can query one seeded release collection", async ({
 		.getByRole("button", { name: "Query Collection" })
 		.dispatchEvent("click");
 	await collectionPanel
-		.getByRole("textbox", { name: "Reason" })
+		.locator('input[name="bulkRiskReason"]')
 		.fill("Accepted for this release");
 	await collectionPanel
 		.getByRole("button", { name: "Accept Filtered Open Findings" })
