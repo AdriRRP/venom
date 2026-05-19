@@ -1,16 +1,29 @@
 import { type APIRequestContext, expect, test } from "@playwright/test";
 
+type ReleaseFixture = {
+	componentKey: string;
+	collectionKey: string;
+	artifactIdentity: string;
+};
+
 async function expectOk(
 	response: Awaited<ReturnType<APIRequestContext["post"]>>,
 ) {
 	expect(response.ok(), await response.text()).toBeTruthy();
 }
 
-async function seedReleaseCollection(request: APIRequestContext) {
+async function seedReleaseCollection(
+	request: APIRequestContext,
+	fixture: ReleaseFixture = {
+		componentKey: "component:payments-api",
+		collectionKey: "release:2026.05",
+		artifactIdentity: "registry.example/payments@sha256:111",
+	},
+) {
 	await expectOk(
 		await request.post("/api/components", {
 			data: {
-				component_key: "component:payments-api",
+				component_key: fixture.componentKey,
 				name: "Payments API",
 			},
 		}),
@@ -30,7 +43,7 @@ async function seedReleaseCollection(request: APIRequestContext) {
 
 	await expectOk(
 		await request.post(
-			"/api/components/component%3Apayments-api/context-profile",
+			`/api/components/${encodeURIComponent(fixture.componentKey)}/context-profile`,
 			{
 				data: {
 					profile_key: "context:internet-prod",
@@ -42,32 +55,38 @@ async function seedReleaseCollection(request: APIRequestContext) {
 	await expectOk(
 		await request.post("/api/collections", {
 			data: {
-				collection_key: "release:2026.05",
+				collection_key: fixture.collectionKey,
 				name: "May Release",
 			},
 		}),
 	);
 
 	await expectOk(
-		await request.post("/api/collections/release%3A2026.05/components", {
-			data: {
-				component_key: "component:payments-api",
+		await request.post(
+			`/api/collections/${encodeURIComponent(fixture.collectionKey)}/components`,
+			{
+				data: {
+					component_key: fixture.componentKey,
+				},
 			},
-		}),
-	);
-
-	await expectOk(
-		await request.post("/api/components/component%3Apayments-api/artifacts", {
-			data: {
-				artifact_kind: "container-image",
-				artifact_identity: "registry.example/payments@sha256:111",
-			},
-		}),
+		),
 	);
 
 	await expectOk(
 		await request.post(
-			"/api/components/component%3Apayments-api/provider-runtime",
+			`/api/components/${encodeURIComponent(fixture.componentKey)}/artifacts`,
+			{
+				data: {
+					artifact_kind: "container-image",
+					artifact_identity: fixture.artifactIdentity,
+				},
+			},
+		),
+	);
+
+	await expectOk(
+		await request.post(
+			`/api/components/${encodeURIComponent(fixture.componentKey)}/provider-runtime`,
 			{
 				data: {
 					provider_key: "fixture-provider",
@@ -77,11 +96,14 @@ async function seedReleaseCollection(request: APIRequestContext) {
 	);
 
 	await expectOk(
-		await request.post("/api/collections/release%3A2026.05/scan-requests", {
-			data: {
-				freshness: "deterministic",
+		await request.post(
+			`/api/collections/${encodeURIComponent(fixture.collectionKey)}/scan-requests`,
+			{
+				data: {
+					freshness: "deterministic",
+				},
 			},
-		}),
+		),
 	);
 
 	await expectOk(
@@ -100,6 +122,8 @@ async function seedReleaseCollection(request: APIRequestContext) {
 			},
 		}),
 	);
+
+	return fixture;
 }
 
 test("operator console can manage one release collection and execute one scheduled scan", async ({
@@ -269,10 +293,17 @@ test("findings console can bulk suppress one seeded release collection cohort", 
 	page,
 	request,
 }) => {
-	await seedReleaseCollection(request);
+	const fixture = await seedReleaseCollection(request, {
+		componentKey: "component:payments-api-bulk",
+		collectionKey: "release:2026.06",
+		artifactIdentity: "registry.example/payments-bulk@sha256:222",
+	});
 
 	await page.goto("/findings");
 	const collectionPanel = page.locator("section.panel").first();
+	await collectionPanel
+		.getByRole("textbox", { name: "Collection key" })
+		.fill(fixture.collectionKey);
 	await collectionPanel
 		.getByRole("combobox", { name: "Governance", exact: true })
 		.selectOption("open");
