@@ -1,8 +1,10 @@
 use crate::findings::{
-    CollectionHealthSummary, FindingReadModel, ScopedActiveFindingsPage, ScopedActiveFindingsQuery,
+    CollectionHealthSummary, ContextualRiskLevel, FindingGovernanceState, FindingReadModel,
+    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, contextual_risk_level,
     summarize_collection_health,
 };
 use crate::inventory::ComponentInventory;
+use std::collections::BTreeMap;
 
 /// One operator-facing release-scoped findings workbench.
 ///
@@ -12,7 +14,17 @@ use crate::inventory::ComponentInventory;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionGovernanceOverview {
     pub health: CollectionHealthSummary,
+    pub bulk_governance: BulkGovernanceCohortSummary,
     pub page: ScopedActiveFindingsPage,
+}
+
+/// One filtered open cohort summary that drives one release-scoped bulk
+/// governance decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BulkGovernanceCohortSummary {
+    pub targeted: usize,
+    pub critical_risk: usize,
+    pub high_risk: usize,
 }
 
 #[must_use]
@@ -25,13 +37,56 @@ pub fn query_collection_governance_overview(
     let scope = inventory.collection_scoped_artifacts(collection_key)?;
     Some(CollectionGovernanceOverview {
         health: summarize_collection_health(inventory, read_model, &scope),
+        bulk_governance: summarize_bulk_governance_cohort(inventory, read_model, &scope, query),
         page: read_model.query_scoped_active_findings(&scope, query),
     })
 }
 
+fn summarize_bulk_governance_cohort(
+    inventory: &ComponentInventory,
+    read_model: &FindingReadModel,
+    scope: &[crate::CollectionScopedArtifact],
+    query: &ScopedActiveFindingsQuery,
+) -> BulkGovernanceCohortSummary {
+    let cohort_query =
+        ScopedActiveFindingsQuery::new().with_governance_state(FindingGovernanceState::Open);
+    let cohort_query = if let Some(min_severity) = query.min_severity {
+        cohort_query.with_min_severity(min_severity)
+    } else {
+        cohort_query
+    };
+    let cohort_query = if let Some(package_name) = query.package_name.as_deref() {
+        cohort_query.with_package_name(package_name)
+    } else {
+        cohort_query
+    };
+
+    let mut summary = BulkGovernanceCohortSummary::default();
+    let mut context_profiles = BTreeMap::new();
+
+    for finding in read_model.collect_scoped_active_findings(scope, &cohort_query) {
+        summary.targeted += 1;
+        let context_profile = context_profiles
+            .entry(finding.finding.component_key.clone())
+            .or_insert_with(|| {
+                inventory.managed_component_context_profile(finding.finding.component_key.as_ref())
+            });
+        match contextual_risk_level(finding.severity, context_profile.as_ref()) {
+            ContextualRiskLevel::Critical => summary.critical_risk += 1,
+            ContextualRiskLevel::High => summary.high_risk += 1,
+            ContextualRiskLevel::Unknown
+            | ContextualRiskLevel::None
+            | ContextualRiskLevel::Low
+            | ContextualRiskLevel::Medium => {}
+        }
+    }
+
+    summary
+}
+
 #[cfg(test)]
 mod tests {
-    use super::query_collection_governance_overview;
+    use super::{BulkGovernanceCohortSummary, query_collection_governance_overview};
     use crate::findings::{
         FindingGovernanceState, FindingReadModel, FindingRef, PackageCoordinate,
         ProviderScanReport, ReportedFinding, ScopedActiveFindingsQuery, Severity, Suppression,
@@ -109,6 +164,14 @@ mod tests {
         assert_eq!(overview.health.risk_accepted, 0);
         assert_eq!(overview.health.critical_risk, 1);
         assert_eq!(overview.health.high_risk, 1);
+        assert_eq!(
+            overview.bulk_governance,
+            BulkGovernanceCohortSummary {
+                targeted: 1,
+                critical_risk: 1,
+                high_risk: 0,
+            }
+        );
         assert_eq!(overview.page.total, 1);
         assert_eq!(
             overview.page.findings[0].governance_state.as_str(),
