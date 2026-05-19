@@ -9,9 +9,8 @@ use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
     BulkSuppressFindingResult, EvidenceFreshness, FindingChangeSet, FindingGovernance,
     FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding, RiskAcceptance,
-    ScanRequest, ScopedActiveFindingsQuery, SuppressFindingChange, SuppressFindingResult,
-    Suppression,
+    FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsQuery, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -670,7 +669,9 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -678,7 +679,8 @@ impl PostgresStore {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result = candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result =
+                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
                 candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
                 changed_findings.push(finding.finding);

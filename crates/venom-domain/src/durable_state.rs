@@ -1,11 +1,12 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
-    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration,
+    ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureIntegrationRuntimeChange,
+    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
+    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
+    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
@@ -582,7 +583,9 @@ impl DurableState {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
-        let findings = self.read_model.collect_scoped_active_findings(&scope, query);
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -590,7 +593,8 @@ impl DurableState {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result = candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result =
+                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
                 candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
                 changed_findings.push(StoredFindingRef::from(finding.finding));

@@ -9,11 +9,11 @@ use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
     BulkSuppressFindingResult, CollectionHealthSummary, ContextualActiveFindingProjection,
     EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate,
-    ProviderScanReport, ReleaseDashboard, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
-    build_release_dashboard, contextualize_active_findings,
-    query_collection_governance_overview, summarize_collection_health,
+    FindingProviderErrorKind, FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport,
+    ReleaseDashboard, ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery,
+    Severity, SuppressFindingResult, Suppression, build_release_dashboard,
+    contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
