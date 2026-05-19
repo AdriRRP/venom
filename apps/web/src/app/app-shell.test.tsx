@@ -21,13 +21,16 @@ vi.mock("@tanstack/react-router", async () => ({
 describe("AppShell", () => {
 	it("renders a visible health status badge", () => {
 		render(
-			<AppShell apiHealth="healthy" currentView="findings">
+			<AppShell apiHealth="healthy" currentView="dashboard">
 				<p>content</p>
 			</AppShell>,
 		);
 
 		expect(screen.getByText("Operator Console")).toBeInTheDocument();
 		expect(screen.getByText("Healthy")).toBeInTheDocument();
+		expect(
+			screen.getByRole("link", { name: "Release Dashboard" }),
+		).toBeInTheDocument();
 		expect(
 			screen.getByRole("link", { name: "Active Findings" }),
 		).toBeInTheDocument();

@@ -211,6 +211,81 @@ select {
 	color: #334155;
 }
 
+.summary-grid,
+.dashboard-grid {
+	display: grid;
+	gap: 1rem;
+	margin-top: 1.5rem;
+}
+
+.summary-grid {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.metric-card,
+.dashboard-card {
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 18px;
+	background: rgba(255, 252, 245, 0.82);
+	padding: 1rem 1.1rem;
+}
+
+.metric-card strong {
+	display: block;
+	font-size: 2rem;
+	line-height: 1;
+	margin-top: 0.35rem;
+}
+
+.metric-card p,
+.dashboard-card p {
+	margin: 0.45rem 0 0;
+	color: #475569;
+}
+
+.metric-label {
+	font-size: 0.8rem;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: #64748b;
+}
+
+.dashboard-grid {
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.dashboard-card-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 1rem;
+}
+
+.dashboard-card h3 {
+	margin: 0;
+}
+
+.status-pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.35rem 0.7rem;
+	border-radius: 999px;
+	background: rgba(15, 23, 42, 0.06);
+	font-size: 0.82rem;
+	font-weight: 700;
+	color: #334155;
+}
+
+.status-pill.due-now {
+	background: rgba(194, 65, 12, 0.12);
+	color: #9a3412;
+}
+
+.mono-line {
+	font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+	font-size: 0.9rem;
+}
+
 .error-banner {
 	border-radius: 12px;
 	padding: 0.85rem 1rem;
@@ -252,6 +327,10 @@ th {
 	}
 
 	.filters {
+		grid-template-columns: 1fr;
+	}
+
+	.summary-grid {
 		grid-template-columns: 1fr;
 	}
 

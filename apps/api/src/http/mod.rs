@@ -11,10 +11,10 @@ use crate::app::service::{
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
     ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
-    RegisterComponentResponse, RegisterContextProfileResponse, RequestCollectionScanCommand,
-    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
-    RunNextScanResponse, ScanCommandStatusResponse, SuppressFindingRequest,
-    SuppressFindingResponse,
+    RegisterComponentResponse, RegisterContextProfileResponse, ReleaseDashboardResponse,
+    RequestCollectionScanCommand, RequestCollectionScanResponse, RequestScanCommand,
+    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
+    SuppressFindingRequest, SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -99,6 +99,7 @@ impl ApiState {
 pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/dashboard/releases", get(release_dashboard))
         .route("/components", post(register_component))
         .route(
             "/context-profiles",
@@ -157,6 +158,16 @@ pub fn build_router(state: ApiState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn release_dashboard(
+    State(state): State<ApiState>,
+) -> Result<Json<ReleaseDashboardResponse>, ApiError> {
+    let response = state
+        .read_snapshot()
+        .release_dashboard()
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
 }
 
 async fn register_component(
@@ -795,6 +806,9 @@ mod tests {
         let response = add_payments_component_to_collection(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = register_internet_prod_context_profile(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -867,6 +881,9 @@ mod tests {
         let response = add_payments_component_to_collection(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = register_internet_prod_context_profile(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -931,6 +948,9 @@ mod tests {
         let response = add_payments_component_to_collection(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let response = configure_collection_schedule(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
         let response = register_internet_prod_context_profile(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -967,6 +987,7 @@ mod tests {
         assert_eq!(list_payload["collections"][0]["health"]["high_risk"], 1);
 
         let detail_response = router
+            .clone()
             .oneshot(
                 Request::get("/collections/release%3A2026.05")
                     .body(Body::empty())
@@ -986,6 +1007,36 @@ mod tests {
         assert_eq!(detail_payload["health"]["suppressed"], 1);
         assert_eq!(detail_payload["health"]["critical_risk"], 1);
         assert_eq!(detail_payload["health"]["high_risk"], 1);
+
+        let dashboard_response = router
+            .clone()
+            .oneshot(
+                Request::get("/dashboard/releases")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("release dashboard request should succeed");
+        assert_eq!(dashboard_response.status(), StatusCode::OK);
+        let dashboard_body = http_body_util::BodyExt::collect(dashboard_response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let dashboard_payload: serde_json::Value =
+            serde_json::from_slice(&dashboard_body).expect("response should be valid json");
+        assert_eq!(dashboard_payload["summary"]["managed_collections"], 1);
+        assert_eq!(dashboard_payload["summary"]["scheduled_collections"], 1);
+        assert_eq!(dashboard_payload["summary"]["total_active_findings"], 2);
+        assert_eq!(dashboard_payload["summary"]["open_findings"], 1);
+        assert_eq!(dashboard_payload["summary"]["suppressed_findings"], 1);
+        assert_eq!(dashboard_payload["summary"]["critical_risk_findings"], 1);
+        assert_eq!(dashboard_payload["summary"]["high_risk_findings"], 1);
+        assert_eq!(
+            dashboard_payload["collections"][0]["collection_key"],
+            "release:2026.05"
+        );
+        assert_eq!(dashboard_payload["collections"][0]["members"], 1);
+        assert_eq!(dashboard_payload["collections"][0]["health"]["total"], 2);
     }
 
     #[tokio::test]

@@ -9,9 +9,10 @@ use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity,
-    Suppression, contextualize_active_findings, query_collection_governance_overview,
+    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
+    ScopedActiveFindingsQuery, Severity, Suppression, build_release_dashboard,
+    contextualize_active_findings, query_collection_governance_overview,
     summarize_collection_health,
 };
 use venom_domain::inventory::{
@@ -59,6 +60,7 @@ struct AcceptanceWorld {
     last_scoped_active_findings_page: Option<ScopedActiveFindingsPage>,
     last_contextual_active_findings: Vec<ContextualActiveFindingProjection>,
     last_collection_health_summary: Option<CollectionHealthSummary>,
+    last_release_dashboard: Option<ReleaseDashboard>,
 }
 
 #[given("no managed components")]
@@ -92,6 +94,7 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_scoped_active_findings_page = None;
     world.last_contextual_active_findings.clear();
     world.last_collection_health_summary = None;
+    world.last_release_dashboard = None;
 }
 
 #[given("a new durable state")]
@@ -1106,6 +1109,15 @@ async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection
     ));
 }
 
+#[when(expr = "VENOM queries the release dashboard at unix ms {int}")]
+async fn venom_queries_the_release_dashboard(world: &mut AcceptanceWorld, now_unix_ms: usize) {
+    world.last_release_dashboard = Some(build_release_dashboard(
+        world.durable_state_ref().ingestion().inventory(),
+        world.durable_state_ref().read_model(),
+        u64::try_from(now_unix_ms).expect("unix millis should fit u64"),
+    ));
+}
+
 #[when(
     expr = "VENOM queries collection governance overview for {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
 )]
@@ -2097,6 +2109,182 @@ async fn the_collection_health_critical_risk_findings_is(
 #[then(expr = "the collection health high risk findings is {int}")]
 async fn the_collection_health_high_risk_findings_is(world: &mut AcceptanceWorld, expected: usize) {
     assert_eq!(last_collection_health_summary(world).high_risk, expected);
+}
+
+#[then(expr = "the release dashboard manages {int} collections")]
+async fn the_release_dashboard_manages_collections(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .managed_collections,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} scheduled collection")]
+#[then(expr = "the release dashboard shows {int} scheduled collections")]
+async fn the_release_dashboard_shows_scheduled_collections(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .scheduled_collections,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} collection due now")]
+#[then(expr = "the release dashboard shows {int} collections due now")]
+async fn the_release_dashboard_shows_collections_due_now(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .due_now_collections,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} active finding")]
+#[then(expr = "the release dashboard shows {int} active findings")]
+async fn the_release_dashboard_shows_active_findings(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .total_active_findings,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} open finding")]
+#[then(expr = "the release dashboard shows {int} open findings")]
+async fn the_release_dashboard_shows_open_findings(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .open_findings,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} suppressed finding")]
+#[then(expr = "the release dashboard shows {int} suppressed findings")]
+async fn the_release_dashboard_shows_suppressed_findings(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .suppressed_findings,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} critical risk finding")]
+#[then(expr = "the release dashboard shows {int} critical risk findings")]
+async fn the_release_dashboard_shows_critical_risk_findings(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .critical_risk_findings,
+        expected
+    );
+}
+
+#[then(expr = "the release dashboard shows {int} high risk finding")]
+#[then(expr = "the release dashboard shows {int} high risk findings")]
+async fn the_release_dashboard_shows_high_risk_findings(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .summary
+            .high_risk_findings,
+        expected
+    );
+}
+
+#[then(expr = "the first dashboard collection is {string}")]
+async fn the_first_dashboard_collection_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .collections
+            .first()
+            .expect("a first dashboard collection must exist")
+            .collection_key
+            .as_ref(),
+        expected
+    );
+}
+
+#[then(expr = "the first dashboard collection is due {string}")]
+async fn the_first_dashboard_collection_is_due(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .collections
+            .first()
+            .expect("a first dashboard collection must exist")
+            .due_now,
+        expected == "true"
+    );
+}
+
+#[then(expr = "the first dashboard collection health total is {int}")]
+async fn the_first_dashboard_collection_health_total_is(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_release_dashboard
+            .as_ref()
+            .expect("a release dashboard query must be performed before assertions")
+            .collections
+            .first()
+            .expect("a first dashboard collection must exist")
+            .health
+            .total,
+        expected
+    );
 }
 
 fn build_finding(

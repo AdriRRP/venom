@@ -4,15 +4,22 @@ import {
 	createRouter,
 	redirect,
 } from "@tanstack/react-router";
+import { DashboardPage } from "../routes/dashboard";
 import { FindingsPage } from "../routes/findings";
 import { OperationsPage } from "../routes/operations";
 
 const rootRoute = createRootRoute({
 	beforeLoad: async ({ location }) => {
 		if (location.pathname === "/") {
-			throw redirect({ to: "/findings" });
+			throw redirect({ to: "/dashboard" });
 		}
 	},
+});
+
+const dashboardRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/dashboard",
+	component: DashboardPage,
 });
 
 const findingsRoute = createRoute({
@@ -27,7 +34,11 @@ const operationsRoute = createRoute({
 	component: OperationsPage,
 });
 
-const routeTree = rootRoute.addChildren([findingsRoute, operationsRoute]);
+const routeTree = rootRoute.addChildren([
+	dashboardRoute,
+	findingsRoute,
+	operationsRoute,
+]);
 
 export const router = createRouter({ routeTree });
 
