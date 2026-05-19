@@ -19,11 +19,14 @@ use venom_domain::integration::{
 };
 use venom_domain::inventory::{
     AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
-    CollectionRegistration, ComponentInventory, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureProviderChange, ConfigureProviderResult, ContextProfileRegistration,
-    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
-    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
+    CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentInventory,
+    ComponentListCollectionSource, ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
+    ConfigureCollectionSourceResult, ConfigureProviderChange, ConfigureProviderResult,
+    ContextProfileRegistration, MaterializeCollectionSourceChange,
+    MaterializeCollectionSourceResult, RegisterCollectionChange, RegisterCollectionResult,
+    RegisterComponentChange, RegisterComponentResult, RegisterContextProfileChange,
+    RegisterContextProfileResult,
 };
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, FailedScanCommand, RunNextScanResult,
@@ -244,6 +247,89 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably configure one declared source for one managed collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn configure_collection_source(
+        &mut self,
+        collection_key: &str,
+        source: CollectionSource,
+    ) -> Result<ConfigureCollectionSourceResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.configure_collection_source(collection_key, source.clone());
+        if result.change == ConfigureCollectionSourceChange::Configured {
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} (collection_key, source_kind, mode, component_keys) VALUES ($1, $2, $3, $4) ",
+                    "ON CONFLICT (collection_key) DO UPDATE SET source_kind = EXCLUDED.source_kind, mode = EXCLUDED.mode, component_keys = EXCLUDED.component_keys, updated_at = NOW()"
+                ),
+                self.names.collection_sources
+            ))
+            .bind(collection_key)
+            .bind(collection_source_kind_name(&source))
+            .bind(collection_source_mode_name(source.mode()))
+            .bind(Json(
+                source
+                    .component_keys()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection source upsert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably materialize one declared source into collection membership in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn materialize_collection_source(
+        &mut self,
+        collection_key: &str,
+    ) -> Result<MaterializeCollectionSourceResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.materialize_collection_source(collection_key);
+        if result.change == MaterializeCollectionSourceChange::Materialized {
+            let mut transaction = self.begin_transaction().await?;
+            for component_key in &result.removed_component_keys {
+                sqlx::query(&format!(
+                    "DELETE FROM {} WHERE collection_key = $1 AND component_key = $2",
+                    self.names.collection_memberships
+                ))
+                .bind(collection_key)
+                .bind(component_key.as_ref())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    format!("postgres collection source membership delete failed: {error}")
+                })?;
+            }
+            for component_key in &result.added_component_keys {
+                sqlx::query(&format!(
+                    "INSERT INTO {} (collection_key, component_key) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    self.names.collection_memberships
+                ))
+                .bind(collection_key)
+                .bind(component_key.as_ref())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    format!("postgres collection source membership insert failed: {error}")
+                })?;
+            }
+            self.commit_transaction(transaction).await?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -1390,6 +1476,7 @@ impl PostgresStore {
         self.create_context_profiles_table().await?;
         self.create_component_context_profiles_table().await?;
         self.create_collections_table().await?;
+        self.create_collection_sources_table().await?;
         self.create_collection_memberships_table().await?;
         self.create_collection_scan_schedules_table().await?;
         self.create_artifact_bindings_table().await?;
@@ -1494,6 +1581,25 @@ impl PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres collection memberships table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_collection_sources_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT PRIMARY KEY REFERENCES {}(collection_key) ON DELETE CASCADE, ",
+                "source_kind TEXT NOT NULL, ",
+                "mode TEXT NOT NULL, ",
+                "component_keys JSONB NOT NULL, ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.collection_sources, self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection sources table create failed: {error}"))?;
         Ok(())
     }
 
@@ -1734,6 +1840,7 @@ impl PostgresStore {
         self.load_context_profiles().await?;
         self.load_component_context_profiles().await?;
         self.load_collections().await?;
+        self.load_collection_sources().await?;
         self.load_collection_memberships().await?;
         self.load_collection_scan_schedules().await?;
         self.load_artifact_bindings().await?;
@@ -1784,6 +1891,39 @@ impl PostgresStore {
                 .register_collection(CollectionRegistration::new(collection_key, name));
             if result.change == RegisterCollectionChange::Rejected {
                 return Err("postgres collections contain conflicting registration".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_collection_sources(&mut self) -> Result<(), String> {
+        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>)>(
+            &format!(
+                concat!(
+                    "SELECT collection_key, source_kind, mode, component_keys FROM {} ",
+                    "ORDER BY collection_key"
+                ),
+                self.names.collection_sources
+            ),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection sources load failed: {error}"))?;
+        for (collection_key, source_kind, mode, Json(component_keys)) in sources {
+            let source = parse_collection_source(
+                &source_kind,
+                &mode,
+                component_keys
+                    .into_iter()
+                    .map(String::into_boxed_str)
+                    .collect::<Vec<_>>(),
+            )?;
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .configure_collection_source(&collection_key, source);
+            if result.change == ConfigureCollectionSourceChange::Rejected {
+                return Err("postgres collection sources contain invalid configuration".to_owned());
             }
         }
         Ok(())
@@ -2239,6 +2379,7 @@ struct TableNames {
     context_profiles: Box<str>,
     component_context_profiles: Box<str>,
     collections: Box<str>,
+    collection_sources: Box<str>,
     collection_memberships: Box<str>,
     collection_scan_schedules: Box<str>,
     artifact_bindings: Box<str>,
@@ -2260,6 +2401,7 @@ impl TableNames {
             component_context_profiles: format!("{schema}.component_context_profiles")
                 .into_boxed_str(),
             collections: format!("{schema}.collections").into_boxed_str(),
+            collection_sources: format!("{schema}.collection_sources").into_boxed_str(),
             collection_memberships: format!("{schema}.collection_memberships").into_boxed_str(),
             collection_scan_schedules: format!("{schema}.collection_scan_schedules")
                 .into_boxed_str(),
@@ -2311,11 +2453,43 @@ const fn freshness_name(value: EvidenceFreshness) -> &'static str {
     }
 }
 
+const fn collection_source_kind_name(value: &CollectionSource) -> &'static str {
+    match value {
+        CollectionSource::ComponentList(_) => "component-list",
+    }
+}
+
+const fn collection_source_mode_name(value: CollectionSourceMode) -> &'static str {
+    match value {
+        CollectionSourceMode::Replace => "replace",
+        CollectionSourceMode::Reconcile => "reconcile",
+    }
+}
+
 fn parse_freshness(value: &str) -> Result<EvidenceFreshness, String> {
     match value {
         "deterministic" => Ok(EvidenceFreshness::Deterministic),
         "live" => Ok(EvidenceFreshness::Live),
         other => Err(format!("unsupported freshness: {other}")),
+    }
+}
+
+fn parse_collection_source(
+    kind: &str,
+    mode: &str,
+    component_keys: Vec<Box<str>>,
+) -> Result<CollectionSource, String> {
+    let mode = match mode {
+        "replace" => CollectionSourceMode::Replace,
+        "reconcile" => CollectionSourceMode::Reconcile,
+        value => return Err(format!("unsupported collection source mode: {value}")),
+    };
+
+    match kind {
+        "component-list" => Ok(CollectionSource::ComponentList(
+            ComponentListCollectionSource::new(mode, component_keys),
+        )),
+        value => Err(format!("unsupported collection source kind: {value}")),
     }
 }
 
@@ -2398,7 +2572,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
-        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
+        ArtifactKind, ArtifactRef, CollectionRegistration, CollectionSource,
+        CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
         EvidenceFreshness, FindingProvider, FindingProviderError, IntegrationEvent,
         IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
         PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RunNextScanResult,
@@ -2568,6 +2743,64 @@ mod tests {
         let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
+        assert_eq!(
+            reopened
+                .inventory_snapshot()
+                .collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_reloads_collection_sources_and_materialized_membership() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_sources");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .configure_collection_source(
+                "release:2026.05",
+                CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                    CollectionSourceMode::Replace,
+                    vec![Box::<str>::from("component:payments-api")],
+                )),
+            )
+            .await
+            .expect("collection source should persist");
+        let _ = backend
+            .materialize_collection_source("release:2026.05")
+            .await
+            .expect("collection source materialization should persist");
+
+        let reopened = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        let source = reopened
+            .inventory_snapshot()
+            .collection_source("release:2026.05")
+            .expect("collection source should reload");
+        assert_eq!(source.mode(), CollectionSourceMode::Replace);
+        assert_eq!(
+            source.component_keys(),
+            [Box::<str>::from("component:payments-api")]
+        );
         assert_eq!(
             reopened
                 .inventory_snapshot()
