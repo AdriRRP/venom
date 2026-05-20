@@ -911,4 +911,132 @@ describe("FindingsPage", () => {
 		expect(suppressedFindings).toHaveLength(2);
 		expect(globalThis.fetch).toHaveBeenCalled();
 	});
+
+	it("reopens one governed collection finding and refreshes governance state", async () => {
+		let suppressed = true;
+
+		globalThis.fetch = vi.fn(
+			async (input: string | URL | Request, _init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("/health")) {
+					return new Response("ok", { status: 200 });
+				}
+				if (url === "/api/findings/reopen") {
+					suppressed = false;
+					return new Response(
+						JSON.stringify({
+							change: "reopened",
+							governance_state: "open",
+							governance_reason: null,
+							governance_until_unix_ms: null,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url.includes("/collections/")) {
+					return new Response(
+						JSON.stringify({
+							collection_key: "release:2026.05",
+							min_severity: null,
+							package_name: null,
+							health: {
+								total: 1,
+								open: suppressed ? 0 : 1,
+								risk_accepted: 0,
+								suppressed: suppressed ? 1 : 0,
+								critical_risk: 1,
+								high_risk: 0,
+							},
+							bulk_governance: {
+								targeted: suppressed ? 1 : 1,
+								critical_risk: 1,
+								high_risk: 0,
+							},
+							total_active_findings: 1,
+							returned: 1,
+							offset: 0,
+							limit: 50,
+							active_findings: [
+								{
+									component_key: "component:payments-api",
+									artifact_kind: "container-image",
+									artifact_identity: "registry.example/payments@sha256:111",
+									vulnerability_id: "CVE-2026-0001",
+									package_name: "openssl",
+									package_version: "3.0.0",
+									package_purl: null,
+									severity: "high",
+									contextual_risk: "critical",
+									context_profile_key: "context:internet-prod",
+									context_profile_name: "Internet Production",
+									governance_state: suppressed ? "suppressed" : "open",
+									governance_reason: suppressed
+										? "Known upstream false alarm"
+										: null,
+									governance_until_unix_ms: null,
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response(
+					JSON.stringify({
+						component_key: "component:payments-api",
+						artifact_kind: "container-image",
+						artifact_identity: "registry.example/payments@sha256:111",
+						min_severity: null,
+						package_name: null,
+						total_active_findings: 1,
+						returned: 1,
+						offset: 0,
+						limit: 50,
+						active_findings: [
+							{
+								component_key: "component:payments-api",
+								artifact_kind: "container-image",
+								artifact_identity: "registry.example/payments@sha256:111",
+								vulnerability_id: "CVE-2026-0001",
+								package_name: "openssl",
+								package_version: "3.0.0",
+								package_purl: null,
+								severity: "high",
+								contextual_risk: "critical",
+								context_profile_key: "context:internet-prod",
+								context_profile_name: "Internet Production",
+								governance_state: suppressed ? "suppressed" : "open",
+								governance_reason: suppressed
+									? "Known upstream false alarm"
+									: null,
+								governance_until_unix_ms: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			},
+		) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<FindingsPage />
+			</QueryClientProvider>,
+		);
+
+		const suppressedFindings = await screen.findAllByText(
+			"suppressed: Known upstream false alarm",
+		);
+		expect(suppressedFindings).toHaveLength(2);
+		fireEvent.click(await screen.findByRole("button", { name: "Reopen" }));
+		fireEvent.click(screen.getByRole("button", { name: "Submit Reopen" }));
+
+		expect(
+			await screen.findByText("Governance: open (reopened)."),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				"Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk",
+			),
+		).toBeInTheDocument();
+	});
 });

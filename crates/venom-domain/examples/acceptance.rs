@@ -1064,6 +1064,50 @@ async fn venom_durably_suppresses_finding(
     }
 }
 
+#[when(
+    expr = "VENOM durably reopens governed findings in collection {string} with governance state {string} and minimum severity {string}"
+)]
+async fn venom_durably_reopens_governed_collection_findings(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    governance_state: String,
+    min_severity: String,
+) {
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(parse_governance_state(&governance_state))
+        .with_min_severity(parse_severity(&min_severity));
+    match world
+        .durable_state_mut()
+        .reopen_findings_for_collection(&collection_key, &query)
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably reopens vulnerability {string} in package {string} version {string} on component {string} and artifact {string}"
+)]
+async fn venom_durably_reopens_finding(
+    world: &mut AcceptanceWorld,
+    vulnerability_id: String,
+    package_name: String,
+    package_version: String,
+    component_key: String,
+    artifact_identity: String,
+) {
+    let finding = FindingRef::new(
+        component_key,
+        ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity),
+        vulnerability_id,
+        PackageCoordinate::new(package_name, package_version),
+    );
+    match world.durable_state_mut().reopen_finding(&finding) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[when("VENOM durably runs the next queued scan")]
 async fn venom_durably_runs_the_next_queued_scan(world: &mut AcceptanceWorld) {
     let provider = AcceptanceFindingProvider {
@@ -2784,6 +2828,7 @@ async fn main() {
         "filter-governed-findings.feature",
         "classify-finding.feature",
         "manage-context-profiles.feature",
+        "reopen-finding.feature",
         "view-bulk-governance-workbench.feature",
         "view-collection-governance.feature",
         "view-collection-health.feature",

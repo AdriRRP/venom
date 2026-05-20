@@ -22,6 +22,7 @@ The platform target is:
 - see one compact health summary for every managed release collection
 - see one deterministic contextual risk level derived from execution context on active findings views
 - see one recent operator-facing system event timeline across scheduler, command, governance, and publication activity
+- reopen governed findings back to the canonical open state without losing durable traceability
 - see which release collections are due now, which are scheduled next, and what the last scheduler pass materialized
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings
@@ -42,7 +43,7 @@ The platform target is:
 | Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
 | Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |
 | Contextual risk | change meaning by runtime context | `classify-finding.feature` |
-| Governance | accept, suppress, withdraw, explain | `accept-risk.feature`, `suppress-finding.feature` |
+| Governance | accept, suppress, reopen, explain | `accept-risk.feature`, `suppress-finding.feature`, `reopen-finding.feature` |
 | Operations | answer what is active, changed, pending, and due now | `view-active-findings.feature`, `view-collection-schedules.feature` |
 | Reliability substrate | keep all of the above durable and rebuildable | usually verified by infra and acceptance gates rather than a standalone business feature |
 

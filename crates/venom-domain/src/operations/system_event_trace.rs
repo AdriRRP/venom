@@ -36,6 +36,8 @@ pub enum SystemEventKind {
     FindingsRiskAccepted,
     FindingSuppressed,
     FindingsSuppressed,
+    FindingReopened,
+    FindingsReopened,
     IntegrationEventPublished,
     IntegrationEventPublicationFailed,
 }
@@ -52,6 +54,8 @@ impl SystemEventKind {
             Self::FindingsRiskAccepted => "findings-risk-accepted",
             Self::FindingSuppressed => "finding-suppressed",
             Self::FindingsSuppressed => "findings-suppressed",
+            Self::FindingReopened => "finding-reopened",
+            Self::FindingsReopened => "findings-reopened",
             Self::IntegrationEventPublished => "integration-event-published",
             Self::IntegrationEventPublicationFailed => "integration-event-publication-failed",
         }
@@ -67,7 +71,9 @@ impl SystemEventKind {
             Self::FindingRiskAccepted
             | Self::FindingsRiskAccepted
             | Self::FindingSuppressed
-            | Self::FindingsSuppressed => SystemEventCategory::Governance,
+            | Self::FindingsSuppressed
+            | Self::FindingReopened
+            | Self::FindingsReopened => SystemEventCategory::Governance,
             Self::IntegrationEventPublished | Self::IntegrationEventPublicationFailed => {
                 SystemEventCategory::Publication
             }

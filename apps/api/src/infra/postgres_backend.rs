@@ -7,9 +7,10 @@ use venom_domain::findings::finding_provider_contract::{
 };
 use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
-    BulkSuppressFindingResult, EvidenceFreshness, FindingChangeSet, FindingGovernance,
-    FindingIngestion, FindingProvider, FindingProviderError, FindingProviderErrorKind,
-    FindingReadModel, FindingRef, ProviderScanReport, ReportedFinding, RiskAcceptance, ScanRequest,
+    BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness, FindingChangeSet,
+    FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
+    FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport,
+    ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
     ScopedActiveFindingsQuery, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
@@ -725,6 +726,49 @@ impl PostgresStore {
         })
     }
 
+    /// Durably reopen one governed active finding in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the finding is not active or the durable
+    /// write fails.
+    pub async fn reopen_finding(
+        &mut self,
+        finding: FindingRef,
+    ) -> Result<ReopenFindingResult, String> {
+        if !self.read_model.has_active_finding(&finding) {
+            return Err("cannot reopen an inactive finding".to_owned());
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.reopen(&finding);
+        if result.change == ReopenFindingChange::Reopened {
+            let component_key = finding.component_key.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
+            self.delete_governance_decision_rows(&finding).await?;
+            candidate_read_model.reopen(&finding);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("finding-reopened"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingReopened,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: None,
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+        }
+
+        Ok(result)
+    }
+
     /// Durably suppress one currently active finding in Postgres.
     ///
     /// # Errors
@@ -886,6 +930,82 @@ impl PostgresStore {
             suppressed,
             unchanged: targeted.saturating_sub(suppressed),
             suppression,
+        })
+    }
+
+    /// Durably reopen one filtered governed cohort of findings in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the collection is unknown or the durable
+    /// write fails.
+    pub async fn reopen_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+    ) -> Result<BulkReopenFindingResult, String> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut reopened_findings = Vec::new();
+
+        for finding in findings {
+            let result = candidate_governance.reopen(&finding.finding);
+            if result.change == ReopenFindingChange::Reopened {
+                candidate_read_model.reopen(&finding.finding);
+                reopened_findings.push(finding.finding);
+            }
+        }
+
+        let reopened = reopened_findings.len();
+        if reopened > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| format!("postgres reopen batch begin failed: {error}"))?;
+
+            for finding in &reopened_findings {
+                self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
+                    .await?;
+            }
+
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("findings-reopened"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsReopened,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(reopened).ok(),
+                retryable: None,
+                detail: None,
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+        }
+
+        Ok(BulkReopenFindingResult {
+            targeted,
+            reopened,
+            unchanged: targeted.saturating_sub(reopened),
         })
     }
 
@@ -1747,6 +1867,65 @@ impl PostgresStore {
             .execute(&mut **transaction)
             .await
             .map_err(|error| format!("postgres integration outbox insert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn delete_governance_decision_rows(&self, finding: &FindingRef) -> Result<(), String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("postgres reopen begin failed: {error}"))?;
+        self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("postgres reopen commit failed: {error}"))
+    }
+
+    async fn delete_governance_decision_rows_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        finding: &FindingRef,
+    ) -> Result<(), String> {
+        let package_purl = finding.package.purl.as_deref().unwrap_or("");
+        sqlx::query(&format!(
+            concat!(
+                "DELETE FROM {} ",
+                "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3 ",
+                "AND vulnerability_id = $4 AND package_name = $5 AND package_version = $6 AND package_purl = $7"
+            ),
+            self.names.finding_risk_acceptances
+        ))
+        .bind(finding.component_key.as_ref())
+        .bind(artifact_kind_name(finding.artifact.kind))
+        .bind(finding.artifact.identity.as_ref())
+        .bind(finding.vulnerability_id.as_ref())
+        .bind(finding.package.name.as_ref())
+        .bind(finding.package.version.as_ref())
+        .bind(package_purl)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| format!("postgres risk acceptance delete failed: {error}"))?;
+
+        sqlx::query(&format!(
+            concat!(
+                "DELETE FROM {} ",
+                "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3 ",
+                "AND vulnerability_id = $4 AND package_name = $5 AND package_version = $6 AND package_purl = $7"
+            ),
+            self.names.finding_suppressions
+        ))
+        .bind(finding.component_key.as_ref())
+        .bind(artifact_kind_name(finding.artifact.kind))
+        .bind(finding.artifact.identity.as_ref())
+        .bind(finding.vulnerability_id.as_ref())
+        .bind(finding.package.name.as_ref())
+        .bind(finding.package.version.as_ref())
+        .bind(package_purl)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| format!("postgres suppression delete failed: {error}"))?;
         Ok(())
     }
 
@@ -2951,6 +3130,8 @@ fn parse_system_event_kind(value: &str) -> Result<SystemEventKind, String> {
         "findings-risk-accepted" => Ok(SystemEventKind::FindingsRiskAccepted),
         "finding-suppressed" => Ok(SystemEventKind::FindingSuppressed),
         "findings-suppressed" => Ok(SystemEventKind::FindingsSuppressed),
+        "finding-reopened" => Ok(SystemEventKind::FindingReopened),
+        "findings-reopened" => Ok(SystemEventKind::FindingsReopened),
         "integration-event-published" => Ok(SystemEventKind::IntegrationEventPublished),
         "integration-event-publication-failed" => {
             Ok(SystemEventKind::IntegrationEventPublicationFailed)

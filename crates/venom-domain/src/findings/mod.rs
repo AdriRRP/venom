@@ -18,9 +18,10 @@ pub use contextual_risk::{
     contextualize_active_findings,
 };
 pub use finding_governance::{
-    AcceptRiskChange, AcceptRiskResult, BulkAcceptRiskResult, BulkSuppressFindingResult,
-    FindingDecision, FindingGovernance, FindingGovernanceState, FindingRef, RiskAcceptance,
-    SuppressFindingChange, SuppressFindingResult, Suppression,
+    AcceptRiskChange, AcceptRiskResult, BulkAcceptRiskResult, BulkReopenFindingResult,
+    BulkSuppressFindingResult, FindingDecision, FindingGovernance, FindingGovernanceState,
+    FindingRef, ReopenFindingChange, ReopenFindingResult, RiskAcceptance, SuppressFindingChange,
+    SuppressFindingResult, Suppression,
 };
 pub use finding_ingestion::{FindingIngestion, FindingIngestionError};
 pub use finding_provider::{
