@@ -220,7 +220,9 @@ describe("OperationsPage", () => {
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(/component:payments-api \(context:internet-prod\)/i),
+			await screen.findByText(
+				/component:payments-api \(context:internet-prod\)/i,
+			),
 		).toBeInTheDocument();
 	});
 

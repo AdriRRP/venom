@@ -568,10 +568,13 @@ export function OperationsPage() {
 						<div className="result-card">
 							<strong>Last collection context assignment</strong>
 							<p>
-								Change: {assignCollectionContextProfileMutation.data.change}. Profile:{" "}
-								{assignCollectionContextProfileMutation.data.profile_key}. Targeted:{" "}
-								{assignCollectionContextProfileMutation.data.targeted}. Assigned:{" "}
-								{assignCollectionContextProfileMutation.data.assigned}. Unchanged:{" "}
+								Change: {assignCollectionContextProfileMutation.data.change}.
+								Profile:{" "}
+								{assignCollectionContextProfileMutation.data.profile_key}.
+								Targeted: {assignCollectionContextProfileMutation.data.targeted}
+								. Assigned:{" "}
+								{assignCollectionContextProfileMutation.data.assigned}.
+								Unchanged:{" "}
 								{assignCollectionContextProfileMutation.data.unchanged}.
 							</p>
 						</div>
