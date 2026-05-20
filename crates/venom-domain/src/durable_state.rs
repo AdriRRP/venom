@@ -15,7 +15,8 @@ use crate::{
     RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
     RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
     RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
-    SuppressFindingResult, Suppression,
+    SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
+    SystemEventsQuery,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+const SYSTEM_EVENT_LOG_CAPACITY: usize = 512;
 
 /// Minimal durable state boundary for the current domain slice.
 ///
@@ -40,6 +43,7 @@ pub struct DurableState {
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
+    system_events: VecDeque<SystemEvent>,
 }
 
 impl DurableState {
@@ -67,6 +71,7 @@ impl DurableState {
             read_model: FindingReadModel::default(),
             integration_runtime_config: None,
             pending_integration_events: VecDeque::new(),
+            system_events: VecDeque::new(),
         };
         state.rebuild_from_history()?;
         Ok(state)
@@ -97,6 +102,16 @@ impl DurableState {
         &self.pending_integration_events
     }
 
+    #[must_use]
+    pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
+        &self.system_events
+    }
+
+    #[must_use]
+    pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
+        crate::operations::system_event_trace::query_system_events(self.system_events.iter(), query)
+    }
+
     /// Publish a bounded batch of pending integration events.
     ///
     /// # Errors
@@ -124,15 +139,32 @@ impl DurableState {
             result.attempted += 1;
             match publisher.publish(&event).await {
                 Ok(()) => {
+                    let occurred_at_unix_ms = current_unix_millis()?;
                     self.append_event(&DurableEvent::IntegrationEventPublished {
                         event_id: event.event_id.clone(),
+                        occurred_at_unix_ms,
                     })?;
                     self.remove_pending_integration_event(event.event_id.as_ref());
                     result.published += 1;
+                    self.push_system_event(SystemEvent {
+                        event_id: format!("durable-state-published-live-{occurred_at_unix_ms}")
+                            .into_boxed_str(),
+                        occurred_at_unix_ms,
+                        kind: SystemEventKind::IntegrationEventPublished,
+                        collection_key: None,
+                        component_key: None,
+                        command_id: None,
+                        integration_event_id: Some(event.event_id),
+                        finding_count: None,
+                        retryable: None,
+                        detail: None,
+                    });
                 }
                 Err(error) => {
+                    let occurred_at_unix_ms = current_unix_millis()?;
                     self.append_event(&DurableEvent::IntegrationEventPublicationFailed {
                         event_id: event.event_id.clone(),
+                        occurred_at_unix_ms,
                         retryable: error.retryable,
                         detail: error.message.clone(),
                     })?;
@@ -140,6 +172,27 @@ impl DurableState {
                         event_id: event.event_id,
                         retryable: error.retryable,
                         message: error.message,
+                    });
+                    self.push_system_event(SystemEvent {
+                        event_id: format!(
+                            "durable-state-publish-failed-live-{occurred_at_unix_ms}"
+                        )
+                        .into_boxed_str(),
+                        occurred_at_unix_ms,
+                        kind: SystemEventKind::IntegrationEventPublicationFailed,
+                        collection_key: None,
+                        component_key: None,
+                        command_id: None,
+                        integration_event_id: result
+                            .last_failure
+                            .as_ref()
+                            .map(|failure| failure.event_id.clone()),
+                        finding_count: None,
+                        retryable: result.last_failure.as_ref().map(|failure| failure.retryable),
+                        detail: result
+                            .last_failure
+                            .as_ref()
+                            .map(|failure| failure.message.clone()),
                     });
                     break;
                 }
@@ -426,6 +479,24 @@ impl DurableState {
                 materialized_at_unix_ms,
                 enqueued_commands,
             })?;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-scheduler-live-{collection_key}-{materialized_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms: materialized_at_unix_ms,
+                kind: SystemEventKind::CollectionScanMaterialized,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(enqueued_commands),
+                retryable: None,
+                detail: Some(
+                    format!("next due {next_due_at_unix_ms}, enqueued {enqueued_commands}")
+                        .into_boxed_str(),
+                ),
+            });
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -510,13 +581,30 @@ impl DurableState {
         let mut candidate_read_model = self.read_model.clone();
         let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
         if result.change == AcceptRiskChange::Accepted {
+            let component_key = finding.component_key.clone();
+            let detail = acceptance.reason.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingRiskAccepted {
                 finding: StoredFindingRef::from(finding.clone()),
                 acceptance: acceptance.clone(),
+                occurred_at_unix_ms,
             })?;
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!("durable-state-risk-accepted-live-{occurred_at_unix_ms}")
+                    .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingRiskAccepted,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: Some(detail),
+            });
         }
 
         Ok(result)
@@ -563,12 +651,30 @@ impl DurableState {
 
         let accepted = changed_findings.len();
         if accepted > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingsRiskAccepted {
+                collection_key: collection_key.into(),
                 findings: changed_findings,
                 acceptance: acceptance.clone(),
+                occurred_at_unix_ms,
             })?;
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-risk-accepted-many-live-{collection_key}-{occurred_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsRiskAccepted,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(accepted).ok(),
+                retryable: None,
+                detail: Some(acceptance.reason.clone()),
+            });
         }
 
         Ok(BulkAcceptRiskResult {
@@ -601,13 +707,30 @@ impl DurableState {
         let mut candidate_read_model = self.read_model.clone();
         let result = candidate_governance.suppress(finding.clone(), suppression.clone());
         if result.change == SuppressFindingChange::Suppressed {
+            let component_key = finding.component_key.clone();
+            let detail = suppression.reason.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingSuppressed {
                 finding: StoredFindingRef::from(finding.clone()),
                 suppression: suppression.clone(),
+                occurred_at_unix_ms,
             })?;
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!("durable-state-suppressed-live-{occurred_at_unix_ms}")
+                    .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingSuppressed,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: Some(detail),
+            });
         }
 
         Ok(result)
@@ -650,12 +773,30 @@ impl DurableState {
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingsSuppressed {
+                collection_key: collection_key.into(),
                 findings: changed_findings,
                 suppression: suppression.clone(),
+                occurred_at_unix_ms,
             })?;
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-suppressed-many-live-{collection_key}-{occurred_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsSuppressed,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(suppressed).ok(),
+                retryable: None,
+                detail: Some(suppression.reason.clone()),
+            });
         }
 
         Ok(BulkSuppressFindingResult {
@@ -674,6 +815,7 @@ impl DurableState {
         self.read_model = FindingReadModel::default();
         self.integration_runtime_config = None;
         self.pending_integration_events.clear();
+        self.system_events.clear();
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(DurableStateError::Io)?;
@@ -719,40 +861,134 @@ impl DurableState {
             DurableEvent::FindingRiskAccepted {
                 finding,
                 acceptance,
+                occurred_at_unix_ms,
             } => {
+                let component_key = finding.component_key.clone();
+                let detail = acceptance.reason.clone();
                 self.apply_finding_risk_accepted(finding, acceptance);
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-risk-accepted-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::FindingRiskAccepted,
+                    collection_key: None,
+                    component_key: Some(component_key),
+                    command_id: None,
+                    integration_event_id: None,
+                    finding_count: Some(1),
+                    retryable: None,
+                    detail: Some(detail),
+                });
                 Ok(())
             }
             DurableEvent::FindingsRiskAccepted {
+                collection_key,
                 findings,
                 acceptance,
+                occurred_at_unix_ms,
             } => {
+                let finding_count = u32::try_from(findings.len()).ok();
                 for finding in findings {
                     self.apply_finding_risk_accepted(finding, acceptance.clone());
                 }
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-risk-accepted-many-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::FindingsRiskAccepted,
+                    collection_key: Some(collection_key),
+                    component_key: None,
+                    command_id: None,
+                    integration_event_id: None,
+                    finding_count,
+                    retryable: None,
+                    detail: Some(acceptance.reason),
+                });
                 Ok(())
             }
             DurableEvent::FindingSuppressed {
                 finding,
                 suppression,
+                occurred_at_unix_ms,
             } => {
+                let component_key = finding.component_key.clone();
+                let detail = suppression.reason.clone();
                 self.apply_finding_suppressed(finding, suppression);
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-suppressed-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::FindingSuppressed,
+                    collection_key: None,
+                    component_key: Some(component_key),
+                    command_id: None,
+                    integration_event_id: None,
+                    finding_count: Some(1),
+                    retryable: None,
+                    detail: Some(detail),
+                });
                 Ok(())
             }
             DurableEvent::FindingsSuppressed {
+                collection_key,
                 findings,
                 suppression,
+                occurred_at_unix_ms,
             } => {
+                let finding_count = u32::try_from(findings.len()).ok();
                 for finding in findings {
                     self.apply_finding_suppressed(finding, suppression.clone());
                 }
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-suppressed-many-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::FindingsSuppressed,
+                    collection_key: Some(collection_key),
+                    component_key: None,
+                    command_id: None,
+                    integration_event_id: None,
+                    finding_count,
+                    retryable: None,
+                    detail: Some(suppression.reason),
+                });
                 Ok(())
             }
-            DurableEvent::IntegrationEventPublished { event_id } => {
+            DurableEvent::IntegrationEventPublished {
+                event_id,
+                occurred_at_unix_ms,
+            } => {
                 self.remove_pending_integration_event(event_id.as_ref());
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-published-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::IntegrationEventPublished,
+                    collection_key: None,
+                    component_key: None,
+                    command_id: None,
+                    integration_event_id: Some(event_id),
+                    finding_count: None,
+                    retryable: None,
+                    detail: None,
+                });
                 Ok(())
             }
-            DurableEvent::IntegrationEventPublicationFailed { .. } => Ok(()),
+            DurableEvent::IntegrationEventPublicationFailed {
+                event_id,
+                occurred_at_unix_ms,
+                retryable,
+                detail,
+            } => {
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-publish-failed-{line}").into_boxed_str(),
+                    occurred_at_unix_ms,
+                    kind: SystemEventKind::IntegrationEventPublicationFailed,
+                    collection_key: None,
+                    component_key: None,
+                    command_id: None,
+                    integration_event_id: Some(event_id),
+                    finding_count: None,
+                    retryable: Some(retryable),
+                    detail: Some(detail),
+                });
+                Ok(())
+            }
         }
     }
 
@@ -840,13 +1076,33 @@ impl DurableState {
                 next_due_at_unix_ms,
                 materialized_at_unix_ms,
                 enqueued_commands,
-            } => self.apply_collection_scan_schedule_materialized(
-                collection_key.as_ref(),
-                next_due_at_unix_ms,
-                materialized_at_unix_ms,
-                enqueued_commands,
-                line,
-            ),
+            } => {
+                self.apply_collection_scan_schedule_materialized(
+                    collection_key.as_ref(),
+                    next_due_at_unix_ms,
+                    materialized_at_unix_ms,
+                    enqueued_commands,
+                    line,
+                )?;
+                self.push_system_event(SystemEvent {
+                    event_id: format!("durable-state-scheduler-{line}").into_boxed_str(),
+                    occurred_at_unix_ms: materialized_at_unix_ms,
+                    kind: SystemEventKind::CollectionScanMaterialized,
+                    collection_key: Some(collection_key),
+                    component_key: None,
+                    command_id: None,
+                    integration_event_id: None,
+                    finding_count: Some(enqueued_commands),
+                    retryable: None,
+                    detail: Some(
+                        format!(
+                            "next due {next_due_at_unix_ms}, enqueued {enqueued_commands}"
+                        )
+                        .into_boxed_str(),
+                    ),
+                });
+                Ok(())
+            }
             DurableEvent::IntegrationRuntimeConfigured { .. }
             | DurableEvent::ProviderScanRecorded { .. }
             | DurableEvent::FindingRiskAccepted { .. }
@@ -1184,6 +1440,21 @@ impl DurableState {
         file.sync_all().map_err(DurableStateError::Io)?;
         Ok(())
     }
+
+    fn push_system_event(&mut self, event: SystemEvent) {
+        self.system_events.push_front(event);
+        while self.system_events.len() > SYSTEM_EVENT_LOG_CAPACITY {
+            self.system_events.pop_back();
+        }
+    }
+}
+
+fn current_unix_millis() -> Result<u64, DurableStateError> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| DurableStateError::Time(error.to_string()))?;
+    u64::try_from(duration.as_millis())
+        .map_err(|_| DurableStateError::Time("timestamp out of range".into()))
 }
 
 /// Canonical failure returned by the local durable state boundary.
@@ -1296,24 +1567,38 @@ enum DurableEvent {
     FindingRiskAccepted {
         finding: StoredFindingRef,
         acceptance: RiskAcceptance,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
     },
     FindingsRiskAccepted {
+        collection_key: Box<str>,
         findings: Vec<StoredFindingRef>,
         acceptance: RiskAcceptance,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
     },
     FindingSuppressed {
         finding: StoredFindingRef,
         suppression: Suppression,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
     },
     FindingsSuppressed {
+        collection_key: Box<str>,
         findings: Vec<StoredFindingRef>,
         suppression: Suppression,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
     },
     IntegrationEventPublished {
         event_id: Box<str>,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
     },
     IntegrationEventPublicationFailed {
         event_id: Box<str>,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
         retryable: bool,
         detail: Box<str>,
     },

@@ -2,6 +2,7 @@ pub mod durable_state;
 pub mod findings;
 pub mod integration;
 pub mod inventory;
+pub mod operations;
 pub mod scanning;
 
 pub use durable_state::{DurableState, DurableStateError};
@@ -38,6 +39,10 @@ pub use inventory::{
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
     RemoveCollectionComponentChange, RemoveCollectionComponentResult,
+};
+pub use operations::{
+    DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
+    SystemEventKind, SystemEventsPage, SystemEventsQuery,
 };
 pub use scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,
