@@ -185,11 +185,10 @@ impl ApiReadSnapshot {
     ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
         let query = build_system_events_query(&request)?;
         let category = query.category.map(|value| value.as_str().to_owned());
-        let page =
-            venom_domain::operations::system_event_trace::query_system_events(
-                self.system_events.iter(),
-                &query,
-            );
+        let page = venom_domain::operations::system_event_trace::query_system_events(
+            self.system_events.iter(),
+            &query,
+        );
         let mut response = ListSystemEventsResponse::from_page(page);
         response.category = category;
         Ok(response)
@@ -2554,9 +2553,7 @@ fn build_system_events_query(
     Ok(query)
 }
 
-fn parse_system_event_category(
-    value: &str,
-) -> Result<SystemEventCategory, ApiApplicationError> {
+fn parse_system_event_category(value: &str) -> Result<SystemEventCategory, ApiApplicationError> {
     match value {
         "scheduler" => Ok(SystemEventCategory::Scheduler),
         "command" => Ok(SystemEventCategory::Command),

@@ -2,8 +2,8 @@ use crate::findings::finding_provider_contract::validate_provider_scan_report;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, PendingIntegrationEvent,
-    PublishIntegrationEventsResult, ScanRequest, SystemEvent, SystemEventKind,
-    SystemEventsPage, SystemEventsQuery,
+    PublishIntegrationEventsResult, ScanRequest, SystemEvent, SystemEventKind, SystemEventsPage,
+    SystemEventsQuery,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -199,10 +199,8 @@ impl ScanCommandQueue {
                         message: error.message,
                     });
                     self.push_system_event(SystemEvent {
-                        event_id: format!(
-                            "scan-runtime-publish-failed-live-{occurred_at_unix_ms}"
-                        )
-                        .into_boxed_str(),
+                        event_id: format!("scan-runtime-publish-failed-live-{occurred_at_unix_ms}")
+                            .into_boxed_str(),
                         occurred_at_unix_ms,
                         kind: SystemEventKind::IntegrationEventPublicationFailed,
                         collection_key: None,
@@ -213,7 +211,10 @@ impl ScanCommandQueue {
                             .as_ref()
                             .map(|failure| failure.event_id.clone()),
                         finding_count: None,
-                        retryable: result.last_failure.as_ref().map(|failure| failure.retryable),
+                        retryable: result
+                            .last_failure
+                            .as_ref()
+                            .map(|failure| failure.retryable),
                         detail: result
                             .last_failure
                             .as_ref()

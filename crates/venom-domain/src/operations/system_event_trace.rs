@@ -61,9 +61,9 @@ impl SystemEventKind {
     pub const fn category(self) -> SystemEventCategory {
         match self {
             Self::CollectionScanMaterialized => SystemEventCategory::Scheduler,
-            Self::ScanCommandEnqueued
-            | Self::ScanCommandCompleted
-            | Self::ScanCommandFailed => SystemEventCategory::Command,
+            Self::ScanCommandEnqueued | Self::ScanCommandCompleted | Self::ScanCommandFailed => {
+                SystemEventCategory::Command
+            }
             Self::FindingRiskAccepted
             | Self::FindingsRiskAccepted
             | Self::FindingSuppressed
@@ -170,4 +170,3 @@ pub fn query_system_events<'a>(
         events: filtered,
     }
 }
-

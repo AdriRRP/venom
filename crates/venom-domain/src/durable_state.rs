@@ -16,8 +16,7 @@ use crate::{
     RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
     RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
     SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
-    SystemEventsQuery,
-    findings::finding_read_model::canonicalize_reported_findings,
+    SystemEventsQuery, findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -188,7 +187,10 @@ impl DurableState {
                             .as_ref()
                             .map(|failure| failure.event_id.clone()),
                         finding_count: None,
-                        retryable: result.last_failure.as_ref().map(|failure| failure.retryable),
+                        retryable: result
+                            .last_failure
+                            .as_ref()
+                            .map(|failure| failure.retryable),
                         detail: result
                             .last_failure
                             .as_ref()
@@ -1095,10 +1097,8 @@ impl DurableState {
                     finding_count: Some(enqueued_commands),
                     retryable: None,
                     detail: Some(
-                        format!(
-                            "next due {next_due_at_unix_ms}, enqueued {enqueued_commands}"
-                        )
-                        .into_boxed_str(),
+                        format!("next due {next_due_at_unix_ms}, enqueued {enqueued_commands}")
+                            .into_boxed_str(),
                     ),
                 });
                 Ok(())
