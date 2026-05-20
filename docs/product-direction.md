@@ -21,6 +21,7 @@ The platform target is:
 - see one executive release dashboard that compresses schedule state, collection health, governed findings, and elevated contextual risk
 - see one compact health summary for every managed release collection
 - see one deterministic contextual risk level derived from execution context on active findings views
+- see one recent operator-facing system event timeline across scheduler, command, governance, and publication activity
 - see which release collections are due now, which are scheduled next, and what the last scheduler pass materialized
 - ingest provider scan reports from multiple providers or local fixtures
 - separate canonical vulnerabilities from component-specific findings

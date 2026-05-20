@@ -65,6 +65,7 @@ flowchart LR
 | Scan Request | value object | A canonical request for a provider scan over one managed component, one owned immutable artifact, and one freshness mode. | ad-hoc scanner invocation details as the domain term |
 | Risk Acceptance | decision | A classification outcome that explicitly accepts a finding's risk for a bounded period or scope. | "ignore" |
 | Scan | process | The act of asking a finding provider for the current findings of a component or artifact scope. | "sync" when scan semantics are intended |
+| System Event Trace | read model | One rebuildable, operator-facing recent timeline over scheduler, command, governance, and publication activity. | inferring operator history from unrelated status endpoints |
 | Suppression | decision | A classification outcome that hides a finding from normal operational attention under explicit rationale. | "mute" |
 | Vulnerability | entity | The canonical vulnerability or advisory that may be observed across many findings. | "CVE" as a universal synonym |
 | Write Model | model role | The durable business state and mutation logic that owns correctness, invariants, and explicit command outcomes. | using projection or UI convenience shape as the source of truth |

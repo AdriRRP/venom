@@ -181,6 +181,33 @@ export type ReleaseDashboardResponse = {
 	collections: ReleaseDashboardCollection[];
 };
 
+export type SystemEvent = {
+	event_id: string;
+	occurred_at_unix_ms: number;
+	category: string;
+	kind: string;
+	collection_key: string | null;
+	component_key: string | null;
+	command_id: string | null;
+	integration_event_id: string | null;
+	finding_count: number | null;
+	retryable: boolean | null;
+	detail: string | null;
+};
+
+export type SystemEventsResponse = {
+	category: string | null;
+	total: number;
+	returned: number;
+	limit: number;
+	events: SystemEvent[];
+};
+
+export type SystemEventsRequest = {
+	category?: string;
+	limit?: number;
+};
+
 export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
@@ -679,6 +706,28 @@ export async function fetchReleaseDashboard(): Promise<ReleaseDashboardResponse>
 		);
 	}
 	return (await response.json()) as ReleaseDashboardResponse;
+}
+
+export async function fetchSystemEvents(
+	request: SystemEventsRequest = {},
+): Promise<SystemEventsResponse> {
+	const params = new URLSearchParams();
+	if (request.category && request.category !== "all") {
+		params.set("category", request.category);
+	}
+	if (request.limit) {
+		params.set("limit", String(request.limit));
+	}
+	const query = params.toString();
+	const response = await fetch(
+		query ? `/api/system-events?${query}` : "/api/system-events",
+	);
+	if (!response.ok) {
+		throw new Error(
+			`system events query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as SystemEventsResponse;
 }
 
 export async function fetchCollectionDetail(

@@ -1,5 +1,5 @@
 use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
@@ -14,8 +14,8 @@ use venom_domain::findings::{
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
-    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
-    PendingIntegrationEvent, PublishIntegrationEventsResult,
+    IntegrationEventPublicationFailure, IntegrationEventPublishError, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
     AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
@@ -28,9 +28,10 @@ use venom_domain::inventory::{
     RegisterComponentChange, RegisterComponentResult, RegisterContextProfileChange,
     RegisterContextProfileResult,
 };
+use venom_domain::operations::{SystemEvent, SystemEventKind};
 use venom_domain::scanning::{
-    CollectionScanScheduler, CompletedScanCommand, FailedScanCommand, RunNextScanResult,
-    ScanCommandStatus, ScanPlanner,
+    CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
+    RunNextScanResult, ScanCommandStatus, ScanPlanner,
 };
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ pub struct PostgresStore {
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
+    system_events: VecDeque<SystemEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl PostgresStore {
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: Vec::new(),
+            system_events: VecDeque::new(),
         };
         backend.init_schema().await?;
         backend.rebuild().await?;
@@ -562,6 +565,9 @@ impl PostgresStore {
         let mut candidate_read_model = self.read_model.clone();
         let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
         if result.change == AcceptRiskChange::Accepted {
+            let component_key = finding.component_key.clone();
+            let reason = acceptance.reason.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
             sqlx::query(&format!(
                 concat!(
                     "INSERT INTO {} ",
@@ -594,6 +600,20 @@ impl PostgresStore {
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("finding-risk-accepted"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingRiskAccepted,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: Some(reason),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
         }
 
         Ok(result)
@@ -636,6 +656,7 @@ impl PostgresStore {
 
         let accepted = changed.len();
         if accepted > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
             let mut tx =
                 self.pool.begin().await.map_err(|error| {
                     format!("postgres risk acceptance batch begin failed: {error}")
@@ -680,6 +701,20 @@ impl PostgresStore {
 
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("findings-risk-accepted"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsRiskAccepted,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(accepted).ok(),
+                retryable: None,
+                detail: Some(acceptance.reason.clone()),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
         }
 
         Ok(BulkAcceptRiskResult {
@@ -709,6 +744,9 @@ impl PostgresStore {
         let mut candidate_read_model = self.read_model.clone();
         let result = candidate_governance.suppress(finding.clone(), suppression.clone());
         if result.change == SuppressFindingChange::Suppressed {
+            let component_key = finding.component_key.clone();
+            let reason = suppression.reason.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
             sqlx::query(&format!(
                 concat!(
                     "INSERT INTO {} ",
@@ -734,6 +772,20 @@ impl PostgresStore {
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("finding-suppressed"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingSuppressed,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: Some(reason),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
         }
 
         Ok(result)
@@ -776,6 +828,7 @@ impl PostgresStore {
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
             let mut tx = self
                 .pool
                 .begin()
@@ -812,6 +865,20 @@ impl PostgresStore {
 
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("findings-suppressed"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsSuppressed,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(suppressed).ok(),
+                retryable: None,
+                detail: Some(suppression.reason.clone()),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
         }
 
         Ok(BulkSuppressFindingResult {
@@ -830,6 +897,11 @@ impl PostgresStore {
     #[must_use]
     pub fn inventory_snapshot(&self) -> ComponentInventory {
         self.ingestion.inventory().clone()
+    }
+
+    #[must_use]
+    pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
+        self.system_events.iter().cloned().collect()
     }
 
     #[must_use]
@@ -877,6 +949,7 @@ impl PostgresStore {
             .plan(component_key, artifact, freshness)
             .map_err(|error| error.as_str().to_owned())?;
         let command_id = next_command_id();
+        let occurred_at_unix_ms = current_unix_millis()?;
 
         sqlx::query(&format!(
             concat!(
@@ -904,6 +977,20 @@ impl PostgresStore {
                 status: ScanCommandStatus::Pending,
             },
         );
+        let event = SystemEvent {
+            event_id: next_system_event_id("scan-command-enqueued"),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandEnqueued,
+            collection_key: None,
+            component_key: Some(component_key.into()),
+            command_id: Some(command_id.clone()),
+            integration_event_id: None,
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        };
+        self.insert_system_event(&event).await?;
+        self.push_system_event(event);
         Ok(command_id)
     }
 
@@ -928,6 +1015,7 @@ impl PostgresStore {
         let command_ids = (0..batch.requests.len())
             .map(|_| next_command_id())
             .collect::<Vec<_>>();
+        let occurred_at_unix_ms = current_unix_millis()?;
 
         let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
             "INSERT INTO {} (command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
@@ -951,6 +1039,20 @@ impl PostgresStore {
             .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
 
         for (command_id, request) in command_ids.iter().cloned().zip(batch.requests) {
+            let event = SystemEvent {
+                event_id: next_system_event_id("scan-command-enqueued"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::ScanCommandEnqueued,
+                collection_key: Some(collection_key.into()),
+                component_key: Some(request.component_key.clone()),
+                command_id: Some(command_id.clone()),
+                integration_event_id: None,
+                finding_count: None,
+                retryable: None,
+                detail: None,
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
             self.order.push(command_id.clone());
             self.commands.insert(
                 command_id,
@@ -984,13 +1086,8 @@ impl PostgresStore {
             });
         }
 
-        let mut candidate_ingestion = self.ingestion.clone();
-        let due_scans = CollectionScanScheduler::new(candidate_ingestion.inventory_mut())
-            .collect_due(now_unix_ms, max_collections);
-        let pending_due_remaining = candidate_ingestion
-            .inventory()
-            .due_collection_keys(now_unix_ms, usize::MAX)
-            .len();
+        let (candidate_ingestion, due_scans, pending_due_remaining) =
+            self.collect_due_collection_scans(now_unix_ms, max_collections);
         let processed_collections = due_scans.len();
         if due_scans.is_empty() {
             return Ok(DrainDueCollectionScansResult {
@@ -1002,42 +1099,20 @@ impl PostgresStore {
             });
         }
 
-        let schedule_rows = due_scans
-            .iter()
-            .map(|due_scan| {
-                let schedule = candidate_ingestion
-                    .inventory()
-                    .collection_scan_schedule(due_scan.collection_key.as_ref())
-                    .expect("scheduled collection should still exist after scheduler pass");
-                (due_scan.collection_key.clone(), schedule)
-            })
-            .collect::<Vec<_>>();
-        let all_requests = due_scans
-            .iter()
-            .flat_map(|due_scan| due_scan.requests.iter().cloned())
-            .collect::<Vec<_>>();
+        let schedule_rows =
+            Self::build_due_schedule_rows(candidate_ingestion.inventory(), &due_scans);
+        let all_requests = Self::flatten_due_scan_requests(&due_scans);
         let command_ids = (0..all_requests.len())
             .map(|_| next_command_id())
             .collect::<Vec<_>>();
-
-        let mut transaction = self.begin_transaction().await?;
-        self.insert_pending_scan_commands(&mut transaction, &command_ids, &all_requests)
+        self.persist_due_collection_scans(&command_ids, &all_requests, &schedule_rows)
             .await?;
-        self.upsert_collection_scan_schedules(&mut transaction, &schedule_rows)
-            .await?;
-        self.commit_transaction(transaction).await?;
 
         self.ingestion = candidate_ingestion;
-        for (command_id, request) in command_ids.iter().cloned().zip(all_requests) {
-            self.order.push(command_id.clone());
-            self.commands.insert(
-                command_id,
-                ScanCommandRecord {
-                    request,
-                    status: ScanCommandStatus::Pending,
-                },
-            );
-        }
+        self.apply_due_collection_scan_events(&due_scans, now_unix_ms)
+            .await?;
+        self.apply_enqueued_scan_commands(&command_ids, all_requests, now_unix_ms)
+            .await?;
 
         Ok(DrainDueCollectionScansResult {
             outcome: if pending_due_remaining == 0 {
@@ -1194,52 +1269,20 @@ impl PostgresStore {
         for event in batch {
             result.attempted += 1;
             let attempted_at_micros = system_time_to_micros(SystemTime::now())?;
-            match publisher.publish(&event).await {
-                Ok(()) => {
-                    sqlx::query(&format!(
-                        concat!(
-                            "UPDATE {} ",
-                            "SET publication_status = 'published', last_error = NULL, ",
-                            "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
-                            "WHERE event_id = $1"
-                        ),
-                        self.names.integration_outbox
-                    ))
-                    .bind(event.event_id.as_ref())
-                    .bind(attempted_at_micros)
-                    .bind(attempted_at_micros)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
-                    self.remove_pending_integration_event(event.event_id.as_ref());
-                    result.published += 1;
-                }
-                Err(error) => {
-                    sqlx::query(&format!(
-                        concat!(
-                            "UPDATE {} ",
-                            "SET publication_status = 'pending', last_error = $2, ",
-                            "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
-                            "WHERE event_id = $1"
-                        ),
-                        self.names.integration_outbox
-                    ))
-                    .bind(event.event_id.as_ref())
-                    .bind(error.message.as_ref())
-                    .bind(attempted_at_micros)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|sql_error| {
-                        format!("postgres integration outbox failure update failed: {sql_error}")
-                    })?;
-                    result.last_failure = Some(IntegrationEventPublicationFailure {
-                        event_id: event.event_id,
-                        retryable: error.retryable,
-                        message: error.message,
-                    });
-                    break;
-                }
+            let occurred_at_unix_ms = current_unix_millis()?;
+            if let Some(failure) = self
+                .publish_pending_integration_event_attempt(
+                    &event,
+                    attempted_at_micros,
+                    occurred_at_unix_ms,
+                    publisher,
+                )
+                .await?
+            {
+                result.last_failure = Some(failure);
+                break;
             }
+            result.published += 1;
         }
 
         result.pending_remaining = self.pending_integration_events.len();
@@ -1320,14 +1363,273 @@ impl PostgresStore {
             findings_reported,
             change_set.clone(),
         );
+        let occurred_at_unix_ms = current_unix_millis()?;
+        self.persist_completed_scan_command(
+            command_id.as_ref(),
+            &report,
+            &finding_changes_event,
+            &scan_command_completed_event,
+        )
+        .await?;
 
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| format!("postgres transaction begin failed: {error}"))?;
+        self.ingestion = candidate_ingestion;
+        self.read_model = candidate_read_model;
+        let completed = CompletedScanCommand {
+            command_id,
+            provider_key: report.provider_key,
+            findings_reported,
+            change_set,
+        };
+        self.apply_completed_scan_command(
+            &request,
+            &completed,
+            finding_changes_event,
+            scan_command_completed_event,
+            occurred_at_unix_ms,
+        )
+        .await?;
 
-        self.insert_provider_report(&mut transaction, &report)
+        Ok(RunNextScanResult::Completed(completed))
+    }
+
+    fn collect_due_collection_scans(
+        &self,
+        now_unix_ms: u64,
+        max_collections: usize,
+    ) -> (FindingIngestion, Vec<DueCollectionScan>, usize) {
+        let mut candidate_ingestion = self.ingestion.clone();
+        let due_scans = CollectionScanScheduler::new(candidate_ingestion.inventory_mut())
+            .collect_due(now_unix_ms, max_collections);
+        let pending_due_remaining = candidate_ingestion
+            .inventory()
+            .due_collection_keys(now_unix_ms, usize::MAX)
+            .len();
+        (candidate_ingestion, due_scans, pending_due_remaining)
+    }
+
+    fn build_due_schedule_rows(
+        inventory: &ComponentInventory,
+        due_scans: &[DueCollectionScan],
+    ) -> Vec<(Box<str>, venom_domain::CollectionScanSchedule)> {
+        due_scans
+            .iter()
+            .map(|due_scan| {
+                let schedule = inventory
+                    .collection_scan_schedule(due_scan.collection_key.as_ref())
+                    .expect("scheduled collection should still exist after scheduler pass");
+                (due_scan.collection_key.clone(), schedule)
+            })
+            .collect()
+    }
+
+    fn flatten_due_scan_requests(due_scans: &[DueCollectionScan]) -> Vec<ScanRequest> {
+        due_scans
+            .iter()
+            .flat_map(|due_scan| due_scan.requests.iter().cloned())
+            .collect()
+    }
+
+    async fn persist_due_collection_scans(
+        &self,
+        command_ids: &[Box<str>],
+        requests: &[ScanRequest],
+        schedule_rows: &[(Box<str>, venom_domain::CollectionScanSchedule)],
+    ) -> Result<(), String> {
+        let mut transaction = self.begin_transaction().await?;
+        self.insert_pending_scan_commands(&mut transaction, command_ids, requests)
+            .await?;
+        self.upsert_collection_scan_schedules(&mut transaction, schedule_rows)
+            .await?;
+        self.commit_transaction(transaction).await
+    }
+
+    async fn apply_due_collection_scan_events(
+        &mut self,
+        due_scans: &[DueCollectionScan],
+        now_unix_ms: u64,
+    ) -> Result<(), String> {
+        for due_scan in due_scans {
+            let event = SystemEvent {
+                event_id: next_system_event_id("collection-scan-materialized"),
+                occurred_at_unix_ms: now_unix_ms,
+                kind: SystemEventKind::CollectionScanMaterialized,
+                collection_key: Some(due_scan.collection_key.clone()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(due_scan.requests.len()).ok(),
+                retryable: None,
+                detail: Some(
+                    format!(
+                        "next due {}, enqueued {}",
+                        due_scan.next_due_at_unix_ms,
+                        due_scan.requests.len()
+                    )
+                    .into_boxed_str(),
+                ),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+        }
+        Ok(())
+    }
+
+    async fn apply_enqueued_scan_commands(
+        &mut self,
+        command_ids: &[Box<str>],
+        requests: Vec<ScanRequest>,
+        now_unix_ms: u64,
+    ) -> Result<(), String> {
+        for (command_id, request) in command_ids.iter().cloned().zip(requests) {
+            let event = SystemEvent {
+                event_id: next_system_event_id("scan-command-enqueued"),
+                occurred_at_unix_ms: now_unix_ms,
+                kind: SystemEventKind::ScanCommandEnqueued,
+                collection_key: None,
+                component_key: Some(request.component_key.clone()),
+                command_id: Some(command_id.clone()),
+                integration_event_id: None,
+                finding_count: None,
+                retryable: None,
+                detail: None,
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+            self.order.push(command_id.clone());
+            self.commands.insert(
+                command_id,
+                ScanCommandRecord {
+                    request,
+                    status: ScanCommandStatus::Pending,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn publish_pending_integration_event_attempt(
+        &mut self,
+        event: &PendingIntegrationEvent,
+        attempted_at_micros: i64,
+        occurred_at_unix_ms: u64,
+        publisher: &(impl IntegrationEventPublisher + Sync),
+    ) -> Result<Option<IntegrationEventPublicationFailure>, String> {
+        match publisher.publish(event).await {
+            Ok(()) => {
+                self.mark_integration_event_published(
+                    event.event_id.as_ref(),
+                    attempted_at_micros,
+                    occurred_at_unix_ms,
+                )
+                .await?;
+                Ok(None)
+            }
+            Err(error) => self
+                .mark_integration_event_publish_failed(
+                    event.event_id.as_ref(),
+                    attempted_at_micros,
+                    occurred_at_unix_ms,
+                    error,
+                )
+                .await
+                .map(Some),
+        }
+    }
+
+    async fn mark_integration_event_published(
+        &mut self,
+        event_id: &str,
+        attempted_at_micros: i64,
+        occurred_at_unix_ms: u64,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "UPDATE {} ",
+                "SET publication_status = 'published', last_error = NULL, ",
+                "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
+                "WHERE event_id = $1"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(event_id)
+        .bind(attempted_at_micros)
+        .bind(attempted_at_micros)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
+        self.remove_pending_integration_event(event_id);
+        let system_event = SystemEvent {
+            event_id: next_system_event_id("integration-event-published"),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublished,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(event_id.into()),
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        };
+        self.insert_system_event(&system_event).await?;
+        self.push_system_event(system_event);
+        Ok(())
+    }
+
+    async fn mark_integration_event_publish_failed(
+        &mut self,
+        event_id: &str,
+        attempted_at_micros: i64,
+        occurred_at_unix_ms: u64,
+        error: IntegrationEventPublishError,
+    ) -> Result<IntegrationEventPublicationFailure, String> {
+        sqlx::query(&format!(
+            concat!(
+                "UPDATE {} ",
+                "SET publication_status = 'pending', last_error = $2, ",
+                "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
+                "WHERE event_id = $1"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(event_id)
+        .bind(error.message.as_ref())
+        .bind(attempted_at_micros)
+        .execute(&self.pool)
+        .await
+        .map_err(|sql_error| {
+            format!("postgres integration outbox failure update failed: {sql_error}")
+        })?;
+        let failure = IntegrationEventPublicationFailure {
+            event_id: event_id.into(),
+            retryable: error.retryable,
+            message: error.message,
+        };
+        let system_event = SystemEvent {
+            event_id: next_system_event_id("integration-event-publication-failed"),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublicationFailed,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(failure.event_id.clone()),
+            finding_count: None,
+            retryable: Some(failure.retryable),
+            detail: Some(failure.message.clone()),
+        };
+        self.insert_system_event(&system_event).await?;
+        self.push_system_event(system_event);
+        Ok(failure)
+    }
+
+    async fn persist_completed_scan_command(
+        &self,
+        command_id: &str,
+        report: &ProviderScanReport,
+        finding_changes_event: &PendingIntegrationEvent,
+        scan_command_completed_event: &PendingIntegrationEvent,
+    ) -> Result<(), String> {
+        let mut transaction = self.begin_transaction().await?;
+        self.insert_provider_report(&mut transaction, report)
             .await?;
         self.insert_pending_integration_events(
             &mut transaction,
@@ -1337,7 +1639,6 @@ impl PostgresStore {
             ],
         )
         .await?;
-
         sqlx::query(&format!(
             concat!(
                 "UPDATE {} ",
@@ -1346,33 +1647,53 @@ impl PostgresStore {
             ),
             self.names.scan_commands
         ))
-        .bind(command_id.as_ref())
+        .bind(command_id)
         .bind(scan_command_status_name(ScanCommandStatus::Completed))
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("postgres scan command completion failed: {error}"))?;
+        self.commit_transaction(transaction).await
+    }
 
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("postgres transaction commit failed: {error}"))?;
-
-        self.ingestion = candidate_ingestion;
-        self.read_model = candidate_read_model;
+    async fn apply_completed_scan_command(
+        &mut self,
+        request: &ScanRequest,
+        completed: &CompletedScanCommand,
+        finding_changes_event: PendingIntegrationEvent,
+        scan_command_completed_event: PendingIntegrationEvent,
+        occurred_at_unix_ms: u64,
+    ) -> Result<(), String> {
         self.pending_integration_events.push(finding_changes_event);
         self.pending_integration_events
             .push(scan_command_completed_event);
-        let Some(command) = self.commands.get_mut(command_id.as_ref()) else {
+        let Some(command) = self.commands.get_mut(completed.command_id.as_ref()) else {
             return Err("completed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Completed;
-
-        Ok(RunNextScanResult::Completed(CompletedScanCommand {
-            command_id,
-            provider_key: report.provider_key,
-            findings_reported,
-            change_set,
-        }))
+        let event = SystemEvent {
+            event_id: next_system_event_id("scan-command-completed"),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandCompleted,
+            collection_key: None,
+            component_key: Some(request.component_key.clone()),
+            command_id: Some(completed.command_id.clone()),
+            integration_event_id: None,
+            finding_count: u32::try_from(completed.findings_reported).ok(),
+            retryable: None,
+            detail: Some(
+                format!(
+                    "discovered {}, repeated {}, withdrawn {}, active {}",
+                    completed.change_set.discovered,
+                    completed.change_set.repeated,
+                    completed.change_set.withdrawn,
+                    completed.change_set.active
+                )
+                .into_boxed_str(),
+            ),
+        };
+        self.insert_system_event(&event).await?;
+        self.push_system_event(event);
+        Ok(())
     }
 
     async fn insert_provider_report(
@@ -1434,6 +1755,11 @@ impl PostgresStore {
         command_id: Box<str>,
         error: FindingProviderError,
     ) -> Result<RunNextScanResult, String> {
+        let component_key = self
+            .commands
+            .get(command_id.as_ref())
+            .map(|record| record.request.component_key.clone());
+        let occurred_at_unix_ms = current_unix_millis()?;
         sqlx::query(&format!(
             concat!(
                 "UPDATE {} ",
@@ -1455,6 +1781,20 @@ impl PostgresStore {
             return Err("failed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Failed;
+        let event = SystemEvent {
+            event_id: next_system_event_id("scan-command-failed"),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandFailed,
+            collection_key: None,
+            component_key,
+            command_id: Some(command_id.clone()),
+            integration_event_id: None,
+            finding_count: None,
+            retryable: Some(error.retryable),
+            detail: Some(error.message.clone()),
+        };
+        self.insert_system_event(&event).await?;
+        self.push_system_event(event);
 
         Ok(RunNextScanResult::Failed(FailedScanCommand {
             command_id,
@@ -1488,6 +1828,7 @@ impl PostgresStore {
         self.create_finding_suppressions_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
+        self.create_system_events_table().await?;
 
         Ok(())
     }
@@ -1828,6 +2169,32 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_system_events_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "event_id TEXT PRIMARY KEY, ",
+                "occurred_at_unix_ms BIGINT NOT NULL, ",
+                "category TEXT NOT NULL, ",
+                "kind TEXT NOT NULL, ",
+                "collection_key TEXT NULL, ",
+                "component_key TEXT NULL, ",
+                "command_id TEXT NULL, ",
+                "integration_event_id TEXT NULL, ",
+                "finding_count INTEGER NULL, ",
+                "retryable BOOLEAN NULL, ",
+                "detail TEXT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.system_events
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres system events table create failed: {error}"))?;
+        Ok(())
+    }
+
     async fn rebuild(&mut self) -> Result<(), String> {
         self.ingestion = FindingIngestion::new();
         self.governance = FindingGovernance::new();
@@ -1836,6 +2203,7 @@ impl PostgresStore {
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
+        self.system_events.clear();
 
         self.load_components().await?;
         self.load_context_profiles().await?;
@@ -1852,6 +2220,7 @@ impl PostgresStore {
         self.load_finding_suppressions().await?;
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
+        self.load_system_events().await?;
 
         Ok(())
     }
@@ -2354,6 +2723,71 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn load_system_events(&mut self) -> Result<(), String> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i32>,
+                Option<bool>,
+                Option<String>,
+            ),
+        >(&format!(
+            concat!(
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail ",
+                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT 512"
+            ),
+            self.names.system_events
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres system events load failed: {error}"))?;
+
+        self.system_events =
+            rows.into_iter()
+                .map(
+                    |(
+                        event_id,
+                        occurred_at_unix_ms,
+                        _category,
+                        kind,
+                        collection_key,
+                        component_key,
+                        command_id,
+                        integration_event_id,
+                        finding_count,
+                        retryable,
+                        detail,
+                    )| {
+                        Ok(SystemEvent {
+                            event_id: event_id.into_boxed_str(),
+                            occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
+                                .map_err(|_| "negative system event timestamp".to_owned())?,
+                            kind: parse_system_event_kind(&kind)?,
+                            collection_key: collection_key.map(String::into_boxed_str),
+                            component_key: component_key.map(String::into_boxed_str),
+                            command_id: command_id.map(String::into_boxed_str),
+                            integration_event_id: integration_event_id.map(String::into_boxed_str),
+                            finding_count: finding_count.map(u32::try_from).transpose().map_err(
+                                |_| "system event finding count out of range".to_owned(),
+                            )?,
+                            retryable,
+                            detail: detail.map(String::into_boxed_str),
+                        })
+                    },
+                )
+                .collect::<Result<VecDeque<_>, String>>()?;
+        Ok(())
+    }
+
     fn remove_pending_integration_event(&mut self, event_id: &str) {
         if let Some(index) = self
             .pending_integration_events
@@ -2362,6 +2796,46 @@ impl PostgresStore {
         {
             self.pending_integration_events.remove(index);
         }
+    }
+
+    fn push_system_event(&mut self, event: SystemEvent) {
+        self.system_events.push_front(event);
+        while self.system_events.len() > 512 {
+            self.system_events.pop_back();
+        }
+    }
+
+    async fn insert_system_event(&self, event: &SystemEvent) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} (event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+            ),
+            self.names.system_events
+        ))
+        .bind(event.event_id.as_ref())
+        .bind(i64::try_from(event.occurred_at_unix_ms).map_err(|_| {
+            "system event occurred_at_unix_ms does not fit postgres".to_owned()
+        })?)
+        .bind(event.kind.category().as_str())
+        .bind(event.kind.as_str())
+        .bind(event.collection_key.as_deref())
+        .bind(event.component_key.as_deref())
+        .bind(event.command_id.as_deref())
+        .bind(event.integration_event_id.as_deref())
+        .bind(
+            event.finding_count
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|_| "system event finding count does not fit postgres".to_owned())?,
+        )
+        .bind(event.retryable)
+        .bind(event.detail.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres system event insert failed: {error}"))?;
+        Ok(())
     }
 }
 
@@ -2389,6 +2863,7 @@ struct TableNames {
     finding_suppressions: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
+    system_events: Box<str>,
 }
 
 impl TableNames {
@@ -2413,6 +2888,7 @@ impl TableNames {
             finding_suppressions: format!("{schema}.finding_suppressions").into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
+            system_events: format!("{schema}.system_events").into_boxed_str(),
             schema,
         })
     }
@@ -2462,6 +2938,24 @@ const fn collection_source_mode_name(value: CollectionSourceMode) -> &'static st
     match value {
         CollectionSourceMode::Replace => "replace",
         CollectionSourceMode::Reconcile => "reconcile",
+    }
+}
+
+fn parse_system_event_kind(value: &str) -> Result<SystemEventKind, String> {
+    match value {
+        "collection-scan-materialized" => Ok(SystemEventKind::CollectionScanMaterialized),
+        "scan-command-enqueued" => Ok(SystemEventKind::ScanCommandEnqueued),
+        "scan-command-completed" => Ok(SystemEventKind::ScanCommandCompleted),
+        "scan-command-failed" => Ok(SystemEventKind::ScanCommandFailed),
+        "finding-risk-accepted" => Ok(SystemEventKind::FindingRiskAccepted),
+        "findings-risk-accepted" => Ok(SystemEventKind::FindingsRiskAccepted),
+        "finding-suppressed" => Ok(SystemEventKind::FindingSuppressed),
+        "findings-suppressed" => Ok(SystemEventKind::FindingsSuppressed),
+        "integration-event-published" => Ok(SystemEventKind::IntegrationEventPublished),
+        "integration-event-publication-failed" => {
+            Ok(SystemEventKind::IntegrationEventPublicationFailed)
+        }
+        other => Err(format!("unsupported system event kind: {other}")),
     }
 }
 
@@ -2550,6 +3044,23 @@ fn next_command_id() -> Box<str> {
         .as_nanos();
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("scan-command-{nanos}-{counter}").into_boxed_str()
+}
+
+fn next_system_event_id(prefix: &str) -> Box<str> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current time should be after unix epoch")
+        .as_nanos();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("system-event-{prefix}-{nanos}-{counter}").into_boxed_str()
+}
+
+fn current_unix_millis() -> Result<u64, String> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time must be after unix epoch: {error}"))?;
+    u64::try_from(duration.as_millis()).map_err(|_| "current unix millis overflow".to_owned())
 }
 
 fn system_time_to_micros(value: SystemTime) -> Result<i64, String> {
