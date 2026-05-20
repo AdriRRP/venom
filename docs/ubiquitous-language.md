@@ -60,6 +60,7 @@ flowchart LR
 | Publication Attempt | process | One bounded attempt to publish pending outbox records and persist the outcome explicitly. | hidden background retries with no durable trace |
 | Provider Runtime Configuration | relationship | The durable binding that tells VENOM which provider implementation one managed component should use when executing scans. | choosing the provider ad hoc in a worker request payload |
 | Provider Scan Report | value object | A complete provider snapshot of findings for one component and one immutable artifact at one observation time. | provider webhooks or scanner payloads as domain terms |
+| Reopen | decision lifecycle step | The explicit durable act of removing one prior governance decision so the finding returns to the canonical `open` state. | mutating findings away or treating reopen as a hidden UI-only flag reset |
 | Scan Command | command | A durably queued request for one canonical scan that must end in an explicit terminal state such as completed or failed. | hidden background work or implicit retries |
 | Scan Execution | process | The act of executing one canonical scan request through a provider and applying the resulting provider scan report. | direct scanner details as the domain term |
 | Scan Request | value object | A canonical request for a provider scan over one managed component, one owned immutable artifact, and one freshness mode. | ad-hoc scanner invocation details as the domain term |

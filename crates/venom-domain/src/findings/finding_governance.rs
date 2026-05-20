@@ -198,6 +198,20 @@ impl FindingGovernance {
         self.decisions
             .insert(finding, FindingDecision::Suppressed(suppression));
     }
+
+    pub fn reopen(&mut self, finding: &FindingRef) -> ReopenFindingResult {
+        let change = if self.decisions.remove(finding).is_some() {
+            ReopenFindingChange::Reopened
+        } else {
+            ReopenFindingChange::Unchanged
+        };
+
+        ReopenFindingResult { change }
+    }
+
+    pub fn replay_reopen(&mut self, finding: &FindingRef) {
+        self.decisions.remove(finding);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,11 +274,39 @@ pub struct BulkSuppressFindingResult {
     pub suppression: Suppression,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReopenFindingChange {
+    Reopened,
+    Unchanged,
+}
+
+impl ReopenFindingChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reopened => "reopened",
+            Self::Unchanged => "unchanged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReopenFindingResult {
+    pub change: ReopenFindingChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkReopenFindingResult {
+    pub targeted: usize,
+    pub reopened: usize,
+    pub unchanged: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptRiskChange, FindingGovernance, FindingRef, RiskAcceptance, SuppressFindingChange,
-        Suppression,
+        AcceptRiskChange, FindingGovernance, FindingRef, ReopenFindingChange, RiskAcceptance,
+        SuppressFindingChange, Suppression,
     };
     use crate::{ArtifactKind, ArtifactRef, PackageCoordinate};
 
@@ -313,5 +355,20 @@ mod tests {
 
         assert_eq!(result.change, SuppressFindingChange::Suppressed);
         assert!(governance.decision(&finding()).is_some());
+    }
+
+    #[test]
+    fn reopening_one_governed_finding_removes_the_decision() {
+        let mut governance = FindingGovernance::new();
+        let target = finding();
+        let _ = governance.suppress(
+            target.clone(),
+            Suppression::new("Known upstream false alarm"),
+        );
+
+        let result = governance.reopen(&target);
+
+        assert_eq!(result.change, ReopenFindingChange::Reopened);
+        assert!(governance.decision(&target).is_none());
     }
 }

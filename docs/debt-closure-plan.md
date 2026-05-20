@@ -17,6 +17,7 @@ The current system already closed the following legacy-value gaps:
 - release-scoped active findings and governance workbench
 - release dashboard and collection health summaries
 - explicit finding governance for risk acceptance and suppression
+- governed finding reopen flows back to the canonical open state
 - deterministic contextual risk from managed context profiles
 - first bulk governance actions over one release-scoped open cohort
 
@@ -56,19 +57,6 @@ Closes:
 
 - the largest remaining observability gap from the legacy system
 
-### W83. Governance decision lifecycle completion
-
-Goal:
-
-- complete the missing decision lifecycle around governed findings, including
-  reversal or expiry-oriented operator flows where the domain meaning justifies
-  them
-
-Closes:
-
-- the remaining gap between basic governance and a full daily-use governance
-  lifecycle
-
 ### W84. Collection-scoped context actions
 
 Goal:
@@ -85,8 +73,7 @@ Closes:
 1. `W80-bulk-governance-workbench`
 2. `W81-source-driven-collections`
 3. `W82-system-event-trace-and-operator-observability`
-4. `W83-governance-decision-lifecycle`
-5. `W84-collection-scoped-context-actions`
+4. `W84-collection-scoped-context-actions`
 
 ## Exit condition
 

@@ -15,6 +15,8 @@ import {
 	fetchActiveFindings,
 	fetchApiHealth,
 	fetchCollectionActiveFindings,
+	reopenCollectionFindings,
+	reopenFinding,
 	suppressCollectionFindings,
 	suppressFinding,
 } from "../lib/api";
@@ -131,6 +133,19 @@ function governanceLabel(finding: {
 	return finding.governance_state;
 }
 
+function bulkGovernanceTargetLabel(governanceState: string) {
+	switch (governanceState) {
+		case "open":
+			return "open findings";
+		case "risk-accepted":
+			return "risk-accepted findings";
+		case "suppressed":
+			return "suppressed findings";
+		default:
+			return "findings";
+	}
+}
+
 export function FindingsPage() {
 	const queryClient = useQueryClient();
 	const [collectionRequest, setCollectionRequest] = useState(
@@ -142,13 +157,13 @@ export function FindingsPage() {
 	const [selectedFinding, setSelectedFinding] =
 		useState<CollectionActiveFinding | null>(null);
 	const [selectedGovernanceAction, setSelectedGovernanceAction] = useState<
-		"accept-risk" | "suppress" | null
+		"accept-risk" | "suppress" | "reopen" | null
 	>(null);
 	const [riskReason, setRiskReason] = useState("");
 	const [riskUntilUnixMs, setRiskUntilUnixMs] = useState("");
 	const [riskFeedback, setRiskFeedback] = useState<string | null>(null);
 	const [bulkGovernanceAction, setBulkGovernanceAction] = useState<
-		"accept-risk" | "suppress"
+		"accept-risk" | "suppress" | "reopen"
 	>("accept-risk");
 	const [bulkGovernanceReason, setBulkGovernanceReason] = useState("");
 	const [bulkGovernanceUntilUnixMs, setBulkGovernanceUntilUnixMs] =
@@ -222,6 +237,35 @@ export function FindingsPage() {
 		},
 	});
 
+	const reopenFindingMutation = useMutation({
+		mutationFn: reopenFinding,
+		onSuccess: async (response) => {
+			setRiskFeedback(
+				`Governance: ${response.governance_state} (${response.change}).`,
+			);
+			setSelectedFinding(null);
+			setSelectedGovernanceAction(null);
+			setRiskReason("");
+			setRiskUntilUnixMs("");
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: ["collection-active-findings", collectionRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["active-findings", artifactRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["release-dashboard"],
+				}),
+			]);
+		},
+		onError: (error) => {
+			setRiskFeedback(
+				error instanceof Error ? error.message : "finding reopen failed",
+			);
+		},
+	});
+
 	const acceptCollectionRiskMutation = useMutation({
 		mutationFn: acceptCollectionFindingRisk,
 		onSuccess: async (response) => {
@@ -276,6 +320,35 @@ export function FindingsPage() {
 				error instanceof Error
 					? error.message
 					: "collection suppression failed",
+			);
+		},
+	});
+
+	const reopenCollectionFindingsMutation = useMutation({
+		mutationFn: reopenCollectionFindings,
+		onSuccess: async (response) => {
+			setRiskFeedback(
+				`Governance: ${response.result_governance_state} (${response.reopened}/${response.targeted} reopened).`,
+			);
+			setBulkGovernanceReason("");
+			setBulkGovernanceUntilUnixMs("");
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: ["collection-active-findings", collectionRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["active-findings", artifactRequest],
+				}),
+				queryClient.invalidateQueries({
+					queryKey: ["release-dashboard"],
+				}),
+			]);
+		},
+		onError: (error) => {
+			setRiskFeedback(
+				error instanceof Error
+					? error.message
+					: "collection finding reopen failed",
 			);
 		},
 	});
@@ -338,11 +411,15 @@ export function FindingsPage() {
 	const governanceActionLabel =
 		selectedGovernanceAction === "suppress"
 			? "Suppress Finding"
-			: "Accept Risk";
+			: selectedGovernanceAction === "reopen"
+				? "Reopen Finding"
+				: "Accept Risk";
 	const governanceActionSubmitLabel =
 		selectedGovernanceAction === "suppress"
 			? "Submit Suppression"
-			: "Submit Risk Acceptance";
+			: selectedGovernanceAction === "reopen"
+				? "Submit Reopen"
+				: "Submit Risk Acceptance";
 
 	function submitCollectionQuery(formData: FormData) {
 		setCollectionRequest({
@@ -565,6 +642,16 @@ export function FindingsPage() {
 							return;
 						}
 
+						if (bulkGovernanceAction === "reopen") {
+							void reopenCollectionFindingsMutation.mutate({
+								collectionKey: collectionRequest.collectionKey,
+								governanceState: collectionRequest.governanceState,
+								minSeverity: collectionRequest.minSeverity,
+								packageName: collectionRequest.packageName,
+							});
+							return;
+						}
+
 						void suppressCollectionFindingsMutation.mutate({
 							collectionKey: collectionRequest.collectionKey,
 							minSeverity: collectionRequest.minSeverity,
@@ -583,23 +670,28 @@ export function FindingsPage() {
 							name="bulkGovernanceAction"
 							onChange={(event) =>
 								setBulkGovernanceAction(
-									event.target.value as "accept-risk" | "suppress",
+									event.target.value as "accept-risk" | "suppress" | "reopen",
 								)
 							}
 							value={bulkGovernanceAction}
 						>
 							<option value="accept-risk">Risk accept</option>
 							<option value="suppress">Suppress</option>
+							<option value="reopen">Reopen</option>
 						</select>
 					</label>
-					<label>
-						Governance reason
-						<input
-							name="bulkGovernanceReason"
-							onChange={(event) => setBulkGovernanceReason(event.target.value)}
-							value={bulkGovernanceReason}
-						/>
-					</label>
+					{bulkGovernanceAction === "reopen" ? null : (
+						<label>
+							Governance reason
+							<input
+								name="bulkGovernanceReason"
+								onChange={(event) =>
+									setBulkGovernanceReason(event.target.value)
+								}
+								value={bulkGovernanceReason}
+							/>
+						</label>
+					)}
 					{bulkGovernanceAction === "accept-risk" ? (
 						<label>
 							Until unix ms
@@ -616,8 +708,8 @@ export function FindingsPage() {
 					) : null}
 					<p>
 						Target cohort:{" "}
-						{collectionFindingsQuery.data?.bulk_governance?.targeted ?? 0} open
-						findings,{" "}
+						{collectionFindingsQuery.data?.bulk_governance?.targeted ?? 0}{" "}
+						{bulkGovernanceTargetLabel(collectionRequest.governanceState)},{" "}
 						{collectionFindingsQuery.data?.bulk_governance?.critical_risk ?? 0}{" "}
 						critical risk,{" "}
 						{collectionFindingsQuery.data?.bulk_governance?.high_risk ?? 0} high
@@ -626,9 +718,14 @@ export function FindingsPage() {
 					<button
 						className="primary-button"
 						disabled={
-							collectionRequest.governanceState !== "open" ||
+							(bulkGovernanceAction === "reopen"
+								? !["risk-accepted", "suppressed"].includes(
+										collectionRequest.governanceState,
+									)
+								: collectionRequest.governanceState !== "open") ||
 							acceptCollectionRiskMutation.isPending ||
-							suppressCollectionFindingsMutation.isPending
+							suppressCollectionFindingsMutation.isPending ||
+							reopenCollectionFindingsMutation.isPending
 						}
 						type="submit"
 					>
@@ -735,6 +832,19 @@ export function FindingsPage() {
 											>
 												Suppress
 											</button>
+											<button
+												className="secondary-button"
+												onClick={() => {
+													setSelectedFinding(row.original);
+													setSelectedGovernanceAction("reopen");
+													setRiskReason("");
+													setRiskUntilUnixMs("");
+													setRiskFeedback(null);
+												}}
+												type="button"
+											>
+												Reopen
+											</button>
 										</td>
 									</tr>
 								))
@@ -748,6 +858,18 @@ export function FindingsPage() {
 						className="filters"
 						onSubmit={(event) => {
 							event.preventDefault();
+							if (selectedGovernanceAction === "reopen") {
+								void reopenFindingMutation.mutate({
+									componentKey: selectedFinding.component_key,
+									artifactKind: selectedFinding.artifact_kind,
+									artifactIdentity: selectedFinding.artifact_identity,
+									vulnerabilityId: selectedFinding.vulnerability_id,
+									packageName: selectedFinding.package_name,
+									packageVersion: selectedFinding.package_version,
+									packagePurl: selectedFinding.package_purl,
+								});
+								return;
+							}
 							if (selectedGovernanceAction === "suppress") {
 								void suppressFindingMutation.mutate({
 									componentKey: selectedFinding.component_key,
@@ -784,14 +906,16 @@ export function FindingsPage() {
 								value={`${selectedFinding.vulnerability_id} on ${selectedFinding.component_key}`}
 							/>
 						</label>
-						<label>
-							Reason
-							<input
-								name="riskReason"
-								onChange={(event) => setRiskReason(event.target.value)}
-								value={riskReason}
-							/>
-						</label>
+						{selectedGovernanceAction === "reopen" ? null : (
+							<label>
+								Reason
+								<input
+									name="riskReason"
+									onChange={(event) => setRiskReason(event.target.value)}
+									value={riskReason}
+								/>
+							</label>
+						)}
 						{selectedGovernanceAction === "accept-risk" ? (
 							<label>
 								Until unix ms

@@ -318,6 +318,27 @@ test("findings console can query one seeded release collection", async ({
 		.getByRole("button", { name: "Query Collection" })
 		.dispatchEvent("click");
 	await expect(collectionPanel.getByText("Showing 1-1 of 1")).toBeVisible();
+	await collectionPanel.getByRole("button", { name: "Reopen" }).click();
+	await page.getByRole("button", { name: "Submit Reopen" }).click();
+	await expect(
+		collectionPanel.getByText("Governance: open (reopened)."),
+	).toBeVisible();
+	await expect(
+		collectionPanel.getByText(
+			/Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
+		),
+	).toBeVisible();
+	await collectionPanel
+		.getByRole("combobox", { name: "Governance", exact: true })
+		.selectOption("open");
+	await collectionPanel
+		.getByRole("button", { name: "Query Collection" })
+		.dispatchEvent("click");
+	await expect(
+		collectionPanel.getByText(
+			/Target cohort: 1 open findings, 1 critical risk, 0 high risk\./i,
+		),
+	).toBeVisible();
 });
 
 test("findings console can bulk suppress one seeded release collection cohort", async ({

@@ -205,6 +205,14 @@ impl FindingReadModel {
         self.suppress(finding, suppression);
     }
 
+    pub fn reopen(&mut self, finding: &FindingRef) {
+        self.decisions.remove(finding);
+    }
+
+    pub fn replay_reopen(&mut self, finding: &FindingRef) {
+        self.reopen(finding);
+    }
+
     #[must_use]
     pub fn active_finding_count(&self, component_key: &str, artifact: &ArtifactRef) -> usize {
         self.active

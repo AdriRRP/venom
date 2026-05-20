@@ -2,22 +2,23 @@ use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
     ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
     BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
-    BulkSuppressFindingsRequest, BulkSuppressFindingsResponse, CollectionActiveFindingsResponse,
-    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
-    CollectionRegistrationRequest, ComponentRegistrationRequest,
-    ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
-    ConfigureCollectionSourceRequest, ConfigureCollectionSourceResponse,
-    ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
-    ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
-    DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
-    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
-    DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
-    ListSystemEventsRequest, ListSystemEventsResponse, MaterializeCollectionSourceResponse,
-    ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
-    RegisterComponentResponse, RegisterContextProfileResponse, ReleaseDashboardResponse,
-    RequestCollectionScanCommand, RequestCollectionScanResponse, RequestScanCommand,
-    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
-    SuppressFindingRequest, SuppressFindingResponse,
+    BulkReopenFindingsRequest, BulkReopenFindingsResponse, BulkSuppressFindingsRequest,
+    BulkSuppressFindingsResponse, CollectionActiveFindingsResponse, CollectionDetailResponse,
+    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
+    ComponentRegistrationRequest, ConfigureCollectionScanScheduleRequest,
+    ConfigureCollectionScanScheduleResponse, ConfigureCollectionSourceRequest,
+    ConfigureCollectionSourceResponse, ConfigureIntegrationRuntimeRequest,
+    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
+    ContextProfileRegistrationRequest, DrainCollectionScanWorkerCommand,
+    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
+    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
+    ListCollectionsResponse, ListContextProfilesResponse, ListSystemEventsRequest,
+    ListSystemEventsResponse, MaterializeCollectionSourceResponse, ProviderScanReportRequest,
+    RecordProviderReportResponse, RegisterCollectionResponse, RegisterComponentResponse,
+    RegisterContextProfileResponse, ReleaseDashboardResponse, ReopenFindingRequest,
+    ReopenFindingResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
+    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
+    ScanCommandStatusResponse, SuppressFindingRequest, SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -156,6 +157,10 @@ pub fn build_router(state: ApiState) -> Router {
             "/collections/{collection_key}/findings/suppression",
             post(suppress_collection_findings),
         )
+        .route(
+            "/collections/{collection_key}/findings/reopen",
+            post(reopen_collection_findings),
+        )
         .route("/components/{component_key}/artifacts", post(bind_artifact))
         .route(
             "/components/{component_key}/context-profile",
@@ -168,6 +173,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/integration-runtime", post(configure_integration_runtime))
         .route("/findings/risk-acceptance", post(accept_risk))
         .route("/findings/suppression", post(suppress_finding))
+        .route("/findings/reopen", post(reopen_finding))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route(
@@ -526,6 +532,43 @@ async fn suppress_collection_findings(
         let mut service = state.inner.service.lock().await;
         let response = service
             .suppress_findings_for_collection(&collection_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn reopen_finding(
+    State(state): State<ApiState>,
+    Json(request): Json<ReopenFindingRequest>,
+) -> Result<Json<ReopenFindingResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .reopen_finding(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn reopen_collection_findings(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<BulkReopenFindingsRequest>,
+) -> Result<Json<BulkReopenFindingsResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .reopen_findings_for_collection(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
@@ -1425,6 +1468,199 @@ mod tests {
             payload["active_findings"][0]["governance_reason"],
             "Known upstream false alarm"
         );
+    }
+
+    #[tokio::test]
+    async fn api_reopens_one_governed_finding_and_projects_the_state() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("reopen-finding", "state"),
+                temp_path("reopen-finding", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null,
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/reopen")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("reopen request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&governance_state=open",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"][0]["governance_state"], "open");
+        assert!(payload["active_findings"][0]["governance_reason"].is_null());
+        assert_eq!(payload["governance_state"], "open");
+    }
+
+    #[tokio::test]
+    async fn api_bulk_reopens_governed_collection_findings() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("bulk-reopen-findings", "state"),
+                temp_path("bulk-reopen-findings", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        assert_eq!(
+            register_payments_component(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            bind_owned_artifact(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            register_release_collection(router.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            add_payments_component_to_collection(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            record_provider_report_with_two_findings(router.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/risk-acceptance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "min_severity": "high",
+                            "reason": "Accepted for this release"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk acceptance request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/findings/reopen")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "governance_state": "risk-accepted",
+                            "min_severity": "high"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("bulk reopen request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["targeted"], 1);
+        assert_eq!(payload["reopened"], 1);
+        assert_eq!(payload["unchanged"], 0);
+        assert_eq!(payload["result_governance_state"], "open");
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/collections/release%3A2026.05/findings/active?governance_state=open&min_severity=high&limit=10&offset=0",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["total_active_findings"], 1);
+        assert_eq!(payload["health"]["open"], 2);
+        assert_eq!(payload["health"]["risk_accepted"], 0);
+        assert_eq!(payload["active_findings"][0]["governance_state"], "open");
     }
 
     #[tokio::test]
@@ -2335,6 +2571,101 @@ mod tests {
             payload["active_findings"][0]["governance_reason"],
             "Known upstream false alarm"
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_reloads_reopened_finding_as_open() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("reopen_reload");
+        let router = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = record_provider_report(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/suppression")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null,
+                            "reason": "Known upstream false alarm"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("suppression request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/findings/reopen")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("reopen request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let reloaded = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should reopen"),
+        );
+
+        let response = reloaded
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&governance_state=open",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"][0]["governance_state"], "open");
+        assert!(payload["active_findings"][0]["governance_reason"].is_null());
     }
 
     #[tokio::test]

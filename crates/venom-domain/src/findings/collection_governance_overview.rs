@@ -48,8 +48,10 @@ fn summarize_bulk_governance_cohort(
     scope: &[crate::CollectionScopedArtifact],
     query: &ScopedActiveFindingsQuery,
 ) -> BulkGovernanceCohortSummary {
-    let cohort_query =
-        ScopedActiveFindingsQuery::new().with_governance_state(FindingGovernanceState::Open);
+    let governance_state = query
+        .governance_state
+        .unwrap_or(FindingGovernanceState::Open);
+    let cohort_query = ScopedActiveFindingsQuery::new().with_governance_state(governance_state);
     let cohort_query = if let Some(min_severity) = query.min_severity {
         cohort_query.with_min_severity(min_severity)
     } else {
@@ -168,8 +170,8 @@ mod tests {
             overview.bulk_governance,
             BulkGovernanceCohortSummary {
                 targeted: 1,
-                critical_risk: 1,
-                high_risk: 0,
+                critical_risk: 0,
+                high_risk: 1,
             }
         );
         assert_eq!(overview.page.total, 1);

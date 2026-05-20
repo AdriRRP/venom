@@ -399,6 +399,41 @@ export type SuppressFindingResponse = {
 	governance_until_unix_ms: number | null;
 };
 
+export type ReopenFindingPayload = {
+	componentKey: string;
+	artifactKind: string;
+	artifactIdentity: string;
+	vulnerabilityId: string;
+	packageName: string;
+	packageVersion: string;
+	packagePurl?: string | null;
+};
+
+export type ReopenFindingResponse = {
+	change: string;
+	governance_state: string;
+	governance_reason: string | null;
+	governance_until_unix_ms: number | null;
+};
+
+export type BulkReopenCollectionFindingsPayload = {
+	collectionKey: string;
+	governanceState?: string;
+	minSeverity?: string;
+	packageName?: string;
+};
+
+export type BulkReopenCollectionFindingsResponse = {
+	collection_key: string;
+	governance_state: string | null;
+	min_severity: string | null;
+	package_name: string | null;
+	targeted: number;
+	reopened: number;
+	unchanged: number;
+	result_governance_state: string;
+};
+
 export type ScanCommandStatusResponse = {
 	command_id: string;
 	status: string;
@@ -618,6 +653,59 @@ export async function suppressFinding(
 	}
 
 	return (await response.json()) as SuppressFindingResponse;
+}
+
+export async function reopenFinding(
+	request: ReopenFindingPayload,
+): Promise<ReopenFindingResponse> {
+	const response = await fetch("/api/findings/reopen", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			component_key: request.componentKey,
+			artifact_kind: request.artifactKind,
+			artifact_identity: request.artifactIdentity,
+			vulnerability_id: request.vulnerabilityId,
+			package_name: request.packageName,
+			package_version: request.packageVersion,
+			package_purl: request.packagePurl ?? null,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(`finding reopen failed with status ${response.status}`);
+	}
+
+	return (await response.json()) as ReopenFindingResponse;
+}
+
+export async function reopenCollectionFindings(
+	request: BulkReopenCollectionFindingsPayload,
+): Promise<BulkReopenCollectionFindingsResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/findings/reopen`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				governance_state:
+					request.governanceState && request.governanceState !== "all"
+						? request.governanceState
+						: null,
+				min_severity:
+					request.minSeverity && request.minSeverity !== "all"
+						? request.minSeverity
+						: null,
+				package_name: request.packageName || null,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection finding reopen failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as BulkReopenCollectionFindingsResponse;
 }
 
 export async function registerComponent(

@@ -1,8 +1,8 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, BulkAcceptRiskResult, BulkSuppressFindingResult, CollectionRegistration,
-    CollectionSource, CollectionSourceMode, ComponentRegistration,
+    BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
+    CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
@@ -13,10 +13,11 @@ use crate::{
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
-    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReportedFinding,
-    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
-    SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
-    SystemEventsQuery, findings::finding_read_model::canonicalize_reported_findings,
+    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReopenFindingChange,
+    ReopenFindingResult, ReportedFinding, RiskAcceptance, ScopedActiveFindingsQuery, Severity,
+    SuppressFindingChange, SuppressFindingResult, Suppression, SystemEvent, SystemEventKind,
+    SystemEventsPage, SystemEventsQuery,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -687,6 +688,54 @@ impl DurableState {
         })
     }
 
+    /// Durably reopen one governed active finding back to the canonical open state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingFinding`] when the finding is not
+    /// currently active, or another [`DurableStateError`] when the durable
+    /// append fails.
+    pub fn reopen_finding(
+        &mut self,
+        finding: &FindingRef,
+    ) -> Result<ReopenFindingResult, DurableStateError> {
+        if !self.read_model.has_active_finding(finding) {
+            return Err(DurableStateError::MissingFinding(
+                "cannot reopen an inactive finding".into(),
+            ));
+        }
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let result = candidate_governance.reopen(finding);
+        if result.change == ReopenFindingChange::Reopened {
+            let component_key = finding.component_key.clone();
+            let occurred_at_unix_ms = current_unix_millis()?;
+            self.append_event(&DurableEvent::FindingReopened {
+                finding: StoredFindingRef::from(finding.clone()),
+                occurred_at_unix_ms,
+            })?;
+            candidate_read_model.reopen(finding);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!("durable-state-reopened-live-{occurred_at_unix_ms}")
+                    .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingReopened,
+                collection_key: None,
+                component_key: Some(component_key),
+                command_id: None,
+                integration_event_id: None,
+                finding_count: Some(1),
+                retryable: None,
+                detail: None,
+            });
+        }
+
+        Ok(result)
+    }
+
     /// Durably suppress one currently active finding.
     ///
     /// # Errors
@@ -809,6 +858,73 @@ impl DurableState {
         })
     }
 
+    /// Durably reopen one filtered governed cohort of findings inside one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingCollection`] when the collection is
+    /// unknown, or another [`DurableStateError`] when the durable append fails.
+    pub fn reopen_findings_for_collection(
+        &mut self,
+        collection_key: &str,
+        query: &ScopedActiveFindingsQuery,
+    ) -> Result<BulkReopenFindingResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .collection_scoped_artifacts(collection_key)
+            .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut reopened_findings = Vec::new();
+
+        for finding in findings {
+            let result = candidate_governance.reopen(&finding.finding);
+            if result.change == ReopenFindingChange::Reopened {
+                candidate_read_model.reopen(&finding.finding);
+                reopened_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let reopened = reopened_findings.len();
+        if reopened > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            self.append_event(&DurableEvent::FindingsReopened {
+                collection_key: collection_key.into(),
+                findings: reopened_findings,
+                occurred_at_unix_ms,
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-reopened-many-live-{collection_key}-{occurred_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsReopened,
+                collection_key: Some(collection_key.into()),
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(reopened).ok(),
+                retryable: None,
+                detail: None,
+            });
+        }
+
+        Ok(BulkReopenFindingResult {
+            targeted,
+            reopened,
+            unchanged: targeted.saturating_sub(reopened),
+        })
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
         let file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
         let reader = BufReader::new(file);
@@ -860,50 +976,13 @@ impl DurableState {
                 report,
                 pending_integration_event,
             } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
-            DurableEvent::FindingRiskAccepted {
-                finding,
-                acceptance,
-                occurred_at_unix_ms,
-            } => {
-                self.apply_risk_accepted_event(finding, acceptance, occurred_at_unix_ms, line);
-                Ok(())
-            }
-            DurableEvent::FindingsRiskAccepted {
-                collection_key,
-                findings,
-                acceptance,
-                occurred_at_unix_ms,
-            } => {
-                self.apply_risk_accepted_many_event(
-                    collection_key,
-                    findings,
-                    acceptance,
-                    occurred_at_unix_ms,
-                    line,
-                );
-                Ok(())
-            }
-            DurableEvent::FindingSuppressed {
-                finding,
-                suppression,
-                occurred_at_unix_ms,
-            } => {
-                self.apply_suppressed_event(finding, suppression, occurred_at_unix_ms, line);
-                Ok(())
-            }
-            DurableEvent::FindingsSuppressed {
-                collection_key,
-                findings,
-                suppression,
-                occurred_at_unix_ms,
-            } => {
-                self.apply_suppressed_many_event(
-                    collection_key,
-                    findings,
-                    suppression,
-                    occurred_at_unix_ms,
-                    line,
-                );
+            DurableEvent::FindingRiskAccepted { .. }
+            | DurableEvent::FindingsRiskAccepted { .. }
+            | DurableEvent::FindingSuppressed { .. }
+            | DurableEvent::FindingReopened { .. }
+            | DurableEvent::FindingsSuppressed { .. }
+            | DurableEvent::FindingsReopened { .. } => {
+                self.apply_governance_event(event, line);
                 Ok(())
             }
             DurableEvent::IntegrationEventPublished {
@@ -928,6 +1007,62 @@ impl DurableState {
                 );
                 Ok(())
             }
+        }
+    }
+
+    fn apply_governance_event(&mut self, event: DurableEvent, line: usize) {
+        match event {
+            DurableEvent::FindingRiskAccepted {
+                finding,
+                acceptance,
+                occurred_at_unix_ms,
+            } => self.apply_risk_accepted_event(finding, acceptance, occurred_at_unix_ms, line),
+            DurableEvent::FindingsRiskAccepted {
+                collection_key,
+                findings,
+                acceptance,
+                occurred_at_unix_ms,
+            } => self.apply_risk_accepted_many_event(
+                collection_key,
+                findings,
+                acceptance,
+                occurred_at_unix_ms,
+                line,
+            ),
+            DurableEvent::FindingSuppressed {
+                finding,
+                suppression,
+                occurred_at_unix_ms,
+            } => self.apply_suppressed_event(finding, suppression, occurred_at_unix_ms, line),
+            DurableEvent::FindingReopened {
+                finding,
+                occurred_at_unix_ms,
+            } => self.apply_reopened_event(&finding, occurred_at_unix_ms, line),
+            DurableEvent::FindingsSuppressed {
+                collection_key,
+                findings,
+                suppression,
+                occurred_at_unix_ms,
+            } => self.apply_suppressed_many_event(
+                collection_key,
+                findings,
+                suppression,
+                occurred_at_unix_ms,
+                line,
+            ),
+            DurableEvent::FindingsReopened {
+                collection_key,
+                findings,
+                occurred_at_unix_ms,
+            } => {
+                self.apply_reopened_many_event(
+                    collection_key,
+                    &findings,
+                    occurred_at_unix_ms,
+                    line,
+                );
+            }
+            _ => unreachable!("only governance durable events belong in apply_governance_event"),
         }
     }
 
@@ -980,6 +1115,8 @@ impl DurableState {
             | DurableEvent::FindingsRiskAccepted { .. }
             | DurableEvent::FindingSuppressed { .. }
             | DurableEvent::FindingsSuppressed { .. }
+            | DurableEvent::FindingReopened { .. }
+            | DurableEvent::FindingsReopened { .. }
             | DurableEvent::IntegrationEventPublished { .. }
             | DurableEvent::IntegrationEventPublicationFailed { .. } => {
                 unreachable!("non-inventory durable event routed to inventory replay")
@@ -1193,6 +1330,53 @@ impl DurableState {
             finding_count,
             retryable: None,
             detail: Some(suppression.reason),
+        });
+    }
+
+    fn apply_reopened_event(
+        &mut self,
+        finding: &StoredFindingRef,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) {
+        let component_key = finding.component_key.clone();
+        self.apply_finding_reopened(finding);
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-reopened-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingReopened,
+            collection_key: None,
+            component_key: Some(component_key),
+            command_id: None,
+            integration_event_id: None,
+            finding_count: Some(1),
+            retryable: None,
+            detail: None,
+        });
+    }
+
+    fn apply_reopened_many_event(
+        &mut self,
+        collection_key: Box<str>,
+        findings: &[StoredFindingRef],
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) {
+        let finding_count = u32::try_from(findings.len()).ok();
+        for finding in findings {
+            self.apply_finding_reopened(finding);
+        }
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-reopened-many-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingsReopened,
+            collection_key: Some(collection_key),
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count,
+            retryable: None,
+            detail: None,
         });
     }
 
@@ -1528,6 +1712,12 @@ impl DurableState {
         self.read_model.replay_suppression(finding, suppression);
     }
 
+    fn apply_finding_reopened(&mut self, finding: &StoredFindingRef) {
+        let finding = finding.clone().into_domain();
+        self.governance.replay_reopen(&finding);
+        self.read_model.replay_reopen(&finding);
+    }
+
     fn remove_pending_integration_event(&mut self, event_id: &str) {
         if self
             .pending_integration_events
@@ -1701,10 +1891,21 @@ enum DurableEvent {
         #[serde(default)]
         occurred_at_unix_ms: u64,
     },
+    FindingReopened {
+        finding: StoredFindingRef,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+    },
     FindingsSuppressed {
         collection_key: Box<str>,
         findings: Vec<StoredFindingRef>,
         suppression: Suppression,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+    },
+    FindingsReopened {
+        collection_key: Box<str>,
+        findings: Vec<StoredFindingRef>,
         #[serde(default)]
         occurred_at_unix_ms: u64,
     },
