@@ -480,7 +480,7 @@ impl ScanCommandQueue {
             } => self.apply_completed_event(
                 command_id,
                 findings_reported,
-                change_set,
+                &change_set,
                 occurred_at_unix_ms,
                 *pending_integration_event,
                 line,
@@ -488,19 +488,25 @@ impl ScanCommandQueue {
             DurableScanEvent::IntegrationEventPublished {
                 event_id,
                 occurred_at_unix_ms,
-            } => self.apply_published_event(event_id, occurred_at_unix_ms, line),
+            } => {
+                self.apply_published_event(event_id, occurred_at_unix_ms, line);
+                Ok(())
+            }
             DurableScanEvent::IntegrationEventPublicationFailed {
                 event_id,
                 occurred_at_unix_ms,
                 retryable,
                 detail,
-            } => self.apply_publish_failed_event(
-                event_id,
-                occurred_at_unix_ms,
-                retryable,
-                detail,
-                line,
-            ),
+            } => {
+                self.apply_publish_failed_event(
+                    event_id,
+                    occurred_at_unix_ms,
+                    retryable,
+                    detail,
+                    line,
+                );
+                Ok(())
+            }
             DurableScanEvent::Failed {
                 command_id,
                 occurred_at_unix_ms,
@@ -555,7 +561,7 @@ impl ScanCommandQueue {
         &mut self,
         command_id: Box<str>,
         findings_reported: usize,
-        change_set: FindingChangeSet,
+        change_set: &FindingChangeSet,
         occurred_at_unix_ms: u64,
         pending_integration_event: Option<PendingIntegrationEvent>,
         line: usize,
@@ -593,12 +599,7 @@ impl ScanCommandQueue {
         Ok(())
     }
 
-    fn apply_published_event(
-        &mut self,
-        event_id: Box<str>,
-        occurred_at_unix_ms: u64,
-        line: usize,
-    ) -> Result<(), ScanCommandQueueError> {
+    fn apply_published_event(&mut self, event_id: Box<str>, occurred_at_unix_ms: u64, line: usize) {
         self.remove_pending_integration_event(event_id.as_ref());
         self.push_system_event(SystemEvent {
             event_id: format!("scan-runtime-published-{line}").into_boxed_str(),
@@ -612,7 +613,6 @@ impl ScanCommandQueue {
             retryable: None,
             detail: None,
         });
-        Ok(())
     }
 
     fn apply_publish_failed_event(
@@ -622,7 +622,7 @@ impl ScanCommandQueue {
         retryable: bool,
         detail: Box<str>,
         line: usize,
-    ) -> Result<(), ScanCommandQueueError> {
+    ) {
         self.push_system_event(SystemEvent {
             event_id: format!("scan-runtime-publish-failed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -635,7 +635,6 @@ impl ScanCommandQueue {
             retryable: Some(retryable),
             detail: Some(detail),
         });
-        Ok(())
     }
 
     fn apply_failed_event(

@@ -864,52 +864,70 @@ impl DurableState {
                 finding,
                 acceptance,
                 occurred_at_unix_ms,
-            } => self.apply_risk_accepted_event(finding, acceptance, occurred_at_unix_ms, line),
+            } => {
+                self.apply_risk_accepted_event(finding, acceptance, occurred_at_unix_ms, line);
+                Ok(())
+            }
             DurableEvent::FindingsRiskAccepted {
                 collection_key,
                 findings,
                 acceptance,
                 occurred_at_unix_ms,
-            } => self.apply_risk_accepted_many_event(
-                collection_key,
-                findings,
-                acceptance,
-                occurred_at_unix_ms,
-                line,
-            ),
+            } => {
+                self.apply_risk_accepted_many_event(
+                    collection_key,
+                    findings,
+                    acceptance,
+                    occurred_at_unix_ms,
+                    line,
+                );
+                Ok(())
+            }
             DurableEvent::FindingSuppressed {
                 finding,
                 suppression,
                 occurred_at_unix_ms,
-            } => self.apply_suppressed_event(finding, suppression, occurred_at_unix_ms, line),
+            } => {
+                self.apply_suppressed_event(finding, suppression, occurred_at_unix_ms, line);
+                Ok(())
+            }
             DurableEvent::FindingsSuppressed {
                 collection_key,
                 findings,
                 suppression,
                 occurred_at_unix_ms,
-            } => self.apply_suppressed_many_event(
-                collection_key,
-                findings,
-                suppression,
-                occurred_at_unix_ms,
-                line,
-            ),
+            } => {
+                self.apply_suppressed_many_event(
+                    collection_key,
+                    findings,
+                    suppression,
+                    occurred_at_unix_ms,
+                    line,
+                );
+                Ok(())
+            }
             DurableEvent::IntegrationEventPublished {
                 event_id,
                 occurred_at_unix_ms,
-            } => self.apply_published_event(event_id, occurred_at_unix_ms, line),
+            } => {
+                self.apply_published_event(event_id, occurred_at_unix_ms, line);
+                Ok(())
+            }
             DurableEvent::IntegrationEventPublicationFailed {
                 event_id,
                 occurred_at_unix_ms,
                 retryable,
                 detail,
-            } => self.apply_publish_failed_event(
-                event_id,
-                occurred_at_unix_ms,
-                retryable,
-                detail,
-                line,
-            ),
+            } => {
+                self.apply_publish_failed_event(
+                    event_id,
+                    occurred_at_unix_ms,
+                    retryable,
+                    detail,
+                    line,
+                );
+                Ok(())
+            }
         }
     }
 
@@ -1084,7 +1102,7 @@ impl DurableState {
         acceptance: RiskAcceptance,
         occurred_at_unix_ms: u64,
         line: usize,
-    ) -> Result<(), DurableStateError> {
+    ) {
         let component_key = finding.component_key.clone();
         let detail = acceptance.reason.clone();
         self.apply_finding_risk_accepted(finding, acceptance);
@@ -1100,7 +1118,6 @@ impl DurableState {
             retryable: None,
             detail: Some(detail),
         });
-        Ok(())
     }
 
     fn apply_risk_accepted_many_event(
@@ -1110,7 +1127,7 @@ impl DurableState {
         acceptance: RiskAcceptance,
         occurred_at_unix_ms: u64,
         line: usize,
-    ) -> Result<(), DurableStateError> {
+    ) {
         let finding_count = u32::try_from(findings.len()).ok();
         for finding in findings {
             self.apply_finding_risk_accepted(finding, acceptance.clone());
@@ -1127,7 +1144,6 @@ impl DurableState {
             retryable: None,
             detail: Some(acceptance.reason),
         });
-        Ok(())
     }
 
     fn apply_suppressed_event(
@@ -1136,7 +1152,7 @@ impl DurableState {
         suppression: Suppression,
         occurred_at_unix_ms: u64,
         line: usize,
-    ) -> Result<(), DurableStateError> {
+    ) {
         let component_key = finding.component_key.clone();
         let detail = suppression.reason.clone();
         self.apply_finding_suppressed(finding, suppression);
@@ -1152,7 +1168,6 @@ impl DurableState {
             retryable: None,
             detail: Some(detail),
         });
-        Ok(())
     }
 
     fn apply_suppressed_many_event(
@@ -1162,7 +1177,7 @@ impl DurableState {
         suppression: Suppression,
         occurred_at_unix_ms: u64,
         line: usize,
-    ) -> Result<(), DurableStateError> {
+    ) {
         let finding_count = u32::try_from(findings.len()).ok();
         for finding in findings {
             self.apply_finding_suppressed(finding, suppression.clone());
@@ -1179,15 +1194,9 @@ impl DurableState {
             retryable: None,
             detail: Some(suppression.reason),
         });
-        Ok(())
     }
 
-    fn apply_published_event(
-        &mut self,
-        event_id: Box<str>,
-        occurred_at_unix_ms: u64,
-        line: usize,
-    ) -> Result<(), DurableStateError> {
+    fn apply_published_event(&mut self, event_id: Box<str>, occurred_at_unix_ms: u64, line: usize) {
         self.remove_pending_integration_event(event_id.as_ref());
         self.push_system_event(SystemEvent {
             event_id: format!("durable-state-published-{line}").into_boxed_str(),
@@ -1201,7 +1210,6 @@ impl DurableState {
             retryable: None,
             detail: None,
         });
-        Ok(())
     }
 
     fn apply_publish_failed_event(
@@ -1211,7 +1219,7 @@ impl DurableState {
         retryable: bool,
         detail: Box<str>,
         line: usize,
-    ) -> Result<(), DurableStateError> {
+    ) {
         self.push_system_event(SystemEvent {
             event_id: format!("durable-state-publish-failed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -1224,7 +1232,6 @@ impl DurableState {
             retryable: Some(retryable),
             detail: Some(detail),
         });
-        Ok(())
     }
 
     fn apply_component_registered(
