@@ -854,13 +854,31 @@ impl ComponentInventory {
             };
         };
 
+        if component_keys
+            .iter()
+            .any(|component_key| !self.components.contains_key(component_key.as_ref()))
+        {
+            return AssignCollectionContextProfileResult {
+                change: AssignCollectionContextProfileChange::Rejected,
+                profile_key: None,
+                targeted: 0,
+                assigned: 0,
+                unchanged: 0,
+            };
+        }
+
         let mut assigned = 0;
         let mut unchanged = 0;
         for component_key in &component_keys {
-            let record = self
-                .components
-                .get_mut(component_key.as_ref())
-                .expect("managed collection members must exist in the component inventory");
+            let Some(record) = self.components.get_mut(component_key.as_ref()) else {
+                return AssignCollectionContextProfileResult {
+                    change: AssignCollectionContextProfileChange::Rejected,
+                    profile_key: None,
+                    targeted: 0,
+                    assigned: 0,
+                    unchanged: 0,
+                };
+            };
             if record.context_profile_key.as_deref() == Some(profile_key) {
                 unchanged += 1;
             } else {
