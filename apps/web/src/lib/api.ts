@@ -128,10 +128,23 @@ export type CollectionMembershipResponse = {
 	members: number;
 };
 
+export type CollectionSource = {
+	kind: string;
+	mode: string;
+	component_keys: string[];
+};
+
+export type CollectionSourceSummary = {
+	kind: string;
+	mode: string;
+	component_count: number;
+};
+
 export type CollectionSummary = {
 	collection_key: string;
 	name: string;
 	members: number;
+	source: CollectionSourceSummary | null;
 	scan_schedule: CollectionScanSchedule | null;
 	due_now: boolean;
 	health: CollectionHealth;
@@ -171,9 +184,29 @@ export type ReleaseDashboardResponse = {
 export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
+	source: CollectionSource | null;
 	scan_schedule: CollectionScanSchedule | null;
 	health: CollectionHealth;
 	members: Array<{ component_key: string }>;
+};
+
+export type ConfigureCollectionSourcePayload = {
+	collectionKey: string;
+	kind: string;
+	mode: string;
+	componentKeys: string[];
+};
+
+export type ConfigureCollectionSourceResponse = {
+	change: string;
+	source: CollectionSource | null;
+};
+
+export type MaterializeCollectionSourceResponse = {
+	change: string;
+	members: number;
+	added: number;
+	removed: number;
 };
 
 export type CollectionHealth = {
@@ -682,6 +715,46 @@ export async function addCollectionComponent(
 		);
 	}
 	return (await response.json()) as CollectionMembershipResponse;
+}
+
+export async function configureCollectionSource(
+	request: ConfigureCollectionSourcePayload,
+): Promise<ConfigureCollectionSourceResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(request.collectionKey)}/source`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				kind: request.kind,
+				mode: request.mode,
+				component_keys: request.componentKeys,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection source configuration failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ConfigureCollectionSourceResponse;
+}
+
+export async function materializeCollectionSource(
+	collectionKey: string,
+): Promise<MaterializeCollectionSourceResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}/source/materialize`,
+		{
+			method: "POST",
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection source materialization failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as MaterializeCollectionSourceResponse;
 }
 
 export async function configureCollectionScanSchedule(

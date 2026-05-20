@@ -63,12 +63,20 @@ async function seedReleaseCollection(
 
 	await expectOk(
 		await request.post(
-			`/api/collections/${encodeURIComponent(fixture.collectionKey)}/components`,
+			`/api/collections/${encodeURIComponent(fixture.collectionKey)}/source`,
 			{
 				data: {
-					component_key: fixture.componentKey,
+					kind: "component-list",
+					mode: "replace",
+					component_keys: [fixture.componentKey],
 				},
 			},
+		),
+	);
+
+	await expectOk(
+		await request.post(
+			`/api/collections/${encodeURIComponent(fixture.collectionKey)}/source/materialize`,
 		),
 	);
 
@@ -153,8 +161,20 @@ test("operator console can manage one release collection and execute one schedul
 	await page.getByRole("button", { name: "Create Collection" }).click();
 	await expect(page.getByText(/Managed collections: 1\./i)).toBeVisible();
 
-	await page.getByRole("button", { name: "Add Component" }).click();
-	await expect(page.getByText(/Members: 1\./i)).toBeVisible();
+	await page
+		.getByRole("button", { name: "Configure Collection Source" })
+		.click();
+	await expect(
+		page.getByText(/Source: replace from 1 declared components\./i),
+	).toBeVisible();
+	await page
+		.getByRole("button", { name: "Materialize Collection Source" })
+		.click();
+	await expect(
+		page.getByText(
+			/Change: materialized\. Members: 1\. Added: 1\. Removed: 0\./i,
+		),
+	).toBeVisible();
 	await expect(page.getByText(/release:2026.05/i)).toBeVisible();
 
 	await page.getByRole("button", { name: "Bind Artifact" }).click();

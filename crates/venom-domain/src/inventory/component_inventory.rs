@@ -337,6 +337,185 @@ pub struct RemoveCollectionComponentResult {
     pub members: usize,
 }
 
+/// Canonical kind of one declared collection source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionSourceKind {
+    /// The collection derives membership from one declared component list.
+    ComponentList,
+}
+
+impl CollectionSourceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ComponentList => "component-list",
+        }
+    }
+}
+
+/// Explicit materialization semantics for one declared collection source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionSourceMode {
+    /// Replace current collection membership with the source membership exactly.
+    Replace,
+    /// Add source membership into the collection without removing existing members.
+    Reconcile,
+}
+
+impl CollectionSourceMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Reconcile => "reconcile",
+        }
+    }
+}
+
+/// One declared component-list source for a managed collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentListCollectionSource {
+    /// Explicit source materialization mode.
+    pub mode: CollectionSourceMode,
+    /// Canonical managed component keys declared by the source.
+    pub component_keys: Vec<Box<str>>,
+}
+
+impl ComponentListCollectionSource {
+    #[must_use]
+    pub fn new(mode: CollectionSourceMode, component_keys: Vec<Box<str>>) -> Self {
+        let canonical_component_keys = component_keys
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self {
+            mode,
+            component_keys: canonical_component_keys,
+        }
+    }
+}
+
+/// Declared source configuration for one managed collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionSource {
+    /// One explicit component-list source stored inside VENOM.
+    ComponentList(ComponentListCollectionSource),
+}
+
+impl CollectionSource {
+    #[must_use]
+    pub const fn kind(&self) -> CollectionSourceKind {
+        match self {
+            Self::ComponentList(_) => CollectionSourceKind::ComponentList,
+        }
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> CollectionSourceMode {
+        match self {
+            Self::ComponentList(source) => source.mode,
+        }
+    }
+
+    #[must_use]
+    pub fn component_keys(&self) -> &[Box<str>] {
+        match self {
+            Self::ComponentList(source) => &source.component_keys,
+        }
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> CollectionSourceSummary {
+        CollectionSourceSummary {
+            kind: self.kind(),
+            mode: self.mode(),
+            component_count: self.component_keys().len(),
+        }
+    }
+}
+
+/// Lean operator-facing summary of one declared collection source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionSourceSummary {
+    /// Declared source kind.
+    pub kind: CollectionSourceKind,
+    /// Explicit source materialization mode.
+    pub mode: CollectionSourceMode,
+    /// Number of canonical component keys declared by the source.
+    pub component_count: usize,
+}
+
+/// Observable outcome of configuring one declared collection source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigureCollectionSourceChange {
+    /// The collection now has one source or the source changed.
+    Configured,
+    /// The exact same source already existed.
+    Unchanged,
+    /// The source was rejected because the collection or one declared component is unknown.
+    Rejected,
+}
+
+impl ConfigureCollectionSourceChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of configuring one declared collection source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureCollectionSourceResult {
+    /// Observable state change caused by the source configuration attempt.
+    pub change: ConfigureCollectionSourceChange,
+    /// Source visible after the operation when the collection exists.
+    pub source: Option<CollectionSource>,
+}
+
+/// Observable outcome of materializing one declared collection source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializeCollectionSourceChange {
+    /// The collection membership changed according to the source semantics.
+    Materialized,
+    /// Materialization completed without changing membership.
+    Unchanged,
+    /// Materialization was rejected because the collection or source is missing, or one declared component is unknown.
+    Rejected,
+}
+
+impl MaterializeCollectionSourceChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Materialized => "materialized",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of materializing one declared collection source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializeCollectionSourceResult {
+    /// Observable state change caused by the materialization attempt.
+    pub change: MaterializeCollectionSourceChange,
+    /// Total number of members in the collection after the operation.
+    pub members: usize,
+    /// Number of members added by the materialization.
+    pub added: usize,
+    /// Number of members removed by the materialization.
+    pub removed: usize,
+    /// Concrete component keys added during materialization.
+    pub added_component_keys: Vec<Box<str>>,
+    /// Concrete component keys removed during materialization.
+    pub removed_component_keys: Vec<Box<str>>,
+}
+
 /// Durable periodic scan schedule attached to one managed collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollectionScanSchedule {
@@ -392,6 +571,8 @@ pub struct ManagedCollection {
     pub name: Box<str>,
     /// Canonical managed component keys in the collection.
     pub component_keys: Vec<Box<str>>,
+    /// Optional declared source for the collection membership.
+    pub source: Option<CollectionSource>,
     /// Optional periodic collection scan schedule.
     pub scan_schedule: Option<CollectionScanSchedule>,
 }
@@ -415,6 +596,8 @@ pub struct ManagedCollectionOperationsSummary {
     pub name: Box<str>,
     /// Total number of managed members currently in the collection.
     pub members: usize,
+    /// Optional lean summary of the declared source.
+    pub source: Option<CollectionSourceSummary>,
     /// Optional periodic collection scan schedule.
     pub scan_schedule: Option<CollectionScanSchedule>,
     /// Whether the collection is due for one scheduler pass now.
@@ -433,6 +616,7 @@ struct ComponentRecord {
 struct CollectionRecord {
     registration: CollectionRegistration,
     component_keys: BTreeSet<Box<str>>,
+    source: Option<CollectionSource>,
     scan_schedule: Option<CollectionScanSchedule>,
 }
 
@@ -624,6 +808,7 @@ impl ComponentInventory {
                     CollectionRecord {
                         registration,
                         component_keys: BTreeSet::new(),
+                        source: None,
                         scan_schedule: None,
                     },
                 );
@@ -693,6 +878,142 @@ impl ComponentInventory {
         RemoveCollectionComponentResult {
             change,
             members: record.component_keys.len(),
+        }
+    }
+
+    /// Configure one declared source for one managed collection.
+    #[must_use]
+    pub fn configure_collection_source(
+        &mut self,
+        collection_key: &str,
+        source: CollectionSource,
+    ) -> ConfigureCollectionSourceResult {
+        if source
+            .component_keys()
+            .iter()
+            .any(|component_key| !self.is_managed(component_key.as_ref()))
+        {
+            return ConfigureCollectionSourceResult {
+                change: ConfigureCollectionSourceChange::Rejected,
+                source: self
+                    .collections
+                    .get(collection_key)
+                    .and_then(|record| record.source.clone()),
+            };
+        }
+
+        let Some(record) = self.collections.get_mut(collection_key) else {
+            return ConfigureCollectionSourceResult {
+                change: ConfigureCollectionSourceChange::Rejected,
+                source: None,
+            };
+        };
+
+        let change = if record.source.as_ref() == Some(&source) {
+            ConfigureCollectionSourceChange::Unchanged
+        } else {
+            record.source = Some(source);
+            ConfigureCollectionSourceChange::Configured
+        };
+
+        ConfigureCollectionSourceResult {
+            change,
+            source: record.source.clone(),
+        }
+    }
+
+    /// Materialize one configured collection source into collection membership.
+    #[must_use]
+    pub fn materialize_collection_source(
+        &mut self,
+        collection_key: &str,
+    ) -> MaterializeCollectionSourceResult {
+        let Some(record) = self.collections.get(collection_key).cloned() else {
+            return MaterializeCollectionSourceResult {
+                change: MaterializeCollectionSourceChange::Rejected,
+                members: 0,
+                added: 0,
+                removed: 0,
+                added_component_keys: Vec::new(),
+                removed_component_keys: Vec::new(),
+            };
+        };
+
+        let Some(source) = record.source else {
+            return MaterializeCollectionSourceResult {
+                change: MaterializeCollectionSourceChange::Rejected,
+                members: record.component_keys.len(),
+                added: 0,
+                removed: 0,
+                added_component_keys: Vec::new(),
+                removed_component_keys: Vec::new(),
+            };
+        };
+
+        if source
+            .component_keys()
+            .iter()
+            .any(|component_key| !self.is_managed(component_key.as_ref()))
+        {
+            return MaterializeCollectionSourceResult {
+                change: MaterializeCollectionSourceChange::Rejected,
+                members: record.component_keys.len(),
+                added: 0,
+                removed: 0,
+                added_component_keys: Vec::new(),
+                removed_component_keys: Vec::new(),
+            };
+        }
+
+        let target_component_keys = source
+            .component_keys()
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut next_component_keys = record.component_keys.clone();
+
+        let added_component_keys = target_component_keys
+            .difference(&record.component_keys)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed_component_keys = match source.mode() {
+            CollectionSourceMode::Replace => record
+                .component_keys
+                .difference(&target_component_keys)
+                .cloned()
+                .collect::<Vec<_>>(),
+            CollectionSourceMode::Reconcile => Vec::new(),
+        };
+
+        match source.mode() {
+            CollectionSourceMode::Replace => {
+                next_component_keys = target_component_keys;
+            }
+            CollectionSourceMode::Reconcile => {
+                next_component_keys.extend(added_component_keys.iter().cloned());
+            }
+        }
+
+        let change = if added_component_keys.is_empty() && removed_component_keys.is_empty() {
+            MaterializeCollectionSourceChange::Unchanged
+        } else {
+            match self.collections.get_mut(collection_key) {
+                Some(record) => {
+                    record.component_keys = next_component_keys;
+                    MaterializeCollectionSourceChange::Materialized
+                }
+                None => MaterializeCollectionSourceChange::Rejected,
+            }
+        };
+
+        let members = self.collection_member_count(collection_key);
+        MaterializeCollectionSourceResult {
+            change,
+            members,
+            added: added_component_keys.len(),
+            removed: removed_component_keys.len(),
+            added_component_keys,
+            removed_component_keys,
         }
     }
 
@@ -940,6 +1261,13 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn collection_source(&self, collection_key: &str) -> Option<CollectionSource> {
+        self.collections
+            .get(collection_key)
+            .and_then(|record| record.source.clone())
+    }
+
+    #[must_use]
     pub fn due_collection_keys(&self, now_unix_ms: u64, limit: usize) -> Vec<Box<str>> {
         if limit == 0 {
             return Vec::new();
@@ -974,6 +1302,7 @@ impl ComponentInventory {
                 collection_key: record.registration.collection_key.clone(),
                 name: record.registration.name.clone(),
                 component_keys: record.component_keys.iter().cloned().collect(),
+                source: record.source.clone(),
                 scan_schedule: record.scan_schedule,
             })
             .collect()
@@ -996,6 +1325,7 @@ impl ComponentInventory {
                     collection_key: record.registration.collection_key.clone(),
                     name: record.registration.name.clone(),
                     members: record.component_keys.len(),
+                    source: record.source.as_ref().map(CollectionSource::summary),
                     scan_schedule,
                     due_now,
                 }
@@ -1031,10 +1361,12 @@ impl ComponentInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration,
-        ComponentInventory, ComponentRegistration, ConfigureCollectionScanScheduleChange,
-        ConfigureProviderChange, ContextProfileRegistration, RegisterCollectionChange,
-        RegisterComponentChange, RegisterContextProfileChange, RemoveCollectionComponentChange,
+        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration, CollectionSource,
+        CollectionSourceMode, ComponentInventory, ComponentListCollectionSource,
+        ComponentRegistration, ConfigureCollectionScanScheduleChange,
+        ConfigureCollectionSourceChange, ConfigureProviderChange, ContextProfileRegistration,
+        MaterializeCollectionSourceChange, RegisterCollectionChange, RegisterComponentChange,
+        RegisterContextProfileChange, RemoveCollectionComponentChange,
     };
     use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
@@ -1497,5 +1829,84 @@ mod tests {
 
         assert_eq!(result.change, RemoveCollectionComponentChange::Removed);
         assert_eq!(result.members, 0);
+    }
+
+    #[test]
+    fn collection_source_can_replace_membership() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:billing-api",
+            "Billing API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:billing-api");
+
+        let source_result = inventory.configure_collection_source(
+            "release:2026.05",
+            CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                CollectionSourceMode::Replace,
+                vec![Box::<str>::from("component:payments-api")],
+            )),
+        );
+        let result = inventory.materialize_collection_source("release:2026.05");
+
+        assert_eq!(
+            source_result.change,
+            ConfigureCollectionSourceChange::Configured
+        );
+        assert_eq!(
+            result.change,
+            MaterializeCollectionSourceChange::Materialized
+        );
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 1);
+        assert_eq!(
+            inventory.collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
+    }
+
+    #[test]
+    fn collection_source_can_reconcile_without_removing_membership() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:billing-api",
+            "Billing API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:billing-api");
+        let _ = inventory.configure_collection_source(
+            "release:2026.05",
+            CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                CollectionSourceMode::Reconcile,
+                vec![Box::<str>::from("component:payments-api")],
+            )),
+        );
+
+        let result = inventory.materialize_collection_source("release:2026.05");
+
+        assert_eq!(
+            result.change,
+            MaterializeCollectionSourceChange::Materialized
+        );
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 0);
+        assert_eq!(
+            inventory.collection_members("release:2026.05"),
+            Some(vec![
+                Box::<str>::from("component:billing-api"),
+                Box::<str>::from("component:payments-api"),
+            ])
+        );
     }
 }

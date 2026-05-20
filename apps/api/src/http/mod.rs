@@ -6,16 +6,17 @@ use crate::app::service::{
     CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
     CollectionRegistrationRequest, ComponentRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
+    ConfigureCollectionSourceRequest, ConfigureCollectionSourceResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
     ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
     DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
-    ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
-    RegisterComponentResponse, RegisterContextProfileResponse, ReleaseDashboardResponse,
-    RequestCollectionScanCommand, RequestCollectionScanResponse, RequestScanCommand,
-    RequestScanResponse, RunNextScanCommand, RunNextScanResponse, ScanCommandStatusResponse,
-    SuppressFindingRequest, SuppressFindingResponse,
+    MaterializeCollectionSourceResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RegisterContextProfileResponse,
+    ReleaseDashboardResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
+    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
+    ScanCommandStatusResponse, SuppressFindingRequest, SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -118,6 +119,14 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/components/{component_key}",
             axum::routing::delete(remove_component_from_collection),
+        )
+        .route(
+            "/collections/{collection_key}/source",
+            post(configure_collection_source),
+        )
+        .route(
+            "/collections/{collection_key}/source/materialize",
+            post(materialize_collection_source),
         )
         .route(
             "/collections/{collection_key}/scan-schedule",
@@ -283,6 +292,41 @@ async fn remove_component_from_collection(
         let mut service = state.inner.service.lock().await;
         let response = service
             .remove_component_from_collection(&collection_key, &component_key)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn configure_collection_source(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<ConfigureCollectionSourceRequest>,
+) -> Result<Json<ConfigureCollectionSourceResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .configure_collection_source(&collection_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn materialize_collection_source(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+) -> Result<Json<MaterializeCollectionSourceResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .materialize_collection_source(&collection_key)
             .await
             .map_err(ApiError::from)?;
         state.refresh_inventory_snapshot(&service);
@@ -1384,6 +1428,7 @@ mod tests {
             "release:2026.05"
         );
         assert_eq!(payload["collections"][0]["members"], 1);
+        assert_eq!(payload["collections"][0]["source"], serde_json::Value::Null);
         assert_eq!(
             payload["collections"][0]["scan_schedule"],
             serde_json::Value::Null
@@ -1407,6 +1452,80 @@ mod tests {
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(
             payload["members"][0]["component_key"],
+            "component:payments-api"
+        );
+        assert_eq!(payload["source"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn api_configures_and_materializes_collection_sources() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-sources", "state"),
+                temp_path("collection-sources", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/source")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"component-list","mode":"replace","component_keys":["component:payments-api"]}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection source request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/source/materialize")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection source materialization should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["change"], "materialized");
+        assert_eq!(payload["members"], 1);
+        assert_eq!(payload["added"], 1);
+        assert_eq!(payload["removed"], 0);
+
+        let response = router
+            .oneshot(
+                Request::get("/collections/release%3A2026.05")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection detail request should succeed");
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["source"]["kind"], "component-list");
+        assert_eq!(payload["source"]["mode"], "replace");
+        assert_eq!(
+            payload["source"]["component_keys"][0],
             "component:payments-api"
         );
     }

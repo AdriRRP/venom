@@ -17,9 +17,11 @@ use venom_domain::findings::{
     summarize_collection_health,
 };
 use venom_domain::inventory::{
-    AddCollectionComponentResult, BindArtifactResult, CollectionRegistration,
-    ComponentRegistration, ConfigureCollectionScanScheduleResult, ContextProfileRegistration,
-    ManagedCollectionOperationsSummary, RegisterCollectionResult, RegisterComponentResult,
+    AddCollectionComponentResult, BindArtifactResult, CollectionRegistration, CollectionSource,
+    CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
+    ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceResult,
+    ContextProfileRegistration, ManagedCollectionOperationsSummary,
+    MaterializeCollectionSourceResult, RegisterCollectionResult, RegisterComponentResult,
 };
 use venom_domain::scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
@@ -36,6 +38,8 @@ struct AcceptanceWorld {
     last_registration: Option<RegisterComponentResult>,
     last_collection_registration: Option<RegisterCollectionResult>,
     last_collection_membership: Option<AddCollectionComponentResult>,
+    last_collection_source: Option<ConfigureCollectionSourceResult>,
+    last_collection_source_materialization: Option<MaterializeCollectionSourceResult>,
     last_collection_scan_schedule: Option<ConfigureCollectionScanScheduleResult>,
     last_artifact_binding: Option<BindArtifactResult>,
     last_scan_request: Option<ScanRequest>,
@@ -71,6 +75,8 @@ async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.last_registration = None;
     world.last_collection_registration = None;
     world.last_collection_membership = None;
+    world.last_collection_source = None;
+    world.last_collection_source_materialization = None;
     world.last_collection_scan_schedule = None;
     world.last_artifact_binding = None;
     world.last_scan_request = None;
@@ -538,6 +544,85 @@ async fn venom_durably_adds_component_to_collection(
         }
         Err(error) => {
             world.last_collection_membership = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[when(
+    expr = "VENOM configures a {word} component-list source for collection {string} with components {string}"
+)]
+async fn venom_configures_collection_source(
+    world: &mut AcceptanceWorld,
+    mode: String,
+    collection_key: String,
+    component_keys: String,
+) {
+    let source = CollectionSource::ComponentList(ComponentListCollectionSource::new(
+        parse_collection_source_mode(&mode),
+        parse_component_keys(&component_keys),
+    ));
+    world.last_collection_source = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .configure_collection_source(&collection_key, source),
+    );
+}
+
+#[when(
+    expr = "VENOM durably configures a {word} component-list source for collection {string} with components {string}"
+)]
+async fn venom_durably_configures_collection_source(
+    world: &mut AcceptanceWorld,
+    mode: String,
+    collection_key: String,
+    component_keys: String,
+) {
+    let source = CollectionSource::ComponentList(ComponentListCollectionSource::new(
+        parse_collection_source_mode(&mode),
+        parse_component_keys(&component_keys),
+    ));
+    match world
+        .durable_state_mut()
+        .configure_collection_source(&collection_key, source)
+    {
+        Ok(result) => {
+            world.last_collection_source = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_collection_source = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[when(expr = "VENOM materializes the source of collection {string}")]
+async fn venom_materializes_collection_source(world: &mut AcceptanceWorld, collection_key: String) {
+    world.last_collection_source_materialization = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .materialize_collection_source(&collection_key),
+    );
+}
+
+#[when(expr = "VENOM durably materializes the source of collection {string}")]
+async fn venom_durably_materializes_collection_source(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .materialize_collection_source(&collection_key)
+    {
+        Ok(result) => {
+            world.last_collection_source_materialization = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_collection_source_materialization = None;
             world.last_durable_error = Some(error.as_str().to_owned());
         }
     }
@@ -1275,6 +1360,35 @@ async fn the_collection_membership_result_is(world: &mut AcceptanceWorld, expect
     );
 }
 
+#[then(expr = "the collection source result is {string}")]
+async fn the_collection_source_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_collection_source
+            .as_ref()
+            .expect("a collection source attempt must exist before assertions")
+            .change
+            .as_str(),
+        expected
+    );
+}
+
+#[then(expr = "the collection source materialization result is {string}")]
+async fn the_collection_source_materialization_result_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_collection_source_materialization
+            .as_ref()
+            .expect("a collection source materialization must exist before assertions")
+            .change
+            .as_str(),
+        expected
+    );
+}
+
 #[then(expr = "the collection scan schedule result is {string}")]
 async fn the_collection_scan_schedule_result_is(world: &mut AcceptanceWorld, expected: String) {
     assert_eq!(
@@ -1337,6 +1451,33 @@ async fn the_durable_state_manages_collection(world: &mut AcceptanceWorld, colle
             .ingestion()
             .inventory()
             .is_collection_managed(&collection_key)
+    );
+}
+
+#[then(expr = "collection {string} has a {word} source over components {string}")]
+async fn collection_has_source_over_components(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    mode: String,
+    component_keys: String,
+) {
+    let source = world
+        .ingestion
+        .inventory()
+        .collection_source(&collection_key)
+        .or_else(|| {
+            world.durable_state.as_ref().and_then(|state| {
+                state
+                    .ingestion()
+                    .inventory()
+                    .collection_source(&collection_key)
+            })
+        })
+        .expect("collection source must exist before assertions");
+    assert_eq!(source.mode(), parse_collection_source_mode(&mode));
+    assert_eq!(
+        source.component_keys(),
+        parse_component_keys(&component_keys)
     );
 }
 
@@ -2596,6 +2737,23 @@ fn parse_governance_state(value: &str) -> FindingGovernanceState {
         "suppressed" => FindingGovernanceState::Suppressed,
         _ => panic!("unsupported governance state in acceptance step: {value}"),
     }
+}
+
+fn parse_collection_source_mode(value: &str) -> CollectionSourceMode {
+    match value {
+        "replace" => CollectionSourceMode::Replace,
+        "reconcile" => CollectionSourceMode::Reconcile,
+        _ => panic!("unsupported collection source mode in acceptance step: {value}"),
+    }
+}
+
+fn parse_component_keys(value: &str) -> Vec<Box<str>> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(Into::into)
+        .collect()
 }
 
 const fn severity_name(value: Severity) -> &'static str {

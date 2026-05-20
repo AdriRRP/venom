@@ -19,8 +19,11 @@ use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
     PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
-use venom_domain::inventory::{CollectionRegistration, ComponentInventory, ComponentRegistration};
-use venom_domain::inventory::{ContextProfileRegistration, ManagedContextProfile};
+use venom_domain::inventory::{
+    CollectionRegistration, CollectionSource, CollectionSourceKind, CollectionSourceMode,
+    CollectionSourceSummary, ComponentInventory, ComponentListCollectionSource,
+    ComponentRegistration, ContextProfileRegistration, ManagedContextProfile,
+};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -127,6 +130,7 @@ impl ApiReadSnapshot {
                     collection_key: collection.collection_key.into(),
                     name: collection.name.into(),
                     members: collection.members,
+                    source: collection.source.map(CollectionSourceSummaryItem::from),
                     scan_schedule: collection
                         .scan_schedule
                         .map(CollectionScanScheduleItem::from),
@@ -175,6 +179,7 @@ impl ApiReadSnapshot {
         Ok(CollectionDetailResponse {
             collection_key: collection.collection_key.into(),
             name: collection.name.into(),
+            source: collection.source.map(CollectionSourceItem::from),
             scan_schedule: collection
                 .scan_schedule
                 .map(CollectionScanScheduleItem::from),
@@ -525,6 +530,62 @@ impl ApiApplication {
         Ok(CollectionMembershipResponse {
             change: result.change.as_str().to_owned(),
             members: result.members,
+        })
+    }
+
+    /// Configure one declared source for one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the source request is invalid or the durable write fails.
+    pub async fn configure_collection_source(
+        &mut self,
+        collection_key: &str,
+        request: ConfigureCollectionSourceRequest,
+    ) -> Result<ConfigureCollectionSourceResponse, ApiApplicationError> {
+        let source = parse_collection_source(request)?;
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .configure_collection_source(collection_key, source)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .configure_collection_source(collection_key, source)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(ConfigureCollectionSourceResponse {
+            change: result.change.as_str().to_owned(),
+            source: result.source.map(CollectionSourceItem::from),
+        })
+    }
+
+    /// Materialize one declared source into collection membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable write fails.
+    pub async fn materialize_collection_source(
+        &mut self,
+        collection_key: &str,
+    ) -> Result<MaterializeCollectionSourceResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .materialize_collection_source(collection_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .materialize_collection_source(collection_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(MaterializeCollectionSourceResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
+            added: result.added,
+            removed: result.removed,
         })
     }
 
@@ -1511,6 +1572,7 @@ pub struct CollectionSummary {
     pub collection_key: String,
     pub name: String,
     pub members: usize,
+    pub source: Option<CollectionSourceSummaryItem>,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub due_now: bool,
     pub health: CollectionHealthItem,
@@ -1520,9 +1582,69 @@ pub struct CollectionSummary {
 pub struct CollectionDetailResponse {
     pub collection_key: String,
     pub name: String,
+    pub source: Option<CollectionSourceItem>,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub health: CollectionHealthItem,
     pub members: Vec<CollectionMemberItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureCollectionSourceRequest {
+    pub kind: String,
+    pub mode: String,
+    pub component_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigureCollectionSourceResponse {
+    pub change: String,
+    pub source: Option<CollectionSourceItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MaterializeCollectionSourceResponse {
+    pub change: String,
+    pub members: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionSourceSummaryItem {
+    pub kind: &'static str,
+    pub mode: &'static str,
+    pub component_count: usize,
+}
+
+impl From<CollectionSourceSummary> for CollectionSourceSummaryItem {
+    fn from(value: CollectionSourceSummary) -> Self {
+        Self {
+            kind: value.kind.as_str(),
+            mode: value.mode.as_str(),
+            component_count: value.component_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionSourceItem {
+    pub kind: &'static str,
+    pub mode: &'static str,
+    pub component_keys: Vec<String>,
+}
+
+impl From<CollectionSource> for CollectionSourceItem {
+    fn from(value: CollectionSource) -> Self {
+        Self {
+            kind: value.kind().as_str(),
+            mode: value.mode().as_str(),
+            component_keys: value
+                .component_keys()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2122,6 +2244,45 @@ const fn freshness_name(value: EvidenceFreshness) -> &'static str {
     match value {
         EvidenceFreshness::Deterministic => "deterministic",
         EvidenceFreshness::Live => "live",
+    }
+}
+
+fn parse_collection_source(
+    request: ConfigureCollectionSourceRequest,
+) -> Result<CollectionSource, ApiApplicationError> {
+    let kind = match request.kind.as_str() {
+        "component-list" => CollectionSourceKind::ComponentList,
+        value => {
+            return Err(ApiApplicationError::InvalidRequest(format!(
+                "unsupported collection source kind: {value}"
+            )));
+        }
+    };
+    let mode = match request.mode.as_str() {
+        "replace" => CollectionSourceMode::Replace,
+        "reconcile" => CollectionSourceMode::Reconcile,
+        value => {
+            return Err(ApiApplicationError::InvalidRequest(format!(
+                "unsupported collection source mode: {value}"
+            )));
+        }
+    };
+    let component_keys = request
+        .component_keys
+        .into_iter()
+        .map(String::into_boxed_str)
+        .collect::<Vec<_>>();
+
+    if component_keys.is_empty() {
+        return Err(ApiApplicationError::InvalidRequest(
+            "collection source component_keys must not be empty".to_owned(),
+        ));
+    }
+
+    match kind {
+        CollectionSourceKind::ComponentList => Ok(CollectionSource::ComponentList(
+            ComponentListCollectionSource::new(mode, component_keys),
+        )),
     }
 }
 

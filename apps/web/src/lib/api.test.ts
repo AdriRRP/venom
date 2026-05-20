@@ -5,6 +5,7 @@ import {
 	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
+	configureCollectionSource,
 	configureProvider,
 	drainCollectionScanWorker,
 	drainScanWorker,
@@ -16,6 +17,7 @@ import {
 	fetchContextProfiles,
 	fetchReleaseDashboard,
 	fetchScanCommandStatus,
+	materializeCollectionSource,
 	registerCollection,
 	registerComponent,
 	registerContextProfile,
@@ -114,7 +116,7 @@ describe("fetchApiHealth", () => {
 		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
 	});
 
-	it("serializes collection creation, membership, scheduling, dashboard, scan targeting, and read queries", async () => {
+	it("serializes collection creation, source materialization, scheduling, dashboard, scan targeting, and read queries", async () => {
 		const calls: Array<{ input: string; init?: RequestInit }> = [];
 		globalThis.fetch = vi.fn(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -133,6 +135,13 @@ describe("fetchApiHealth", () => {
 		await addCollectionComponent("release:2026.05", {
 			componentKey: "component:payments-api",
 		});
+		await configureCollectionSource({
+			collectionKey: "release:2026.05",
+			kind: "component-list",
+			mode: "replace",
+			componentKeys: ["component:payments-api"],
+		});
+		await materializeCollectionSource("release:2026.05");
 		await configureCollectionScanSchedule({
 			collectionKey: "release:2026.05",
 			cadenceMinutes: 60,
@@ -162,23 +171,29 @@ describe("fetchApiHealth", () => {
 		expect(calls[1]?.init?.body).toContain(
 			'"component_key":"component:payments-api"',
 		);
-		expect(calls[2]?.input).toBe(
+		expect(calls[2]?.input).toBe("/api/collections/release%3A2026.05/source");
+		expect(calls[2]?.init?.body).toContain('"kind":"component-list"');
+		expect(calls[2]?.init?.body).toContain('"mode":"replace"');
+		expect(calls[3]?.input).toBe(
+			"/api/collections/release%3A2026.05/source/materialize",
+		);
+		expect(calls[4]?.input).toBe(
 			"/api/collections/release%3A2026.05/scan-schedule",
 		);
-		expect(calls[2]?.init?.body).toContain('"cadence_minutes":60');
-		expect(calls[3]?.input).toBe(
+		expect(calls[4]?.init?.body).toContain('"cadence_minutes":60');
+		expect(calls[5]?.input).toBe(
 			"/api/collections/release%3A2026.05/scan-requests",
 		);
-		expect(calls[3]?.init?.body).toContain('"freshness":"deterministic"');
-		expect(calls[4]?.input).toBe("/api/collections");
-		expect(calls[5]?.input).toBe("/api/dashboard/releases");
-		expect(calls[6]?.input).toBe("/api/collections/release%3A2026.05");
-		expect(calls[7]?.input).toContain(
+		expect(calls[5]?.init?.body).toContain('"freshness":"deterministic"');
+		expect(calls[6]?.input).toBe("/api/collections");
+		expect(calls[7]?.input).toBe("/api/dashboard/releases");
+		expect(calls[8]?.input).toBe("/api/collections/release%3A2026.05");
+		expect(calls[9]?.input).toContain(
 			"/api/collections/release%3A2026.05/findings/active?",
 		);
-		expect(calls[7]?.input).toContain("min_severity=high");
-		expect(calls[7]?.input).toContain("governance_state=suppressed");
-		expect(calls[7]?.input).toContain("package_name=openssl");
+		expect(calls[9]?.input).toContain("min_severity=high");
+		expect(calls[9]?.input).toContain("governance_state=suppressed");
+		expect(calls[9]?.input).toContain("package_name=openssl");
 	});
 
 	it("serializes context profile registration, listing, and assignment", async () => {
