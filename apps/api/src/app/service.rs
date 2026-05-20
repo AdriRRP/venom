@@ -178,12 +178,11 @@ impl ApiReadSnapshot {
         ))
     }
 
-    #[must_use]
     pub fn list_system_events(
         &self,
-        request: ListSystemEventsRequest,
+        request: &ListSystemEventsRequest,
     ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
-        let query = build_system_events_query(&request)?;
+        let query = build_system_events_query(request)?;
         let category = query.category.map(|value| value.as_str().to_owned());
         let page = venom_domain::operations::system_event_trace::query_system_events(
             self.system_events.iter(),

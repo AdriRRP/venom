@@ -201,12 +201,13 @@ async fn list_system_events(
     State(state): State<ApiState>,
     Query(request): Query<SystemEventsQueryParams>,
 ) -> Result<Json<ListSystemEventsResponse>, ApiError> {
+    let request = ListSystemEventsRequest {
+        category: request.category,
+        limit: request.limit,
+    };
     let response = state
         .read_snapshot()
-        .list_system_events(ListSystemEventsRequest {
-            category: request.category,
-            limit: request.limit,
-        })
+        .list_system_events(&request)
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
