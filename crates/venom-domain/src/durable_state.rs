@@ -864,133 +864,52 @@ impl DurableState {
                 finding,
                 acceptance,
                 occurred_at_unix_ms,
-            } => {
-                let component_key = finding.component_key.clone();
-                let detail = acceptance.reason.clone();
-                self.apply_finding_risk_accepted(finding, acceptance);
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-risk-accepted-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::FindingRiskAccepted,
-                    collection_key: None,
-                    component_key: Some(component_key),
-                    command_id: None,
-                    integration_event_id: None,
-                    finding_count: Some(1),
-                    retryable: None,
-                    detail: Some(detail),
-                });
-                Ok(())
-            }
+            } => self.apply_risk_accepted_event(finding, acceptance, occurred_at_unix_ms, line),
             DurableEvent::FindingsRiskAccepted {
                 collection_key,
                 findings,
                 acceptance,
                 occurred_at_unix_ms,
-            } => {
-                let finding_count = u32::try_from(findings.len()).ok();
-                for finding in findings {
-                    self.apply_finding_risk_accepted(finding, acceptance.clone());
-                }
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-risk-accepted-many-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::FindingsRiskAccepted,
-                    collection_key: Some(collection_key),
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: None,
-                    finding_count,
-                    retryable: None,
-                    detail: Some(acceptance.reason),
-                });
-                Ok(())
-            }
+            } => self.apply_risk_accepted_many_event(
+                collection_key,
+                findings,
+                acceptance,
+                occurred_at_unix_ms,
+                line,
+            ),
             DurableEvent::FindingSuppressed {
                 finding,
                 suppression,
                 occurred_at_unix_ms,
-            } => {
-                let component_key = finding.component_key.clone();
-                let detail = suppression.reason.clone();
-                self.apply_finding_suppressed(finding, suppression);
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-suppressed-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::FindingSuppressed,
-                    collection_key: None,
-                    component_key: Some(component_key),
-                    command_id: None,
-                    integration_event_id: None,
-                    finding_count: Some(1),
-                    retryable: None,
-                    detail: Some(detail),
-                });
-                Ok(())
-            }
+            } => self.apply_suppressed_event(finding, suppression, occurred_at_unix_ms, line),
             DurableEvent::FindingsSuppressed {
                 collection_key,
                 findings,
                 suppression,
                 occurred_at_unix_ms,
-            } => {
-                let finding_count = u32::try_from(findings.len()).ok();
-                for finding in findings {
-                    self.apply_finding_suppressed(finding, suppression.clone());
-                }
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-suppressed-many-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::FindingsSuppressed,
-                    collection_key: Some(collection_key),
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: None,
-                    finding_count,
-                    retryable: None,
-                    detail: Some(suppression.reason),
-                });
-                Ok(())
-            }
+            } => self.apply_suppressed_many_event(
+                collection_key,
+                findings,
+                suppression,
+                occurred_at_unix_ms,
+                line,
+            ),
             DurableEvent::IntegrationEventPublished {
                 event_id,
                 occurred_at_unix_ms,
-            } => {
-                self.remove_pending_integration_event(event_id.as_ref());
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-published-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::IntegrationEventPublished,
-                    collection_key: None,
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: Some(event_id),
-                    finding_count: None,
-                    retryable: None,
-                    detail: None,
-                });
-                Ok(())
-            }
+            } => self.apply_published_event(event_id, occurred_at_unix_ms, line),
             DurableEvent::IntegrationEventPublicationFailed {
                 event_id,
                 occurred_at_unix_ms,
                 retryable,
                 detail,
-            } => {
-                self.push_system_event(SystemEvent {
-                    event_id: format!("durable-state-publish-failed-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::IntegrationEventPublicationFailed,
-                    collection_key: None,
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: Some(event_id),
-                    finding_count: None,
-                    retryable: Some(retryable),
-                    detail: Some(detail),
-                });
-                Ok(())
-            }
+            } => self.apply_publish_failed_event(
+                event_id,
+                occurred_at_unix_ms,
+                retryable,
+                detail,
+                line,
+            ),
         }
     }
 
@@ -1024,6 +943,38 @@ impl DurableState {
                 profile_key.as_ref(),
                 line,
             ),
+            DurableEvent::CollectionRegistered { .. }
+            | DurableEvent::CollectionComponentAdded { .. }
+            | DurableEvent::CollectionComponentRemoved { .. } => {
+                self.apply_collection_membership_event(event, line)
+            }
+            DurableEvent::CollectionSourceConfigured { .. }
+            | DurableEvent::CollectionSourceMaterialized { .. } => {
+                self.apply_collection_source_event(event, line)
+            }
+            DurableEvent::CollectionScanScheduleConfigured { .. }
+            | DurableEvent::CollectionScanScheduleMaterialized { .. } => {
+                self.apply_collection_schedule_event(event, line)
+            }
+            DurableEvent::IntegrationRuntimeConfigured { .. }
+            | DurableEvent::ProviderScanRecorded { .. }
+            | DurableEvent::FindingRiskAccepted { .. }
+            | DurableEvent::FindingsRiskAccepted { .. }
+            | DurableEvent::FindingSuppressed { .. }
+            | DurableEvent::FindingsSuppressed { .. }
+            | DurableEvent::IntegrationEventPublished { .. }
+            | DurableEvent::IntegrationEventPublicationFailed { .. } => {
+                unreachable!("non-inventory durable event routed to inventory replay")
+            }
+        }
+    }
+
+    fn apply_collection_membership_event(
+        &mut self,
+        event: DurableEvent,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        match event {
             DurableEvent::CollectionRegistered { registration } => {
                 self.apply_collection_registered(registration, line)
             }
@@ -1043,6 +994,16 @@ impl DurableState {
                 component_key.as_ref(),
                 line,
             ),
+            _ => unreachable!("non-membership event routed to membership replay"),
+        }
+    }
+
+    fn apply_collection_source_event(
+        &mut self,
+        event: DurableEvent,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        match event {
             DurableEvent::CollectionSourceConfigured {
                 collection_key,
                 source,
@@ -1061,6 +1022,16 @@ impl DurableState {
                 removed_component_keys,
                 line,
             ),
+            _ => unreachable!("non-source event routed to source replay"),
+        }
+    }
+
+    fn apply_collection_schedule_event(
+        &mut self,
+        event: DurableEvent,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        match event {
             DurableEvent::CollectionScanScheduleConfigured {
                 collection_key,
                 cadence_minutes,
@@ -1103,17 +1074,157 @@ impl DurableState {
                 });
                 Ok(())
             }
-            DurableEvent::IntegrationRuntimeConfigured { .. }
-            | DurableEvent::ProviderScanRecorded { .. }
-            | DurableEvent::FindingRiskAccepted { .. }
-            | DurableEvent::FindingsRiskAccepted { .. }
-            | DurableEvent::FindingSuppressed { .. }
-            | DurableEvent::FindingsSuppressed { .. }
-            | DurableEvent::IntegrationEventPublished { .. }
-            | DurableEvent::IntegrationEventPublicationFailed { .. } => {
-                unreachable!("non-inventory durable event routed to inventory replay")
-            }
+            _ => unreachable!("non-schedule event routed to schedule replay"),
         }
+    }
+
+    fn apply_risk_accepted_event(
+        &mut self,
+        finding: StoredFindingRef,
+        acceptance: RiskAcceptance,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let component_key = finding.component_key.clone();
+        let detail = acceptance.reason.clone();
+        self.apply_finding_risk_accepted(finding, acceptance);
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-risk-accepted-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingRiskAccepted,
+            collection_key: None,
+            component_key: Some(component_key),
+            command_id: None,
+            integration_event_id: None,
+            finding_count: Some(1),
+            retryable: None,
+            detail: Some(detail),
+        });
+        Ok(())
+    }
+
+    fn apply_risk_accepted_many_event(
+        &mut self,
+        collection_key: Box<str>,
+        findings: Vec<StoredFindingRef>,
+        acceptance: RiskAcceptance,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let finding_count = u32::try_from(findings.len()).ok();
+        for finding in findings {
+            self.apply_finding_risk_accepted(finding, acceptance.clone());
+        }
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-risk-accepted-many-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingsRiskAccepted,
+            collection_key: Some(collection_key),
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count,
+            retryable: None,
+            detail: Some(acceptance.reason),
+        });
+        Ok(())
+    }
+
+    fn apply_suppressed_event(
+        &mut self,
+        finding: StoredFindingRef,
+        suppression: Suppression,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let component_key = finding.component_key.clone();
+        let detail = suppression.reason.clone();
+        self.apply_finding_suppressed(finding, suppression);
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-suppressed-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingSuppressed,
+            collection_key: None,
+            component_key: Some(component_key),
+            command_id: None,
+            integration_event_id: None,
+            finding_count: Some(1),
+            retryable: None,
+            detail: Some(detail),
+        });
+        Ok(())
+    }
+
+    fn apply_suppressed_many_event(
+        &mut self,
+        collection_key: Box<str>,
+        findings: Vec<StoredFindingRef>,
+        suppression: Suppression,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let finding_count = u32::try_from(findings.len()).ok();
+        for finding in findings {
+            self.apply_finding_suppressed(finding, suppression.clone());
+        }
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-suppressed-many-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingsSuppressed,
+            collection_key: Some(collection_key),
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count,
+            retryable: None,
+            detail: Some(suppression.reason),
+        });
+        Ok(())
+    }
+
+    fn apply_published_event(
+        &mut self,
+        event_id: Box<str>,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        self.remove_pending_integration_event(event_id.as_ref());
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-published-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublished,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(event_id),
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        });
+        Ok(())
+    }
+
+    fn apply_publish_failed_event(
+        &mut self,
+        event_id: Box<str>,
+        occurred_at_unix_ms: u64,
+        retryable: bool,
+        detail: Box<str>,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-publish-failed-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublicationFailed,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(event_id),
+            finding_count: None,
+            retryable: Some(retryable),
+            detail: Some(detail),
+        });
+        Ok(())
     }
 
     fn apply_component_registered(

@@ -320,108 +320,118 @@ impl ScanCommandQueue {
     fn record_outcome(&mut self, outcome: &RunNextScanResult) -> Result<(), ScanCommandQueueError> {
         match outcome {
             RunNextScanResult::Idle => Ok(()),
-            RunNextScanResult::Completed(result) => {
-                let command = self
-                    .commands
-                    .get(result.command_id.as_ref())
-                    .ok_or_else(|| ScanCommandQueueError::CorruptHistory {
-                        line: 0,
-                        reason: "completed scan command missing from in-memory queue".into(),
-                    })?;
-                let occurred_at_unix_ms = current_unix_millis()?;
-                let pending_integration_event = PendingIntegrationEvent::scan_command_completed(
-                    result.command_id.as_ref(),
-                    command.request.component_key.clone(),
-                    command.request.artifact.clone(),
-                    result.provider_key.clone(),
-                    command.request.freshness,
-                    result.findings_reported,
-                    result.change_set.clone(),
-                );
-                self.append_event(&DurableScanEvent::Completed {
-                    command_id: result.command_id.clone(),
-                    provider_key: result.provider_key.clone(),
-                    findings_reported: result.findings_reported,
-                    change_set: result.change_set.clone(),
-                    occurred_at_unix_ms,
-                    pending_integration_event: Box::new(Some(pending_integration_event.clone())),
-                })?;
-                let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
-                    return Err(ScanCommandQueueError::CorruptHistory {
-                        line: 0,
-                        reason: "completed scan command missing from in-memory queue".into(),
-                    });
-                };
-                command.status = ScanCommandStatus::Completed;
-                let component_key = command.request.component_key.clone();
-                self.pending_integration_events
-                    .push_back(pending_integration_event);
-                self.push_system_event(SystemEvent {
-                    event_id: format!(
-                        "scan-command-completed-live-{}-{occurred_at_unix_ms}",
-                        result.command_id
-                    )
-                    .into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::ScanCommandCompleted,
-                    collection_key: None,
-                    component_key: Some(component_key),
-                    command_id: Some(result.command_id.clone()),
-                    integration_event_id: None,
-                    finding_count: u32::try_from(result.findings_reported).ok(),
-                    retryable: None,
-                    detail: Some(
-                        format!(
-                            "discovered {}, repeated {}, withdrawn {}, active {}",
-                            result.change_set.discovered,
-                            result.change_set.repeated,
-                            result.change_set.withdrawn,
-                            result.change_set.active
-                        )
-                        .into_boxed_str(),
-                    ),
-                });
-                Ok(())
-            }
-            RunNextScanResult::Failed(result) => {
-                let component_key = self
-                    .commands
-                    .get(result.command_id.as_ref())
-                    .map(|record| record.request.component_key.clone());
-                let occurred_at_unix_ms = current_unix_millis()?;
-                self.append_event(&DurableScanEvent::Failed {
-                    command_id: result.command_id.clone(),
-                    occurred_at_unix_ms,
-                    error_code: result.error_code.clone(),
-                    retryable: result.retryable,
-                    detail: result.detail.clone(),
-                })?;
-                let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
-                    return Err(ScanCommandQueueError::CorruptHistory {
-                        line: 0,
-                        reason: "failed scan command missing from in-memory queue".into(),
-                    });
-                };
-                command.status = ScanCommandStatus::Failed;
-                self.push_system_event(SystemEvent {
-                    event_id: format!(
-                        "scan-command-failed-live-{}-{occurred_at_unix_ms}",
-                        result.command_id
-                    )
-                    .into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::ScanCommandFailed,
-                    collection_key: None,
-                    component_key,
-                    command_id: Some(result.command_id.clone()),
-                    integration_event_id: None,
-                    finding_count: None,
-                    retryable: Some(result.retryable),
-                    detail: Some(result.detail.clone()),
-                });
-                Ok(())
-            }
+            RunNextScanResult::Completed(result) => self.record_completed_outcome(result),
+            RunNextScanResult::Failed(result) => self.record_failed_outcome(result),
         }
+    }
+
+    fn record_completed_outcome(
+        &mut self,
+        result: &CompletedScanCommand,
+    ) -> Result<(), ScanCommandQueueError> {
+        let command = self
+            .commands
+            .get(result.command_id.as_ref())
+            .ok_or_else(|| ScanCommandQueueError::CorruptHistory {
+                line: 0,
+                reason: "completed scan command missing from in-memory queue".into(),
+            })?;
+        let occurred_at_unix_ms = current_unix_millis()?;
+        let pending_integration_event = PendingIntegrationEvent::scan_command_completed(
+            result.command_id.as_ref(),
+            command.request.component_key.clone(),
+            command.request.artifact.clone(),
+            result.provider_key.clone(),
+            command.request.freshness,
+            result.findings_reported,
+            result.change_set.clone(),
+        );
+        self.append_event(&DurableScanEvent::Completed {
+            command_id: result.command_id.clone(),
+            provider_key: result.provider_key.clone(),
+            findings_reported: result.findings_reported,
+            change_set: result.change_set.clone(),
+            occurred_at_unix_ms,
+            pending_integration_event: Box::new(Some(pending_integration_event.clone())),
+        })?;
+        let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line: 0,
+                reason: "completed scan command missing from in-memory queue".into(),
+            });
+        };
+        let component_key = command.request.component_key.clone();
+        command.status = ScanCommandStatus::Completed;
+        self.pending_integration_events
+            .push_back(pending_integration_event);
+        self.push_system_event(SystemEvent {
+            event_id: format!(
+                "scan-command-completed-live-{}-{occurred_at_unix_ms}",
+                result.command_id
+            )
+            .into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandCompleted,
+            collection_key: None,
+            component_key: Some(component_key),
+            command_id: Some(result.command_id.clone()),
+            integration_event_id: None,
+            finding_count: u32::try_from(result.findings_reported).ok(),
+            retryable: None,
+            detail: Some(
+                format!(
+                    "discovered {}, repeated {}, withdrawn {}, active {}",
+                    result.change_set.discovered,
+                    result.change_set.repeated,
+                    result.change_set.withdrawn,
+                    result.change_set.active
+                )
+                .into_boxed_str(),
+            ),
+        });
+        Ok(())
+    }
+
+    fn record_failed_outcome(
+        &mut self,
+        result: &FailedScanCommand,
+    ) -> Result<(), ScanCommandQueueError> {
+        let component_key = self
+            .commands
+            .get(result.command_id.as_ref())
+            .map(|record| record.request.component_key.clone());
+        let occurred_at_unix_ms = current_unix_millis()?;
+        self.append_event(&DurableScanEvent::Failed {
+            command_id: result.command_id.clone(),
+            occurred_at_unix_ms,
+            error_code: result.error_code.clone(),
+            retryable: result.retryable,
+            detail: result.detail.clone(),
+        })?;
+        let Some(command) = self.commands.get_mut(result.command_id.as_ref()) else {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line: 0,
+                reason: "failed scan command missing from in-memory queue".into(),
+            });
+        };
+        command.status = ScanCommandStatus::Failed;
+        self.push_system_event(SystemEvent {
+            event_id: format!(
+                "scan-command-failed-live-{}-{occurred_at_unix_ms}",
+                result.command_id
+            )
+            .into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandFailed,
+            collection_key: None,
+            component_key,
+            command_id: Some(result.command_id.clone()),
+            integration_event_id: None,
+            finding_count: None,
+            retryable: Some(result.retryable),
+            detail: Some(result.detail.clone()),
+        });
+        Ok(())
     }
 
     fn rebuild_from_history(&mut self) -> Result<(), ScanCommandQueueError> {
@@ -459,39 +469,7 @@ impl ScanCommandQueue {
                 command_id,
                 request,
                 occurred_at_unix_ms,
-            } => {
-                if self.commands.contains_key(command_id.as_ref()) {
-                    return Err(ScanCommandQueueError::CorruptHistory {
-                        line,
-                        reason: "duplicate scan command id".into(),
-                    });
-                }
-                self.order.push(command_id.clone());
-                self.commands.insert(
-                    command_id.clone(),
-                    ScanCommandRecord {
-                        request,
-                        status: ScanCommandStatus::Pending,
-                    },
-                );
-                let component_key = self
-                    .commands
-                    .get(command_id.as_ref())
-                    .map(|record| record.request.component_key.clone());
-                self.push_system_event(SystemEvent {
-                    event_id: format!("scan-command-enqueued-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::ScanCommandEnqueued,
-                    collection_key: None,
-                    component_key,
-                    command_id: Some(command_id),
-                    integration_event_id: None,
-                    finding_count: None,
-                    retryable: None,
-                    detail: None,
-                });
-                Ok(())
-            }
+            } => self.apply_enqueued_event(command_id, request, occurred_at_unix_ms, line),
             DurableScanEvent::Completed {
                 command_id,
                 findings_reported,
@@ -499,105 +477,193 @@ impl ScanCommandQueue {
                 occurred_at_unix_ms,
                 pending_integration_event,
                 ..
-            } => {
-                let component_key = self
-                    .commands
-                    .get(command_id.as_ref())
-                    .map(|record| record.request.component_key.clone());
-                if let Some(pending_integration_event) = *pending_integration_event {
-                    self.pending_integration_events
-                        .push_back(pending_integration_event);
-                }
-                self.mark_terminal(line, &command_id, ScanCommandStatus::Completed)?;
-                self.push_system_event(SystemEvent {
-                    event_id: format!("scan-command-completed-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::ScanCommandCompleted,
-                    collection_key: None,
-                    component_key,
-                    command_id: Some(command_id),
-                    integration_event_id: None,
-                    finding_count: u32::try_from(findings_reported).ok(),
-                    retryable: None,
-                    detail: Some(
-                        format!(
-                            "discovered {}, repeated {}, withdrawn {}, active {}",
-                            change_set.discovered,
-                            change_set.repeated,
-                            change_set.withdrawn,
-                            change_set.active
-                        )
-                        .into_boxed_str(),
-                    ),
-                });
-                Ok(())
-            }
+            } => self.apply_completed_event(
+                command_id,
+                findings_reported,
+                change_set,
+                occurred_at_unix_ms,
+                *pending_integration_event,
+                line,
+            ),
             DurableScanEvent::IntegrationEventPublished {
                 event_id,
                 occurred_at_unix_ms,
-            } => {
-                self.remove_pending_integration_event(event_id.as_ref());
-                self.push_system_event(SystemEvent {
-                    event_id: format!("scan-runtime-published-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::IntegrationEventPublished,
-                    collection_key: None,
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: Some(event_id),
-                    finding_count: None,
-                    retryable: None,
-                    detail: None,
-                });
-                Ok(())
-            }
+            } => self.apply_published_event(event_id, occurred_at_unix_ms, line),
             DurableScanEvent::IntegrationEventPublicationFailed {
                 event_id,
                 occurred_at_unix_ms,
                 retryable,
                 detail,
-            } => {
-                self.push_system_event(SystemEvent {
-                    event_id: format!("scan-runtime-publish-failed-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::IntegrationEventPublicationFailed,
-                    collection_key: None,
-                    component_key: None,
-                    command_id: None,
-                    integration_event_id: Some(event_id),
-                    finding_count: None,
-                    retryable: Some(retryable),
-                    detail: Some(detail),
-                });
-                Ok(())
-            }
+            } => self.apply_publish_failed_event(
+                event_id,
+                occurred_at_unix_ms,
+                retryable,
+                detail,
+                line,
+            ),
             DurableScanEvent::Failed {
                 command_id,
                 occurred_at_unix_ms,
                 retryable,
                 detail,
                 ..
-            } => {
-                let component_key = self
-                    .commands
-                    .get(command_id.as_ref())
-                    .map(|record| record.request.component_key.clone());
-                self.mark_terminal(line, &command_id, ScanCommandStatus::Failed)?;
-                self.push_system_event(SystemEvent {
-                    event_id: format!("scan-command-failed-{line}").into_boxed_str(),
-                    occurred_at_unix_ms,
-                    kind: SystemEventKind::ScanCommandFailed,
-                    collection_key: None,
-                    component_key,
-                    command_id: Some(command_id),
-                    integration_event_id: None,
-                    finding_count: None,
-                    retryable: Some(retryable),
-                    detail: Some(detail),
-                });
-                Ok(())
-            }
+            } => self.apply_failed_event(command_id, occurred_at_unix_ms, retryable, detail, line),
         }
+    }
+
+    fn apply_enqueued_event(
+        &mut self,
+        command_id: Box<str>,
+        request: ScanRequest,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        if self.commands.contains_key(command_id.as_ref()) {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line,
+                reason: "duplicate scan command id".into(),
+            });
+        }
+        self.order.push(command_id.clone());
+        self.commands.insert(
+            command_id.clone(),
+            ScanCommandRecord {
+                request,
+                status: ScanCommandStatus::Pending,
+            },
+        );
+        let component_key = self
+            .commands
+            .get(command_id.as_ref())
+            .map(|record| record.request.component_key.clone());
+        self.push_system_event(SystemEvent {
+            event_id: format!("scan-command-enqueued-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandEnqueued,
+            collection_key: None,
+            component_key,
+            command_id: Some(command_id),
+            integration_event_id: None,
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        });
+        Ok(())
+    }
+
+    fn apply_completed_event(
+        &mut self,
+        command_id: Box<str>,
+        findings_reported: usize,
+        change_set: FindingChangeSet,
+        occurred_at_unix_ms: u64,
+        pending_integration_event: Option<PendingIntegrationEvent>,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        let component_key = self
+            .commands
+            .get(command_id.as_ref())
+            .map(|record| record.request.component_key.clone());
+        if let Some(pending_integration_event) = pending_integration_event {
+            self.pending_integration_events
+                .push_back(pending_integration_event);
+        }
+        self.mark_terminal(line, &command_id, ScanCommandStatus::Completed)?;
+        self.push_system_event(SystemEvent {
+            event_id: format!("scan-command-completed-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandCompleted,
+            collection_key: None,
+            component_key,
+            command_id: Some(command_id),
+            integration_event_id: None,
+            finding_count: u32::try_from(findings_reported).ok(),
+            retryable: None,
+            detail: Some(
+                format!(
+                    "discovered {}, repeated {}, withdrawn {}, active {}",
+                    change_set.discovered,
+                    change_set.repeated,
+                    change_set.withdrawn,
+                    change_set.active
+                )
+                .into_boxed_str(),
+            ),
+        });
+        Ok(())
+    }
+
+    fn apply_published_event(
+        &mut self,
+        event_id: Box<str>,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        self.remove_pending_integration_event(event_id.as_ref());
+        self.push_system_event(SystemEvent {
+            event_id: format!("scan-runtime-published-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublished,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(event_id),
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        });
+        Ok(())
+    }
+
+    fn apply_publish_failed_event(
+        &mut self,
+        event_id: Box<str>,
+        occurred_at_unix_ms: u64,
+        retryable: bool,
+        detail: Box<str>,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        self.push_system_event(SystemEvent {
+            event_id: format!("scan-runtime-publish-failed-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::IntegrationEventPublicationFailed,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: Some(event_id),
+            finding_count: None,
+            retryable: Some(retryable),
+            detail: Some(detail),
+        });
+        Ok(())
+    }
+
+    fn apply_failed_event(
+        &mut self,
+        command_id: Box<str>,
+        occurred_at_unix_ms: u64,
+        retryable: bool,
+        detail: Box<str>,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        let component_key = self
+            .commands
+            .get(command_id.as_ref())
+            .map(|record| record.request.component_key.clone());
+        self.mark_terminal(line, &command_id, ScanCommandStatus::Failed)?;
+        self.push_system_event(SystemEvent {
+            event_id: format!("scan-command-failed-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::ScanCommandFailed,
+            collection_key: None,
+            component_key,
+            command_id: Some(command_id),
+            integration_event_id: None,
+            finding_count: None,
+            retryable: Some(retryable),
+            detail: Some(detail),
+        });
+        Ok(())
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
