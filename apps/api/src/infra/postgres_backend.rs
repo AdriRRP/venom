@@ -14,9 +14,8 @@ use venom_domain::findings::{
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
-    IntegrationEventPublicationFailure, IntegrationEventPublishError,
-    IntegrationEventPublisher, IntegrationRuntimeConfig, PendingIntegrationEvent,
-    PublishIntegrationEventsResult,
+    IntegrationEventPublicationFailure, IntegrationEventPublishError, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
     AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
