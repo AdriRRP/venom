@@ -149,7 +149,7 @@ test("operator console can manage one release collection and execute one schedul
 	await expect(page.getByText(/Managed context profiles: 1\./i)).toBeVisible();
 	await expect(
 		page.getByText(
-			/context:internet-prod: Internet Production \(internet, production, critical, vpn:n\/a, privilege:n\/a\)/i,
+			/context:internet-prod: Internet Production \(internet, production, critical, vpn-open, privileged\)/i,
 		),
 	).toBeVisible();
 
