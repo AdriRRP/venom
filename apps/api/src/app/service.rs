@@ -24,6 +24,9 @@ use venom_domain::inventory::{
     CollectionSourceSummary, ComponentInventory, ComponentListCollectionSource,
     ComponentRegistration, ContextProfileRegistration, ManagedContextProfile,
 };
+use venom_domain::operations::{
+    SystemEvent, SystemEventCategory, SystemEventsPage, SystemEventsQuery,
+};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -51,14 +54,20 @@ impl std::error::Error for ApiApplicationError {}
 pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
+    system_events: Arc<Vec<SystemEvent>>,
 }
 
 impl ApiReadSnapshot {
     #[must_use]
-    pub fn new(inventory: ComponentInventory, read_model: FindingReadModel) -> Self {
+    pub fn new(
+        inventory: ComponentInventory,
+        read_model: FindingReadModel,
+        system_events: Vec<SystemEvent>,
+    ) -> Self {
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::new(read_model),
+            system_events: Arc::new(system_events),
         }
     }
 
@@ -67,6 +76,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::clone(&self.read_model),
+            system_events: Arc::clone(&self.system_events),
         }
     }
 
@@ -75,6 +85,16 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::new(read_model),
+            system_events: Arc::clone(&self.system_events),
+        }
+    }
+
+    #[must_use]
+    pub fn with_system_events(&self, system_events: Vec<SystemEvent>) -> Self {
+        Self {
+            inventory: Arc::clone(&self.inventory),
+            read_model: Arc::clone(&self.read_model),
+            system_events: Arc::new(system_events),
         }
     }
 
@@ -156,6 +176,23 @@ impl ApiReadSnapshot {
         Ok(ReleaseDashboardResponse::from_dashboard(
             build_release_dashboard(&self.inventory, &self.read_model, now_unix_ms),
         ))
+    }
+
+    #[must_use]
+    pub fn list_system_events(
+        &self,
+        request: ListSystemEventsRequest,
+    ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
+        let query = build_system_events_query(&request)?;
+        let category = query.category.map(|value| value.as_str().to_owned());
+        let page =
+            venom_domain::operations::system_event_trace::query_system_events(
+                self.system_events.iter(),
+                &query,
+            );
+        let mut response = ListSystemEventsResponse::from_page(page);
+        response.category = category;
+        Ok(response)
     }
 
     /// Query one managed collection detail by key.
@@ -314,10 +351,12 @@ impl ApiApplication {
             ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.ingestion().inventory().clone(),
                 local.state.read_model().clone(),
+                merge_system_events(local.state.system_events(), local.runtime.system_events()),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot(),
                 postgres.read_model_snapshot(),
+                postgres.system_events_snapshot(),
             ),
         }
     }
@@ -335,6 +374,16 @@ impl ApiApplication {
         match &self.backend {
             ApiStore::Local(local) => local.state.read_model().clone(),
             ApiStore::Postgres(postgres) => postgres.read_model_snapshot(),
+        }
+    }
+
+    #[must_use]
+    pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
+        match &self.backend {
+            ApiStore::Local(local) => {
+                merge_system_events(local.state.system_events(), local.runtime.system_events())
+            }
+            ApiStore::Postgres(postgres) => postgres.system_events_snapshot(),
         }
     }
 
@@ -1942,6 +1991,68 @@ pub struct SuppressFindingResponse {
     pub governance_until_unix_ms: Option<u64>,
 }
 
+#[derive(Debug, Default)]
+pub struct ListSystemEventsRequest {
+    pub category: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListSystemEventsResponse {
+    pub category: Option<String>,
+    pub total: usize,
+    pub returned: usize,
+    pub limit: usize,
+    pub events: Vec<SystemEventItem>,
+}
+
+impl ListSystemEventsResponse {
+    fn from_page(page: SystemEventsPage) -> Self {
+        Self {
+            category: None,
+            total: page.total,
+            returned: page.returned,
+            limit: page.limit,
+            events: page.events.into_iter().map(SystemEventItem::from).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemEventItem {
+    pub event_id: String,
+    pub occurred_at_unix_ms: u64,
+    pub category: String,
+    pub kind: String,
+    pub collection_key: Option<String>,
+    pub component_key: Option<String>,
+    pub command_id: Option<String>,
+    pub integration_event_id: Option<String>,
+    pub finding_count: Option<u32>,
+    pub retryable: Option<bool>,
+    pub detail: Option<String>,
+}
+
+impl From<SystemEvent> for SystemEventItem {
+    fn from(value: SystemEvent) -> Self {
+        let category = value.category().as_str().to_owned();
+        let kind = value.kind.as_str().to_owned();
+        Self {
+            event_id: value.event_id.into(),
+            occurred_at_unix_ms: value.occurred_at_unix_ms,
+            category,
+            kind,
+            collection_key: value.collection_key.map(Into::into),
+            component_key: value.component_key.map(Into::into),
+            command_id: value.command_id.map(Into::into),
+            integration_event_id: value.integration_event_id.map(Into::into),
+            finding_count: value.finding_count,
+            retryable: value.retryable,
+            detail: value.detail.map(Into::into),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ActiveFindingsRequest {
     pub component_key: String,
@@ -2428,6 +2539,51 @@ fn build_bulk_collection_governance_query(
         query = query.with_package_name(package_name);
     }
     Ok(query)
+}
+
+fn build_system_events_query(
+    request: &ListSystemEventsRequest,
+) -> Result<SystemEventsQuery, ApiApplicationError> {
+    let mut query = SystemEventsQuery::new();
+    if let Some(category) = request.category.as_deref() {
+        query = query.with_category(parse_system_event_category(category)?);
+    }
+    if let Some(limit) = request.limit {
+        query = query.with_limit(limit);
+    }
+    Ok(query)
+}
+
+fn parse_system_event_category(
+    value: &str,
+) -> Result<SystemEventCategory, ApiApplicationError> {
+    match value {
+        "scheduler" => Ok(SystemEventCategory::Scheduler),
+        "command" => Ok(SystemEventCategory::Command),
+        "governance" => Ok(SystemEventCategory::Governance),
+        "publication" => Ok(SystemEventCategory::Publication),
+        _ => Err(ApiApplicationError::InvalidRequest(format!(
+            "unsupported system event category: {value}"
+        ))),
+    }
+}
+
+fn merge_system_events(
+    left: &std::collections::VecDeque<SystemEvent>,
+    right: &std::collections::VecDeque<SystemEvent>,
+) -> Vec<SystemEvent> {
+    let mut merged = left
+        .iter()
+        .cloned()
+        .chain(right.iter().cloned())
+        .collect::<Vec<_>>();
+    merged.sort_by(|a, b| {
+        b.occurred_at_unix_ms
+            .cmp(&a.occurred_at_unix_ms)
+            .then_with(|| b.event_id.cmp(&a.event_id))
+    });
+    merged.truncate(venom_domain::MAX_SYSTEM_EVENTS_LIMIT);
+    merged
 }
 
 fn parse_governance_state(value: &str) -> Result<FindingGovernanceState, ApiApplicationError> {

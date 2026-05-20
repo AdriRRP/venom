@@ -12,6 +12,7 @@ use crate::app::service::{
     DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
     DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
+    ListSystemEventsRequest, ListSystemEventsResponse,
     MaterializeCollectionSourceResponse, ProviderScanReportRequest, RecordProviderReportResponse,
     RegisterCollectionResponse, RegisterComponentResponse, RegisterContextProfileResponse,
     ReleaseDashboardResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
@@ -96,6 +97,13 @@ impl ApiState {
             .with_read_model(service.read_model_snapshot());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
+
+    fn refresh_system_events_snapshot(&self, service: &ApiApplication) {
+        let next = self
+            .read_snapshot()
+            .with_system_events(service.system_events_snapshot());
+        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
 }
 
 pub fn build_router(state: ApiState) -> Router {
@@ -171,6 +179,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/integration-workers/drain", post(drain_integration_worker))
         .route("/provider-reports", post(record_provider_report))
         .route("/findings/active", get(list_active_findings))
+        .route("/system-events", get(list_system_events))
         .with_state(state)
 }
 
@@ -184,6 +193,20 @@ async fn release_dashboard(
     let response = state
         .read_snapshot()
         .release_dashboard()
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+async fn list_system_events(
+    State(state): State<ApiState>,
+    Query(request): Query<SystemEventsQueryParams>,
+) -> Result<Json<ListSystemEventsResponse>, ApiError> {
+    let response = state
+        .read_snapshot()
+        .list_system_events(ListSystemEventsRequest {
+            category: request.category,
+            limit: request.limit,
+        })
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -449,6 +472,7 @@ async fn accept_risk(
         let mut service = state.inner.service.lock().await;
         let response = service.accept_risk(request).await.map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -467,6 +491,7 @@ async fn accept_collection_risk(
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -484,6 +509,7 @@ async fn suppress_finding(
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -502,6 +528,7 @@ async fn suppress_collection_findings(
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -518,6 +545,7 @@ async fn request_scan(
             .request_scan(request)
             .await
             .map_err(ApiError::from)?;
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -535,6 +563,7 @@ async fn request_collection_scan(
             .request_collection_scan(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -565,6 +594,7 @@ async fn drain_collection_scan_worker(
             .await
             .map_err(ApiError::from)?;
         state.refresh_inventory_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -582,6 +612,7 @@ async fn run_next_scan(
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -599,6 +630,7 @@ async fn drain_worker(
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -615,6 +647,7 @@ async fn drain_integration_worker(
             .publish_integration_events_until_idle(request)
             .await
             .map_err(ApiError::from)?;
+        state.refresh_system_events_snapshot(&service);
         drop(service);
         response
     };
@@ -642,6 +675,12 @@ async fn list_collection_active_findings(
         .list_collection_active_findings(&collection_key, query.into_request())
         .map_err(ApiError::from)?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemEventsQueryParams {
+    category: Option<String>,
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
