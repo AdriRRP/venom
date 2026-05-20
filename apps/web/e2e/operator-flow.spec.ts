@@ -149,13 +149,8 @@ test("operator console can manage one release collection and execute one schedul
 	await expect(page.getByText(/Managed context profiles: 1\./i)).toBeVisible();
 	await expect(
 		page.getByText(
-			/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+			/context:internet-prod: Internet Production \(internet, production, critical, vpn-open, privileged\)/i,
 		),
-	).toBeVisible();
-
-	await page.getByRole("button", { name: "Assign Context Profile" }).click();
-	await expect(
-		page.getByText(/Change: assigned\. Profile: context:internet-prod\./i),
 	).toBeVisible();
 
 	await page.getByRole("button", { name: "Create Collection" }).click();
@@ -176,6 +171,16 @@ test("operator console can manage one release collection and execute one schedul
 		),
 	).toBeVisible();
 	await expect(page.getByText(/release:2026.05/i)).toBeVisible();
+
+	await page
+		.getByRole("button", { name: "Set Collection Default Context" })
+		.click();
+	await expect(
+		page.getByText(/Change: assigned\. Profile: context:internet-prod\./i),
+	).toBeVisible();
+	await expect(
+		collectionDetailCard.getByText(/Default context: context:internet-prod\./i),
+	).toBeVisible();
 
 	await page.getByRole("button", { name: "Bind Artifact" }).click();
 	await expect(page.getByText(/Bound artifacts: 1\./i)).toBeVisible();

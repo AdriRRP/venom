@@ -84,6 +84,8 @@ describe("OperationsPage", () => {
 								internet_exposed: true,
 								production: true,
 								mission_critical: true,
+								vpn_restricted: null,
+								non_privileged_user: null,
 							},
 						],
 					}),
@@ -120,13 +122,105 @@ describe("OperationsPage", () => {
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
-				/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+				/context:internet-prod: Internet Production \(internet, production, critical, vpn:n\/a, privilege:n\/a\)/i,
 			),
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
 				/Change: assigned\. Profile: context:internet-prod\./i,
 			),
+		).toBeInTheDocument();
+	});
+
+	it("sets one collection default context profile", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								source: null,
+								scan_schedule: null,
+								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						context_profile_key: "context:internet-prod",
+						source: null,
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [
+							{
+								component_key: "component:payments-api",
+								component_context_profile_key: null,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05/context-profile") {
+				return new Response(
+					JSON.stringify({
+						change: "assigned",
+						profile_key: "context:internet-prod",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", {
+				name: "Set Collection Default Context",
+			}),
+		);
+
+		expect(
+			await screen.findByText(
+				/Change: assigned\. Profile: context:internet-prod\./i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/Default context: context:internet-prod\./i),
 		).toBeInTheDocument();
 	});
 
@@ -177,6 +271,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: null,
 						health: {
@@ -187,7 +282,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								component_context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -290,6 +390,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: {
 							kind: "component-list",
 							mode: "replace",
@@ -304,7 +405,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								component_context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -395,6 +501,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: {
 							cadence_minutes: 60,
@@ -411,7 +518,12 @@ describe("OperationsPage", () => {
 							critical_risk: 1,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								component_context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -579,6 +691,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: null,
 						health: {
@@ -589,7 +702,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								component_context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);

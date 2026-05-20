@@ -1,7 +1,8 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
-    ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
+    ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
+    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
+    BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
     CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
@@ -308,6 +309,29 @@ impl DurableState {
         if result.change == AssignContextProfileChange::Assigned {
             self.append_event(&DurableEvent::ComponentContextProfileAssigned {
                 component_key: component_key.into(),
+                profile_key: profile_key.into(),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one managed context profile across one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn assign_context_profile_for_collection(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignCollectionContextProfileResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result =
+            candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
+        if result.change == AssignCollectionContextProfileChange::Assigned {
+            self.append_event(&DurableEvent::CollectionContextProfileAssigned {
+                collection_key: collection_key.into(),
                 profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
@@ -959,6 +983,7 @@ impl DurableState {
             | DurableEvent::ArtifactBound { .. }
             | DurableEvent::ComponentProviderConfigured { .. }
             | DurableEvent::ComponentContextProfileAssigned { .. }
+            | DurableEvent::CollectionContextProfileAssigned { .. }
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
             | DurableEvent::CollectionComponentRemoved { .. }
@@ -1093,6 +1118,14 @@ impl DurableState {
                 profile_key,
             } => self.apply_context_profile_assigned(
                 component_key.as_ref(),
+                profile_key.as_ref(),
+                line,
+            ),
+            DurableEvent::CollectionContextProfileAssigned {
+                collection_key,
+                profile_key,
+            } => self.apply_collection_context_profile_assigned(
+                collection_key.as_ref(),
                 profile_key.as_ref(),
                 line,
             ),
@@ -1531,6 +1564,28 @@ impl DurableState {
         }
     }
 
+    fn apply_collection_context_profile_assigned(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .assign_context_profile_for_collection(collection_key, profile_key);
+        match result.change {
+            AssignCollectionContextProfileChange::Assigned
+            | AssignCollectionContextProfileChange::Unchanged => Ok(()),
+            AssignCollectionContextProfileChange::Rejected => {
+                Err(DurableStateError::CorruptHistory {
+                    line,
+                    reason: "invalid collection context profile assignment".into(),
+                })
+            }
+        }
+    }
+
     fn apply_collection_component_added(
         &mut self,
         collection_key: &str,
@@ -1835,6 +1890,10 @@ enum DurableEvent {
         component_key: Box<str>,
         profile_key: Box<str>,
     },
+    CollectionContextProfileAssigned {
+        collection_key: Box<str>,
+        profile_key: Box<str>,
+    },
     CollectionComponentAdded {
         collection_key: Box<str>,
         component_key: Box<str>,
@@ -1954,9 +2013,11 @@ struct StoredCollectionRegistration {
 struct StoredContextProfileRegistration {
     profile_key: Box<str>,
     name: Box<str>,
-    internet_exposed: bool,
-    production: bool,
-    mission_critical: bool,
+    internet_exposed: Option<bool>,
+    production: Option<bool>,
+    mission_critical: Option<bool>,
+    vpn_restricted: Option<bool>,
+    non_privileged_user: Option<bool>,
 }
 
 impl From<ContextProfileRegistration> for StoredContextProfileRegistration {
@@ -1967,19 +2028,31 @@ impl From<ContextProfileRegistration> for StoredContextProfileRegistration {
             internet_exposed: value.internet_exposed,
             production: value.production,
             mission_critical: value.mission_critical,
+            vpn_restricted: value.vpn_restricted,
+            non_privileged_user: value.non_privileged_user,
         }
     }
 }
 
 impl StoredContextProfileRegistration {
     fn into_domain(self) -> ContextProfileRegistration {
-        ContextProfileRegistration::new(
-            self.profile_key,
-            self.name,
-            self.internet_exposed,
-            self.production,
-            self.mission_critical,
-        )
+        let mut registration = ContextProfileRegistration::overlay(self.profile_key, self.name);
+        if let Some(value) = self.internet_exposed {
+            registration = registration.with_internet_exposed(value);
+        }
+        if let Some(value) = self.production {
+            registration = registration.with_production(value);
+        }
+        if let Some(value) = self.mission_critical {
+            registration = registration.with_mission_critical(value);
+        }
+        if let Some(value) = self.vpn_restricted {
+            registration = registration.with_vpn_restricted(value);
+        }
+        if let Some(value) = self.non_privileged_user {
+            registration = registration.with_non_privileged_user(value);
+        }
+        registration
     }
 }
 

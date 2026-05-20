@@ -20,66 +20,26 @@ The current system already closed the following legacy-value gaps:
 - governed finding reopen flows back to the canonical open state
 - deterministic contextual risk from managed context profiles
 - first bulk governance actions over one release-scoped open cohort
+- collection-scoped default context overlays over one closed release scope,
+  merged with component-specific overrides
 
 ## Remaining debt to close
 
-### W80. Bulk governance workbench
-
-Goal:
-
-- turn the current pair of collection-scoped bulk actions into one explicit
-  operator workbench with one scoped cohort summary and one consistent action
-  flow
-
-Closes:
-
-- the partial state of legacy bulk governance by collection
-
-### W81. Source-driven collections
-
-Goal:
-
-- let one managed collection derive membership from one declared source with
-  explicit replace or reconcile semantics
-
-Closes:
-
-- the largest remaining release-scope automation gap from the legacy system
-
-### W82. System event trace and operator observability
-
-Goal:
-
-- expose command, scheduler, governance, and publication traceability as one
-  operator-facing event timeline
-
-Closes:
-
-- the largest remaining observability gap from the legacy system
-
-### W84. Collection-scoped context actions
-
-Goal:
-
-- apply managed context profiles across one closed release scope without
-  component-by-component fan-out in the UI
-
-Closes:
-
-- the remaining collection-scale context-management gap from the legacy system
+None.
 
 ## Execution order
 
-1. `W80-bulk-governance-workbench`
-2. `W81-source-driven-collections`
-3. `W82-system-event-trace-and-operator-observability`
-4. `W84-collection-scoped-context-actions`
+All planned closure waves are complete.
 
 ## Exit condition
 
 This debt block is closed when:
 
-- all five waves are `done`
+- all four planned waves are `done`
 - their operator-facing BDD and E2E coverage is green
 - no remaining item from `docs/legacy-value-audit.md` still requires a new
   foundational capability rather than a refinement
+
+Current status:
+
+- closed

@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
 	addCollectionComponent,
+	assignCollectionContextProfile,
 	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
@@ -60,6 +61,8 @@ export function OperationsPage() {
 		contextInternetExposed: true,
 		contextProduction: true,
 		contextMissionCritical: true,
+		contextVpnRestricted: false,
+		contextNonPrivilegedUser: false,
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
@@ -124,6 +127,19 @@ export function OperationsPage() {
 			assignContextProfile(request.componentKey, {
 				profileKey: request.profileKey,
 			}),
+	});
+
+	const assignCollectionContextProfileMutation = useMutation({
+		mutationFn: (request: { collectionKey: string; profileKey: string }) =>
+			assignCollectionContextProfile(request.collectionKey, {
+				profileKey: request.profileKey,
+			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
 	});
 
 	const addCollectionComponentMutation = useMutation({
@@ -380,6 +396,8 @@ export function OperationsPage() {
 								internetExposed: operatorState.contextInternetExposed,
 								production: operatorState.contextProduction,
 								missionCritical: operatorState.contextMissionCritical,
+								vpnRestricted: operatorState.contextVpnRestricted,
+								nonPrivilegedUser: operatorState.contextNonPrivilegedUser,
 							});
 						}}
 					>
@@ -451,6 +469,34 @@ export function OperationsPage() {
 							/>
 							Mission critical
 						</label>
+						<label>
+							<input
+								checked={operatorState.contextVpnRestricted}
+								name="contextVpnRestricted"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextVpnRestricted: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							VPN restricted
+						</label>
+						<label>
+							<input
+								checked={operatorState.contextNonPrivilegedUser}
+								name="contextNonPrivilegedUser"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextNonPrivilegedUser: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							Non-privileged user
+						</label>
 						<button className="primary-button" type="submit">
 							Register Context Profile
 						</button>
@@ -472,9 +518,36 @@ export function OperationsPage() {
 							{contextProfilesSummary.profiles.map((profile) => (
 								<li key={profile.profile_key}>
 									{profile.profile_key}: {profile.name} (
-									{profile.internet_exposed ? "internet" : "internal"},{" "}
-									{profile.production ? "production" : "non-production"},{" "}
-									{profile.mission_critical ? "critical" : "non-critical"})
+									{profile.internet_exposed === null
+										? "internet:n/a"
+										: profile.internet_exposed
+											? "internet"
+											: "internal"}
+									,{" "}
+									{profile.production === null
+										? "production:n/a"
+										: profile.production
+											? "production"
+											: "non-production"}
+									,{" "}
+									{profile.mission_critical === null
+										? "criticality:n/a"
+										: profile.mission_critical
+											? "critical"
+											: "non-critical"}
+									,{" "}
+									{profile.vpn_restricted === null
+										? "vpn:n/a"
+										: profile.vpn_restricted
+											? "vpn-restricted"
+											: "vpn-open"}
+									,{" "}
+									{profile.non_privileged_user === null
+										? "privilege:n/a"
+										: profile.non_privileged_user
+											? "non-privileged"
+											: "privileged"}
+									)
 								</li>
 							))}
 						</ul>
@@ -516,6 +589,47 @@ export function OperationsPage() {
 							<p>
 								Change: {assignContextProfileMutation.data.change}. Profile:{" "}
 								{assignContextProfileMutation.data.profile_key}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Release Scope</p>
+							<h2>Set Collection Default Context Profile</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void assignCollectionContextProfileMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								profileKey: operatorState.contextProfileKey,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input readOnly value={operatorState.collectionKey} />
+						</label>
+						<label>
+							Profile key
+							<input readOnly value={operatorState.contextProfileKey} />
+						</label>
+						<button className="primary-button" type="submit">
+							Set Collection Default Context
+						</button>
+					</form>
+					{assignCollectionContextProfileMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection default context</strong>
+							<p>
+								Change: {assignCollectionContextProfileMutation.data.change}.
+								Profile:{" "}
+								{assignCollectionContextProfileMutation.data.profile_key}.
 							</p>
 						</div>
 					) : null}
@@ -706,6 +820,10 @@ export function OperationsPage() {
 									<p>No schedule configured.</p>
 								)}
 								<p>
+									Default context:{" "}
+									{collectionDetailQuery.data.context_profile_key ?? "none"}.
+								</p>
+								<p>
 									Source:{" "}
 									{collectionDetailQuery.data.source
 										? `${collectionDetailQuery.data.source.mode} from ${collectionDetailQuery.data.source.component_keys.length} declared components`
@@ -718,7 +836,12 @@ export function OperationsPage() {
 								</p>
 								<ul>
 									{collectionDetailQuery.data.members.map((member) => (
-										<li key={member.component_key}>{member.component_key}</li>
+										<li key={member.component_key}>
+											{member.component_key}
+											{member.component_context_profile_key
+												? ` (${member.component_context_profile_key})`
+												: ""}
+										</li>
 									))}
 								</ul>
 							</>

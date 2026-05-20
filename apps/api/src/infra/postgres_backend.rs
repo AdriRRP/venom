@@ -19,6 +19,7 @@ use venom_domain::integration::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
+    AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
     AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
     CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentInventory,
     ComponentListCollectionSource, ComponentRegistration, ConfigureCollectionScanScheduleChange,
@@ -129,8 +130,8 @@ impl PostgresStore {
         if result.change == RegisterContextProfileChange::Registered {
             sqlx::query(&format!(
                 concat!(
-                    "INSERT INTO {} (profile_key, name, internet_exposed, production, mission_critical) ",
-                    "VALUES ($1, $2, $3, $4, $5)"
+                    "INSERT INTO {} (profile_key, name, internet_exposed, production, mission_critical, vpn_restricted, non_privileged_user) ",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7)"
                 ),
                 self.names.context_profiles
             ))
@@ -139,6 +140,8 @@ impl PostgresStore {
             .bind(registration.internet_exposed)
             .bind(registration.production)
             .bind(registration.mission_critical)
+            .bind(registration.vpn_restricted)
+            .bind(registration.non_privileged_user)
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres context profile insert failed: {error}"))?;
@@ -434,6 +437,39 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component context profile upsert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one context profile across one managed collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn assign_context_profile_for_collection(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignCollectionContextProfileResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result =
+            candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
+        if result.change == AssignCollectionContextProfileChange::Assigned {
+            sqlx::query(&format!(
+                concat!(
+                    "UPDATE {} SET context_profile_key = $2, updated_at = NOW() ",
+                    "WHERE collection_key = $1"
+                ),
+                self.names.collections
+            ))
+            .bind(collection_key)
+            .bind(profile_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                format!("postgres collection context profile update failed: {error}")
+            })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -2035,9 +2071,11 @@ impl PostgresStore {
                 "CREATE TABLE IF NOT EXISTS {} (",
                 "profile_key TEXT PRIMARY KEY, ",
                 "name TEXT NOT NULL, ",
-                "internet_exposed BOOLEAN NOT NULL, ",
-                "production BOOLEAN NOT NULL, ",
-                "mission_critical BOOLEAN NOT NULL, ",
+                "internet_exposed BOOLEAN NULL, ",
+                "production BOOLEAN NULL, ",
+                "mission_critical BOOLEAN NULL, ",
+                "vpn_restricted BOOLEAN NULL, ",
+                "non_privileged_user BOOLEAN NULL, ",
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
@@ -2046,6 +2084,20 @@ impl PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres context profiles table create failed: {error}"))?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS vpn_restricted BOOLEAN NULL",
+            self.names.context_profiles
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres context profiles table alter failed: {error}"))?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS non_privileged_user BOOLEAN NULL",
+            self.names.context_profiles
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres context profiles table alter failed: {error}"))?;
         Ok(())
     }
 
@@ -2076,6 +2128,7 @@ impl PostgresStore {
                 "CREATE TABLE IF NOT EXISTS {} (",
                 "collection_key TEXT PRIMARY KEY, ",
                 "name TEXT NOT NULL, ",
+                "context_profile_key TEXT NULL, ",
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
@@ -2084,6 +2137,13 @@ impl PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres collections table create failed: {error}"))?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS context_profile_key TEXT NULL",
+            self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections table alter failed: {error}"))?;
         Ok(())
     }
 
@@ -2426,20 +2486,32 @@ impl PostgresStore {
     }
 
     async fn load_collections(&mut self) -> Result<(), String> {
-        let collections = sqlx::query_as::<_, (String, String)>(&format!(
-            "SELECT collection_key, name FROM {} ORDER BY created_at, collection_key",
+        let collections = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
+            "SELECT collection_key, name, context_profile_key FROM {} ORDER BY created_at, collection_key",
             self.names.collections
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collections load failed: {error}"))?;
-        for (collection_key, name) in collections {
+        for (collection_key, name, context_profile_key) in collections {
+            let collection_key_boxed = collection_key.clone();
             let result = self
                 .ingestion
                 .inventory_mut()
                 .register_collection(CollectionRegistration::new(collection_key, name));
             if result.change == RegisterCollectionChange::Rejected {
                 return Err("postgres collections contain conflicting registration".to_owned());
+            }
+            if let Some(profile_key) = context_profile_key {
+                let result = self
+                    .ingestion
+                    .inventory_mut()
+                    .assign_context_profile_for_collection(&collection_key_boxed, &profile_key);
+                if result.change == AssignCollectionContextProfileChange::Rejected {
+                    return Err(
+                        "postgres collections contain invalid context assignment".to_owned()
+                    );
+                }
             }
         }
         Ok(())
@@ -2477,9 +2549,20 @@ impl PostgresStore {
     }
 
     async fn load_context_profiles(&mut self) -> Result<(), String> {
-        let profiles = sqlx::query_as::<_, (String, String, bool, bool, bool)>(&format!(
+        let profiles = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+            ),
+        >(&format!(
             concat!(
-                "SELECT profile_key, name, internet_exposed, production, mission_critical ",
+                "SELECT profile_key, name, internet_exposed, production, mission_critical, vpn_restricted, non_privileged_user ",
                 "FROM {} ORDER BY created_at, profile_key"
             ),
             self.names.context_profiles
@@ -2487,16 +2570,36 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres context profiles load failed: {error}"))?;
-        for (profile_key, name, internet_exposed, production, mission_critical) in profiles {
-            let result = self.ingestion.inventory_mut().register_context_profile(
-                ContextProfileRegistration::new(
-                    profile_key,
-                    name,
-                    internet_exposed,
-                    production,
-                    mission_critical,
-                ),
-            );
+        for (
+            profile_key,
+            name,
+            internet_exposed,
+            production,
+            mission_critical,
+            vpn_restricted,
+            non_privileged_user,
+        ) in profiles
+        {
+            let mut registration = ContextProfileRegistration::overlay(profile_key, name);
+            if let Some(value) = internet_exposed {
+                registration = registration.with_internet_exposed(value);
+            }
+            if let Some(value) = production {
+                registration = registration.with_production(value);
+            }
+            if let Some(value) = mission_critical {
+                registration = registration.with_mission_critical(value);
+            }
+            if let Some(value) = vpn_restricted {
+                registration = registration.with_vpn_restricted(value);
+            }
+            if let Some(value) = non_privileged_user {
+                registration = registration.with_non_privileged_user(value);
+            }
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .register_context_profile(registration);
             if result.change == RegisterContextProfileChange::Rejected {
                 return Err("postgres context profiles contain conflicting registration".to_owned());
             }

@@ -13,7 +13,8 @@ use venom_domain::findings::{
     PackageCoordinate, ProviderScanReport, ReleaseDashboard, ReopenFindingResult, ReportedFinding,
     RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult,
     Suppression, build_release_dashboard, contextualize_active_findings,
-    query_collection_governance_overview, summarize_collection_health,
+    contextualize_collection_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -214,6 +215,7 @@ impl ApiReadSnapshot {
         Ok(CollectionDetailResponse {
             collection_key: collection.collection_key.into(),
             name: collection.name.into(),
+            context_profile_key: collection.context_profile_key.map(Into::into),
             source: collection.source.map(CollectionSourceItem::from),
             scan_schedule: collection
                 .scan_schedule
@@ -223,6 +225,10 @@ impl ApiReadSnapshot {
                 .component_keys
                 .into_iter()
                 .map(|component_key| CollectionMemberItem {
+                    component_context_profile_key: self
+                        .inventory
+                        .assigned_context_profile(component_key.as_ref())
+                        .map(str::to_owned),
                     component_key: component_key.into(),
                 })
                 .collect(),
@@ -265,10 +271,14 @@ impl ApiReadSnapshot {
         .ok_or_else(|| {
             ApiApplicationError::NotFound(format!("unknown collection: {collection_key}"))
         })?;
-        let findings = contextualize_active_findings(&self.inventory, overview.page.findings)
-            .into_iter()
-            .map(CollectionActiveFindingItem::from_projection)
-            .collect::<Vec<_>>();
+        let findings = contextualize_collection_active_findings(
+            &self.inventory,
+            collection_key,
+            overview.page.findings,
+        )
+        .into_iter()
+        .map(CollectionActiveFindingItem::from_projection)
+        .collect::<Vec<_>>();
 
         Ok(CollectionActiveFindingsResponse {
             collection_key: collection_key.to_owned(),
@@ -288,7 +298,14 @@ impl ApiReadSnapshot {
     fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthSummary {
         self.inventory
             .collection_scoped_artifacts(collection_key)
-            .map(|scope| summarize_collection_health(&self.inventory, &self.read_model, &scope))
+            .map(|scope| {
+                summarize_collection_health(
+                    &self.inventory,
+                    &self.read_model,
+                    collection_key,
+                    &scope,
+                )
+            })
             .unwrap_or_default()
     }
 }
@@ -444,13 +461,23 @@ impl ApiApplication {
         &mut self,
         request: ContextProfileRegistrationRequest,
     ) -> Result<RegisterContextProfileResponse, ApiApplicationError> {
-        let registration = ContextProfileRegistration::new(
-            request.profile_key,
-            request.name,
-            request.internet_exposed,
-            request.production,
-            request.mission_critical,
-        );
+        let mut registration =
+            ContextProfileRegistration::overlay(request.profile_key, request.name);
+        if let Some(value) = request.internet_exposed {
+            registration = registration.with_internet_exposed(value);
+        }
+        if let Some(value) = request.production {
+            registration = registration.with_production(value);
+        }
+        if let Some(value) = request.mission_critical {
+            registration = registration.with_mission_critical(value);
+        }
+        if let Some(value) = request.vpn_restricted {
+            registration = registration.with_vpn_restricted(value);
+        }
+        if let Some(value) = request.non_privileged_user {
+            registration = registration.with_non_privileged_user(value);
+        }
         let result = match &mut self.backend {
             ApiStore::Local(local) => local
                 .state
@@ -740,6 +767,33 @@ impl ApiApplication {
         };
 
         Ok(AssignContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            profile_key: result.profile_key.map(Into::into),
+        })
+    }
+
+    /// Assign one managed execution-context profile across one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable write fails.
+    pub async fn assign_collection_context_profile(
+        &mut self,
+        collection_key: &str,
+        request: AssignCollectionContextProfileRequest,
+    ) -> Result<AssignCollectionContextProfileResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_context_profile_for_collection(collection_key, &request.profile_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_context_profile_for_collection(collection_key, &request.profile_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(AssignCollectionContextProfileResponse {
             change: result.change.as_str().to_owned(),
             profile_key: result.profile_key.map(Into::into),
         })
@@ -1630,9 +1684,11 @@ pub struct RegisterComponentResponse {
 pub struct ContextProfileRegistrationRequest {
     pub profile_key: String,
     pub name: String,
-    pub internet_exposed: bool,
-    pub production: bool,
-    pub mission_critical: bool,
+    pub internet_exposed: Option<bool>,
+    pub production: Option<bool>,
+    pub mission_critical: Option<bool>,
+    pub vpn_restricted: Option<bool>,
+    pub non_privileged_user: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1645,9 +1701,11 @@ pub struct RegisterContextProfileResponse {
 pub struct ContextProfileItem {
     pub profile_key: String,
     pub name: String,
-    pub internet_exposed: bool,
-    pub production: bool,
-    pub mission_critical: bool,
+    pub internet_exposed: Option<bool>,
+    pub production: Option<bool>,
+    pub mission_critical: Option<bool>,
+    pub vpn_restricted: Option<bool>,
+    pub non_privileged_user: Option<bool>,
 }
 
 impl From<ManagedContextProfile> for ContextProfileItem {
@@ -1658,6 +1716,8 @@ impl From<ManagedContextProfile> for ContextProfileItem {
             internet_exposed: value.internet_exposed,
             production: value.production,
             mission_critical: value.mission_critical,
+            vpn_restricted: value.vpn_restricted,
+            non_privileged_user: value.non_privileged_user,
         }
     }
 }
@@ -1731,6 +1791,7 @@ pub struct CollectionSummary {
 pub struct CollectionDetailResponse {
     pub collection_key: String,
     pub name: String,
+    pub context_profile_key: Option<String>,
     pub source: Option<CollectionSourceItem>,
     pub scan_schedule: Option<CollectionScanScheduleItem>,
     pub health: CollectionHealthItem,
@@ -1874,6 +1935,7 @@ impl From<CollectionHealthSummary> for CollectionHealthItem {
 #[derive(Debug, Serialize)]
 pub struct CollectionMemberItem {
     pub component_key: String,
+    pub component_context_profile_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1925,8 +1987,19 @@ pub struct AssignContextProfileRequest {
     pub profile_key: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AssignCollectionContextProfileRequest {
+    pub profile_key: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AssignContextProfileResponse {
+    pub change: String,
+    pub profile_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssignCollectionContextProfileResponse {
     pub change: String,
     pub profile_key: Option<String>,
 }

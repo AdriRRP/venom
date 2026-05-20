@@ -1,24 +1,25 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
-    ApiReadSnapshot, AssignContextProfileRequest, AssignContextProfileResponse,
-    BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
-    BulkReopenFindingsRequest, BulkReopenFindingsResponse, BulkSuppressFindingsRequest,
-    BulkSuppressFindingsResponse, CollectionActiveFindingsResponse, CollectionDetailResponse,
-    CollectionMembershipRequest, CollectionMembershipResponse, CollectionRegistrationRequest,
-    ComponentRegistrationRequest, ConfigureCollectionScanScheduleRequest,
-    ConfigureCollectionScanScheduleResponse, ConfigureCollectionSourceRequest,
-    ConfigureCollectionSourceResponse, ConfigureIntegrationRuntimeRequest,
-    ConfigureIntegrationRuntimeResponse, ConfigureProviderRequest, ConfigureProviderResponse,
-    ContextProfileRegistrationRequest, DrainCollectionScanWorkerCommand,
-    DrainCollectionScanWorkerResponse, DrainIntegrationWorkerCommand,
-    DrainIntegrationWorkerResponse, DrainWorkerCommand, DrainWorkerResponse,
-    ListCollectionsResponse, ListContextProfilesResponse, ListSystemEventsRequest,
-    ListSystemEventsResponse, MaterializeCollectionSourceResponse, ProviderScanReportRequest,
-    RecordProviderReportResponse, RegisterCollectionResponse, RegisterComponentResponse,
-    RegisterContextProfileResponse, ReleaseDashboardResponse, ReopenFindingRequest,
-    ReopenFindingResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
-    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
-    ScanCommandStatusResponse, SuppressFindingRequest, SuppressFindingResponse,
+    ApiReadSnapshot, AssignCollectionContextProfileRequest, AssignCollectionContextProfileResponse,
+    AssignContextProfileRequest, AssignContextProfileResponse, BindArtifactRequest,
+    BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse, BulkReopenFindingsRequest,
+    BulkReopenFindingsResponse, BulkSuppressFindingsRequest, BulkSuppressFindingsResponse,
+    CollectionActiveFindingsResponse, CollectionDetailResponse, CollectionMembershipRequest,
+    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
+    ConfigureCollectionSourceRequest, ConfigureCollectionSourceResponse,
+    ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
+    ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
+    DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
+    DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
+    DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
+    ListSystemEventsRequest, ListSystemEventsResponse, MaterializeCollectionSourceResponse,
+    ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
+    RegisterComponentResponse, RegisterContextProfileResponse, ReleaseDashboardResponse,
+    ReopenFindingRequest, ReopenFindingResponse, RequestCollectionScanCommand,
+    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
+    RunNextScanResponse, ScanCommandStatusResponse, SuppressFindingRequest,
+    SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -140,6 +141,10 @@ pub fn build_router(state: ApiState) -> Router {
         .route(
             "/collections/{collection_key}/scan-schedule",
             post(configure_collection_scan_schedule),
+        )
+        .route(
+            "/collections/{collection_key}/context-profile",
+            post(assign_collection_context_profile),
         )
         .route(
             "/collections/{collection_key}/scan-requests",
@@ -411,6 +416,24 @@ async fn assign_context_profile(
         let mut service = state.inner.service.lock().await;
         let response = service
             .assign_context_profile(&component_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn assign_collection_context_profile(
+    State(state): State<ApiState>,
+    Path(collection_key): Path<String>,
+    Json(request): Json<AssignCollectionContextProfileRequest>,
+) -> Result<Json<AssignCollectionContextProfileResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .assign_collection_context_profile(&collection_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_inventory_snapshot(&service);
@@ -1031,6 +1054,65 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["context_profile_name"],
             "Internet Production"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_assigns_one_default_context_profile_for_one_collection_scope() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-context-assignment", "state"),
+                temp_path("collection-context-assignment", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_internet_prod_context_profile(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = assign_internet_prod_context_profile_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["change"], "assigned");
+        assert_eq!(payload["profile_key"], "context:internet-prod");
+
+        let detail_response = router
+            .clone()
+            .oneshot(
+                Request::get("/collections/release%3A2026.05")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("collection detail request should succeed");
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_body = http_body_util::BodyExt::collect(detail_response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let detail_payload: serde_json::Value =
+            serde_json::from_slice(&detail_body).expect("response should be valid json");
+        assert_eq!(
+            detail_payload["context_profile_key"],
+            "context:internet-prod"
+        );
+        assert_eq!(
+            detail_payload["members"][0]["component_context_profile_key"],
+            serde_json::Value::Null
         );
     }
 
@@ -3192,6 +3274,25 @@ mod tests {
             )
             .await
             .expect("assign context profile request should succeed")
+    }
+
+    async fn assign_internet_prod_context_profile_to_collection(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/collections/release%3A2026.05/context-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:internet-prod"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("assign collection context profile request should succeed")
     }
 
     async fn configure_collection_schedule(router: axum::Router) -> axum::response::Response {

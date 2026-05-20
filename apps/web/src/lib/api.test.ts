@@ -2,6 +2,7 @@ import {
 	acceptCollectionFindingRisk,
 	acceptFindingRisk,
 	addCollectionComponent,
+	assignCollectionContextProfile,
 	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
@@ -221,9 +222,14 @@ describe("fetchApiHealth", () => {
 			internetExposed: true,
 			production: true,
 			missionCritical: true,
+			vpnRestricted: null,
+			nonPrivilegedUser: null,
 		});
 		await fetchContextProfiles();
 		await assignContextProfile("component:payments-api", {
+			profileKey: "context:internet-prod",
+		});
+		await assignCollectionContextProfile("release:2026.05", {
 			profileKey: "context:internet-prod",
 		});
 
@@ -237,6 +243,12 @@ describe("fetchApiHealth", () => {
 			"/api/components/component%3Apayments-api/context-profile",
 		);
 		expect(calls[2]?.init?.body).toContain(
+			'"profile_key":"context:internet-prod"',
+		);
+		expect(calls[3]?.input).toBe(
+			"/api/collections/release%3A2026.05/context-profile",
+		);
+		expect(calls[3]?.init?.body).toContain(
 			'"profile_key":"context:internet-prod"',
 		);
 	});

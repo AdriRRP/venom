@@ -86,9 +86,11 @@ export type RegisterComponentResponse = {
 export type ContextProfileRegistrationRequest = {
 	profileKey: string;
 	name: string;
-	internetExposed: boolean;
-	production: boolean;
-	missionCritical: boolean;
+	internetExposed: boolean | null;
+	production: boolean | null;
+	missionCritical: boolean | null;
+	vpnRestricted: boolean | null;
+	nonPrivilegedUser: boolean | null;
 };
 
 export type RegisterContextProfileResponse = {
@@ -99,9 +101,11 @@ export type RegisterContextProfileResponse = {
 export type ContextProfile = {
 	profile_key: string;
 	name: string;
-	internet_exposed: boolean;
-	production: boolean;
-	mission_critical: boolean;
+	internet_exposed: boolean | null;
+	production: boolean | null;
+	mission_critical: boolean | null;
+	vpn_restricted: boolean | null;
+	non_privileged_user: boolean | null;
 };
 
 export type ListContextProfilesResponse = {
@@ -211,10 +215,23 @@ export type SystemEventsRequest = {
 export type CollectionDetailResponse = {
 	collection_key: string;
 	name: string;
+	context_profile_key: string | null;
 	source: CollectionSource | null;
 	scan_schedule: CollectionScanSchedule | null;
 	health: CollectionHealth;
-	members: Array<{ component_key: string }>;
+	members: Array<{
+		component_key: string;
+		component_context_profile_key: string | null;
+	}>;
+};
+
+export type AssignCollectionContextProfileRequest = {
+	profileKey: string;
+};
+
+export type AssignCollectionContextProfileResponse = {
+	change: string;
+	profile_key: string | null;
 };
 
 export type ConfigureCollectionSourcePayload = {
@@ -739,6 +756,8 @@ export async function registerContextProfile(
 			internet_exposed: request.internetExposed,
 			production: request.production,
 			mission_critical: request.missionCritical,
+			vpn_restricted: request.vpnRestricted,
+			non_privileged_user: request.nonPrivilegedUser,
 		}),
 	});
 	if (!response.ok) {
@@ -1018,6 +1037,28 @@ export async function assignContextProfile(
 		);
 	}
 	return (await response.json()) as AssignContextProfileResponse;
+}
+
+export async function assignCollectionContextProfile(
+	collectionKey: string,
+	request: AssignCollectionContextProfileRequest,
+): Promise<AssignCollectionContextProfileResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}/context-profile`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				profile_key: request.profileKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection context profile assignment failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as AssignCollectionContextProfileResponse;
 }
 
 export async function requestScan(
