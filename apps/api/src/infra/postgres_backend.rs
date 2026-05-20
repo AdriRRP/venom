@@ -1100,8 +1100,8 @@ impl PostgresStore {
         }
 
         let schedule_rows =
-            self.build_due_schedule_rows(candidate_ingestion.inventory(), &due_scans);
-        let all_requests = self.flatten_due_scan_requests(&due_scans);
+            Self::build_due_schedule_rows(candidate_ingestion.inventory(), &due_scans);
+        let all_requests = Self::flatten_due_scan_requests(&due_scans);
         let command_ids = (0..all_requests.len())
             .map(|_| next_command_id())
             .collect::<Vec<_>>();
@@ -1374,23 +1374,22 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.apply_completed_scan_command(
-            command_id.as_ref(),
-            &request,
+        let completed = CompletedScanCommand {
+            command_id,
+            provider_key: report.provider_key,
             findings_reported,
-            &change_set,
+            change_set,
+        };
+        self.apply_completed_scan_command(
+            &request,
+            &completed,
             finding_changes_event,
             scan_command_completed_event,
             occurred_at_unix_ms,
         )
         .await?;
 
-        Ok(RunNextScanResult::Completed(CompletedScanCommand {
-            command_id,
-            provider_key: report.provider_key,
-            findings_reported,
-            change_set,
-        }))
+        Ok(RunNextScanResult::Completed(completed))
     }
 
     fn collect_due_collection_scans(
@@ -1409,7 +1408,6 @@ impl PostgresStore {
     }
 
     fn build_due_schedule_rows(
-        &self,
         inventory: &ComponentInventory,
         due_scans: &[DueCollectionScan],
     ) -> Vec<(Box<str>, venom_domain::CollectionScanSchedule)> {
@@ -1424,7 +1422,7 @@ impl PostgresStore {
             .collect()
     }
 
-    fn flatten_due_scan_requests(&self, due_scans: &[DueCollectionScan]) -> Vec<ScanRequest> {
+    fn flatten_due_scan_requests(due_scans: &[DueCollectionScan]) -> Vec<ScanRequest> {
         due_scans
             .iter()
             .flat_map(|due_scan| due_scan.requests.iter().cloned())
@@ -1659,10 +1657,8 @@ impl PostgresStore {
 
     async fn apply_completed_scan_command(
         &mut self,
-        command_id: &str,
         request: &ScanRequest,
-        findings_reported: usize,
-        change_set: &FindingChangeSet,
+        completed: &CompletedScanCommand,
         finding_changes_event: PendingIntegrationEvent,
         scan_command_completed_event: PendingIntegrationEvent,
         occurred_at_unix_ms: u64,
@@ -1670,7 +1666,7 @@ impl PostgresStore {
         self.pending_integration_events.push(finding_changes_event);
         self.pending_integration_events
             .push(scan_command_completed_event);
-        let Some(command) = self.commands.get_mut(command_id) else {
+        let Some(command) = self.commands.get_mut(completed.command_id.as_ref()) else {
             return Err("completed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Completed;
@@ -1680,17 +1676,17 @@ impl PostgresStore {
             kind: SystemEventKind::ScanCommandCompleted,
             collection_key: None,
             component_key: Some(request.component_key.clone()),
-            command_id: Some(command_id.into()),
+            command_id: Some(completed.command_id.clone()),
             integration_event_id: None,
-            finding_count: u32::try_from(findings_reported).ok(),
+            finding_count: u32::try_from(completed.findings_reported).ok(),
             retryable: None,
             detail: Some(
                 format!(
                     "discovered {}, repeated {}, withdrawn {}, active {}",
-                    change_set.discovered,
-                    change_set.repeated,
-                    change_set.withdrawn,
-                    change_set.active
+                    completed.change_set.discovered,
+                    completed.change_set.repeated,
+                    completed.change_set.withdrawn,
+                    completed.change_set.active
                 )
                 .into_boxed_str(),
             ),
