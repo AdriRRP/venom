@@ -173,17 +173,13 @@ test("operator console can manage one release collection and execute one schedul
 	await expect(page.getByText(/release:2026.05/i)).toBeVisible();
 
 	await page
-		.getByRole("button", { name: "Apply Context Profile to Collection" })
+		.getByRole("button", { name: "Set Collection Default Context" })
 		.click();
 	await expect(
-		page.getByText(
-			/Change: assigned\. Profile: context:internet-prod\. Targeted: 1\. Assigned: 1\. Unchanged: 0\./i,
-		),
+		page.getByText(/Change: assigned\. Profile: context:internet-prod\./i),
 	).toBeVisible();
 	await expect(
-		collectionDetailCard.getByText(
-			/component:payments-api \(context:internet-prod\)/i,
-		),
+		collectionDetailCard.getByText(/Default context: context:internet-prod\./i),
 	).toBeVisible();
 
 	await page.getByRole("button", { name: "Bind Artifact" }).click();

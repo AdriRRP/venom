@@ -122,11 +122,15 @@ pub struct ContextProfileRegistration {
     /// Human-readable profile name.
     pub name: Box<str>,
     /// Whether the workload is exposed to untrusted network paths.
-    pub internet_exposed: bool,
+    pub internet_exposed: Option<bool>,
     /// Whether the workload is part of production runtime.
-    pub production: bool,
+    pub production: Option<bool>,
     /// Whether the workload is mission-critical for the operator.
-    pub mission_critical: bool,
+    pub mission_critical: Option<bool>,
+    /// Whether the workload is reachable only through restricted VPN paths.
+    pub vpn_restricted: Option<bool>,
+    /// Whether the workload runs under a non-privileged user.
+    pub non_privileged_user: Option<bool>,
 }
 
 impl ContextProfileRegistration {
@@ -141,10 +145,55 @@ impl ContextProfileRegistration {
         Self {
             profile_key: profile_key.into(),
             name: name.into(),
-            internet_exposed,
-            production,
-            mission_critical,
+            internet_exposed: Some(internet_exposed),
+            production: Some(production),
+            mission_critical: Some(mission_critical),
+            vpn_restricted: None,
+            non_privileged_user: None,
         }
+    }
+
+    #[must_use]
+    pub fn overlay(profile_key: impl Into<Box<str>>, name: impl Into<Box<str>>) -> Self {
+        Self {
+            profile_key: profile_key.into(),
+            name: name.into(),
+            internet_exposed: None,
+            production: None,
+            mission_critical: None,
+            vpn_restricted: None,
+            non_privileged_user: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_internet_exposed(mut self, internet_exposed: bool) -> Self {
+        self.internet_exposed = Some(internet_exposed);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_production(mut self, production: bool) -> Self {
+        self.production = Some(production);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_mission_critical(mut self, mission_critical: bool) -> Self {
+        self.mission_critical = Some(mission_critical);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_vpn_restricted(mut self, vpn_restricted: bool) -> Self {
+        self.vpn_restricted = Some(vpn_restricted);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_non_privileged_user(mut self, non_privileged_user: bool) -> Self {
+        self.non_privileged_user = Some(non_privileged_user);
+        self
     }
 }
 
@@ -187,11 +236,37 @@ pub struct ManagedContextProfile {
     /// Human-readable profile name.
     pub name: Box<str>,
     /// Whether the workload is exposed to untrusted network paths.
-    pub internet_exposed: bool,
+    pub internet_exposed: Option<bool>,
     /// Whether the workload is part of production runtime.
-    pub production: bool,
+    pub production: Option<bool>,
     /// Whether the workload is mission-critical for the operator.
-    pub mission_critical: bool,
+    pub mission_critical: Option<bool>,
+    /// Whether the workload is reachable only through restricted VPN paths.
+    pub vpn_restricted: Option<bool>,
+    /// Whether the workload runs under a non-privileged user.
+    pub non_privileged_user: Option<bool>,
+}
+
+impl ManagedContextProfile {
+    #[must_use]
+    pub fn merge(base: Option<Self>, override_profile: Option<Self>) -> Option<Self> {
+        match (base, override_profile) {
+            (None, None) => None,
+            (Some(base), None) => Some(base),
+            (None, Some(override_profile)) => Some(override_profile),
+            (Some(base), Some(override_profile)) => Some(Self {
+                profile_key: override_profile.profile_key,
+                name: override_profile.name,
+                internet_exposed: override_profile.internet_exposed.or(base.internet_exposed),
+                production: override_profile.production.or(base.production),
+                mission_critical: override_profile.mission_critical.or(base.mission_critical),
+                vpn_restricted: override_profile.vpn_restricted.or(base.vpn_restricted),
+                non_privileged_user: override_profile
+                    .non_privileged_user
+                    .or(base.non_privileged_user),
+            }),
+        }
+    }
 }
 
 /// Observable outcome of assigning one context profile to one managed component.
@@ -225,7 +300,7 @@ pub struct AssignContextProfileResult {
     pub profile_key: Option<Box<str>>,
 }
 
-/// Observable outcome of assigning one context profile across one managed collection.
+/// Observable outcome of assigning one default context profile to one managed collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignCollectionContextProfileChange {
     /// At least one managed member now uses the context profile.
@@ -247,19 +322,13 @@ impl AssignCollectionContextProfileChange {
     }
 }
 
-/// Result of assigning one context profile across one managed collection.
+/// Result of assigning one default context profile to one managed collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignCollectionContextProfileResult {
     /// Observable state change caused by the assignment attempt.
     pub change: AssignCollectionContextProfileChange,
     /// Assigned profile key after the operation when the collection and profile exist.
     pub profile_key: Option<Box<str>>,
-    /// Total number of managed collection members targeted by the action.
-    pub targeted: usize,
-    /// Number of managed members that changed to the profile.
-    pub assigned: usize,
-    /// Number of managed members that already used the profile.
-    pub unchanged: usize,
 }
 
 /// Canonical registration request for one managed collection.
@@ -608,6 +677,8 @@ pub struct ManagedCollection {
     pub name: Box<str>,
     /// Canonical managed component keys in the collection.
     pub component_keys: Vec<Box<str>>,
+    /// Optional default context profile for this collection scope.
+    pub context_profile_key: Option<Box<str>>,
     /// Optional declared source for the collection membership.
     pub source: Option<CollectionSource>,
     /// Optional periodic collection scan schedule.
@@ -653,6 +724,7 @@ struct ComponentRecord {
 struct CollectionRecord {
     registration: CollectionRegistration,
     component_keys: BTreeSet<Box<str>>,
+    context_profile_key: Option<Box<str>>,
     source: Option<CollectionSource>,
     scan_schedule: Option<CollectionScanSchedule>,
 }
@@ -827,7 +899,7 @@ impl ComponentInventory {
         }
     }
 
-    /// Assign one managed context profile to every managed component in one managed collection.
+    /// Assign one managed default context profile to one managed collection.
     #[must_use]
     pub fn assign_context_profile_for_collection(
         &mut self,
@@ -838,65 +910,24 @@ impl ComponentInventory {
             return AssignCollectionContextProfileResult {
                 change: AssignCollectionContextProfileChange::Rejected,
                 profile_key: None,
-                targeted: 0,
-                assigned: 0,
-                unchanged: 0,
             };
         }
 
-        let Some(component_keys) = self.collection_component_keys(collection_key) else {
+        let Some(record) = self.collections.get_mut(collection_key) else {
             return AssignCollectionContextProfileResult {
                 change: AssignCollectionContextProfileChange::Rejected,
                 profile_key: None,
-                targeted: 0,
-                assigned: 0,
-                unchanged: 0,
             };
         };
 
-        if component_keys
-            .iter()
-            .any(|component_key| !self.components.contains_key(component_key.as_ref()))
-        {
-            return AssignCollectionContextProfileResult {
-                change: AssignCollectionContextProfileChange::Rejected,
-                profile_key: None,
-                targeted: 0,
-                assigned: 0,
-                unchanged: 0,
-            };
-        }
-
-        let mut assigned = 0;
-        let mut unchanged = 0;
-        for component_key in &component_keys {
-            let Some(record) = self.components.get_mut(component_key.as_ref()) else {
-                return AssignCollectionContextProfileResult {
-                    change: AssignCollectionContextProfileChange::Rejected,
-                    profile_key: None,
-                    targeted: 0,
-                    assigned: 0,
-                    unchanged: 0,
-                };
-            };
-            if record.context_profile_key.as_deref() == Some(profile_key) {
-                unchanged += 1;
+        AssignCollectionContextProfileResult {
+            change: if record.context_profile_key.as_deref() == Some(profile_key) {
+                AssignCollectionContextProfileChange::Unchanged
             } else {
                 record.context_profile_key = Some(profile_key.into());
-                assigned += 1;
-            }
-        }
-
-        AssignCollectionContextProfileResult {
-            change: if assigned > 0 {
                 AssignCollectionContextProfileChange::Assigned
-            } else {
-                AssignCollectionContextProfileChange::Unchanged
             },
-            profile_key: Some(profile_key.into()),
-            targeted: component_keys.len(),
-            assigned,
-            unchanged,
+            profile_key: record.context_profile_key.clone(),
         }
     }
 
@@ -918,6 +949,7 @@ impl ComponentInventory {
                     CollectionRecord {
                         registration,
                         component_keys: BTreeSet::new(),
+                        context_profile_key: None,
                         source: None,
                         scan_schedule: None,
                     },
@@ -1258,6 +1290,13 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn assigned_collection_context_profile(&self, collection_key: &str) -> Option<&str> {
+        self.collections
+            .get(collection_key)
+            .and_then(|record| record.context_profile_key.as_deref())
+    }
+
+    #[must_use]
     pub fn collection_component_keys(&self, collection_key: &str) -> Option<Vec<Box<str>>> {
         self.collections
             .get(collection_key)
@@ -1271,6 +1310,20 @@ impl ComponentInventory {
     ) -> Option<ManagedContextProfile> {
         self.assigned_context_profile(component_key)
             .and_then(|profile_key| self.context_profile(profile_key))
+    }
+
+    #[must_use]
+    pub fn managed_component_context_profile_in_collection(
+        &self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Option<ManagedContextProfile> {
+        ManagedContextProfile::merge(
+            self.assigned_collection_context_profile(collection_key)
+                .and_then(|profile_key| self.context_profile(profile_key)),
+            self.assigned_context_profile(component_key)
+                .and_then(|profile_key| self.context_profile(profile_key)),
+        )
     }
 
     #[must_use]
@@ -1288,6 +1341,8 @@ impl ComponentInventory {
                 internet_exposed: record.registration.internet_exposed,
                 production: record.registration.production,
                 mission_critical: record.registration.mission_critical,
+                vpn_restricted: record.registration.vpn_restricted,
+                non_privileged_user: record.registration.non_privileged_user,
             })
             .collect()
     }
@@ -1302,6 +1357,8 @@ impl ComponentInventory {
                 internet_exposed: record.registration.internet_exposed,
                 production: record.registration.production,
                 mission_critical: record.registration.mission_critical,
+                vpn_restricted: record.registration.vpn_restricted,
+                non_privileged_user: record.registration.non_privileged_user,
             })
     }
 
@@ -1419,6 +1476,7 @@ impl ComponentInventory {
                 collection_key: record.registration.collection_key.clone(),
                 name: record.registration.name.clone(),
                 component_keys: record.component_keys.iter().cloned().collect(),
+                context_profile_key: record.context_profile_key.clone(),
                 source: record.source.clone(),
                 scan_schedule: record.scan_schedule,
             })
@@ -1708,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_collection_can_assign_one_context_profile_to_all_members() {
+    fn managed_collection_can_assign_one_default_context_profile() {
         let mut inventory = ComponentInventory::default();
         let _ = inventory.register(ComponentRegistration::new(
             "component:payments-api",
@@ -1738,17 +1796,62 @@ mod tests {
             AssignCollectionContextProfileChange::Assigned
         );
         assert_eq!(result.profile_key.as_deref(), Some("context:internet-prod"));
-        assert_eq!(result.targeted, 2);
-        assert_eq!(result.assigned, 2);
-        assert_eq!(result.unchanged, 0);
+        assert_eq!(
+            inventory.assigned_collection_context_profile("release:2026.05"),
+            Some("context:internet-prod")
+        );
         assert_eq!(
             inventory.assigned_context_profile("component:payments-api"),
-            Some("context:internet-prod")
+            None
         );
         assert_eq!(
             inventory.assigned_context_profile("component:billing-api"),
-            Some("context:internet-prod")
+            None
         );
+    }
+
+    #[test]
+    fn component_context_overrides_collection_default_context_field_by_field() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+        let _ = inventory.register_context_profile(
+            ContextProfileRegistration::overlay("context:corp-api-baseline", "Corporate API")
+                .with_production(true)
+                .with_vpn_restricted(true)
+                .with_non_privileged_user(true),
+        );
+        let _ = inventory.register_context_profile(
+            ContextProfileRegistration::overlay("context:payments-public-edge", "Payments Edge")
+                .with_internet_exposed(true)
+                .with_mission_critical(true),
+        );
+        let _ = inventory
+            .assign_context_profile_for_collection("release:2026.05", "context:corp-api-baseline");
+        let _ = inventory
+            .assign_context_profile("component:payments-api", "context:payments-public-edge");
+
+        let effective = inventory
+            .managed_component_context_profile_in_collection(
+                "release:2026.05",
+                "component:payments-api",
+            )
+            .expect("effective context should exist");
+
+        assert_eq!(
+            effective.profile_key.as_ref(),
+            "context:payments-public-edge"
+        );
+        assert_eq!(effective.internet_exposed, Some(true));
+        assert_eq!(effective.production, Some(true));
+        assert_eq!(effective.mission_critical, Some(true));
+        assert_eq!(effective.vpn_restricted, Some(true));
+        assert_eq!(effective.non_privileged_user, Some(true));
     }
 
     #[test]

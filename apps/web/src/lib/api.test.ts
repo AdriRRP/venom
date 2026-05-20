@@ -222,6 +222,8 @@ describe("fetchApiHealth", () => {
 			internetExposed: true,
 			production: true,
 			missionCritical: true,
+			vpnRestricted: null,
+			nonPrivilegedUser: null,
 		});
 		await fetchContextProfiles();
 		await assignContextProfile("component:payments-api", {

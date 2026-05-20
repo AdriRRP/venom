@@ -21,6 +21,7 @@ pub struct CollectionHealthSummary {
 pub fn summarize_collection_health(
     inventory: &ComponentInventory,
     read_model: &FindingReadModel,
+    collection_key: &str,
     scope: &[CollectionScopedArtifact],
 ) -> CollectionHealthSummary {
     let mut summary = CollectionHealthSummary::default();
@@ -38,7 +39,10 @@ pub fn summarize_collection_health(
         let context_profile = context_profiles
             .entry(finding.finding.component_key.clone())
             .or_insert_with(|| {
-                inventory.managed_component_context_profile(finding.finding.component_key.as_ref())
+                inventory.managed_component_context_profile_in_collection(
+                    collection_key,
+                    finding.finding.component_key.as_ref(),
+                )
             });
         match contextual_risk_level(finding.severity, context_profile.as_ref()) {
             ContextualRiskLevel::Critical => summary.critical_risk += 1,
@@ -127,7 +131,8 @@ mod tests {
         let scope = inventory
             .collection_scoped_artifacts("release:2026.05")
             .expect("the collection scope must exist");
-        let summary = summarize_collection_health(&inventory, &read_model, &scope);
+        let summary =
+            summarize_collection_health(&inventory, &read_model, "release:2026.05", &scope);
 
         assert_eq!(
             summary,

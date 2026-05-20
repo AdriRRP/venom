@@ -36,8 +36,14 @@ pub fn query_collection_governance_overview(
 ) -> Option<CollectionGovernanceOverview> {
     let scope = inventory.collection_scoped_artifacts(collection_key)?;
     Some(CollectionGovernanceOverview {
-        health: summarize_collection_health(inventory, read_model, &scope),
-        bulk_governance: summarize_bulk_governance_cohort(inventory, read_model, &scope, query),
+        health: summarize_collection_health(inventory, read_model, collection_key, &scope),
+        bulk_governance: summarize_bulk_governance_cohort(
+            inventory,
+            read_model,
+            collection_key,
+            &scope,
+            query,
+        ),
         page: read_model.query_scoped_active_findings(&scope, query),
     })
 }
@@ -45,6 +51,7 @@ pub fn query_collection_governance_overview(
 fn summarize_bulk_governance_cohort(
     inventory: &ComponentInventory,
     read_model: &FindingReadModel,
+    collection_key: &str,
     scope: &[crate::CollectionScopedArtifact],
     query: &ScopedActiveFindingsQuery,
 ) -> BulkGovernanceCohortSummary {
@@ -71,7 +78,10 @@ fn summarize_bulk_governance_cohort(
         let context_profile = context_profiles
             .entry(finding.finding.component_key.clone())
             .or_insert_with(|| {
-                inventory.managed_component_context_profile(finding.finding.component_key.as_ref())
+                inventory.managed_component_context_profile_in_collection(
+                    collection_key,
+                    finding.finding.component_key.as_ref(),
+                )
             });
         match contextual_risk_level(finding.severity, context_profile.as_ref()) {
             ContextualRiskLevel::Critical => summary.critical_risk += 1,

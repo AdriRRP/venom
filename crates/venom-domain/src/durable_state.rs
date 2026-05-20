@@ -326,25 +326,13 @@ impl DurableState {
         collection_key: &str,
         profile_key: &str,
     ) -> Result<AssignCollectionContextProfileResult, DurableStateError> {
-        let current_inventory = self.ingestion.inventory();
-        let changed_component_keys = current_inventory
-            .collection_component_keys(collection_key)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|component_key| {
-                current_inventory.assigned_context_profile(component_key.as_ref())
-                    != Some(profile_key)
-            })
-            .collect::<Vec<_>>();
-
-        let mut candidate_inventory = current_inventory.clone();
+        let mut candidate_inventory = self.ingestion.inventory().clone();
         let result =
             candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
         if result.change == AssignCollectionContextProfileChange::Assigned {
             self.append_event(&DurableEvent::CollectionContextProfileAssigned {
                 collection_key: collection_key.into(),
                 profile_key: profile_key.into(),
-                component_keys: changed_component_keys,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
@@ -1136,11 +1124,9 @@ impl DurableState {
             DurableEvent::CollectionContextProfileAssigned {
                 collection_key,
                 profile_key,
-                component_keys,
             } => self.apply_collection_context_profile_assigned(
                 collection_key.as_ref(),
                 profile_key.as_ref(),
-                &component_keys,
                 line,
             ),
             DurableEvent::CollectionRegistered { .. }
@@ -1582,36 +1568,22 @@ impl DurableState {
         &mut self,
         collection_key: &str,
         profile_key: &str,
-        component_keys: &[Box<str>],
         line: usize,
     ) -> Result<(), DurableStateError> {
-        if !self
+        let result = self
             .ingestion
-            .inventory()
-            .is_collection_managed(collection_key)
-        {
-            return Err(DurableStateError::CorruptHistory {
-                line,
-                reason: "invalid collection context profile assignment".into(),
-            });
-        }
-
-        for component_key in component_keys {
-            let result = self
-                .ingestion
-                .inventory_mut()
-                .assign_context_profile(component_key.as_ref(), profile_key);
-            match result.change {
-                AssignContextProfileChange::Assigned | AssignContextProfileChange::Unchanged => {}
-                AssignContextProfileChange::Rejected => {
-                    return Err(DurableStateError::CorruptHistory {
-                        line,
-                        reason: "invalid collection context profile assignment".into(),
-                    });
-                }
+            .inventory_mut()
+            .assign_context_profile_for_collection(collection_key, profile_key);
+        match result.change {
+            AssignCollectionContextProfileChange::Assigned
+            | AssignCollectionContextProfileChange::Unchanged => Ok(()),
+            AssignCollectionContextProfileChange::Rejected => {
+                Err(DurableStateError::CorruptHistory {
+                    line,
+                    reason: "invalid collection context profile assignment".into(),
+                })
             }
         }
-        Ok(())
     }
 
     fn apply_collection_component_added(
@@ -1921,7 +1893,6 @@ enum DurableEvent {
     CollectionContextProfileAssigned {
         collection_key: Box<str>,
         profile_key: Box<str>,
-        component_keys: Vec<Box<str>>,
     },
     CollectionComponentAdded {
         collection_key: Box<str>,
@@ -2042,9 +2013,11 @@ struct StoredCollectionRegistration {
 struct StoredContextProfileRegistration {
     profile_key: Box<str>,
     name: Box<str>,
-    internet_exposed: bool,
-    production: bool,
-    mission_critical: bool,
+    internet_exposed: Option<bool>,
+    production: Option<bool>,
+    mission_critical: Option<bool>,
+    vpn_restricted: Option<bool>,
+    non_privileged_user: Option<bool>,
 }
 
 impl From<ContextProfileRegistration> for StoredContextProfileRegistration {
@@ -2055,19 +2028,31 @@ impl From<ContextProfileRegistration> for StoredContextProfileRegistration {
             internet_exposed: value.internet_exposed,
             production: value.production,
             mission_critical: value.mission_critical,
+            vpn_restricted: value.vpn_restricted,
+            non_privileged_user: value.non_privileged_user,
         }
     }
 }
 
 impl StoredContextProfileRegistration {
     fn into_domain(self) -> ContextProfileRegistration {
-        ContextProfileRegistration::new(
-            self.profile_key,
-            self.name,
-            self.internet_exposed,
-            self.production,
-            self.mission_critical,
-        )
+        let mut registration = ContextProfileRegistration::overlay(self.profile_key, self.name);
+        if let Some(value) = self.internet_exposed {
+            registration = registration.with_internet_exposed(value);
+        }
+        if let Some(value) = self.production {
+            registration = registration.with_production(value);
+        }
+        if let Some(value) = self.mission_critical {
+            registration = registration.with_mission_critical(value);
+        }
+        if let Some(value) = self.vpn_restricted {
+            registration = registration.with_vpn_restricted(value);
+        }
+        if let Some(value) = self.non_privileged_user {
+            registration = registration.with_non_privileged_user(value);
+        }
+        registration
     }
 }
 

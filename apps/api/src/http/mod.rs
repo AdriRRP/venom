@@ -1058,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_assigns_one_context_profile_across_one_collection_scope() {
+    async fn api_assigns_one_default_context_profile_for_one_collection_scope() {
         let router = build_router(
             ApiState::open(
                 temp_path("collection-context-assignment", "state"),
@@ -1088,9 +1088,7 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
         assert_eq!(payload["change"], "assigned");
-        assert_eq!(payload["targeted"], 1);
-        assert_eq!(payload["assigned"], 1);
-        assert_eq!(payload["unchanged"], 0);
+        assert_eq!(payload["profile_key"], "context:internet-prod");
 
         let detail_response = router
             .clone()
@@ -1109,8 +1107,12 @@ mod tests {
         let detail_payload: serde_json::Value =
             serde_json::from_slice(&detail_body).expect("response should be valid json");
         assert_eq!(
-            detail_payload["members"][0]["context_profile_key"],
+            detail_payload["context_profile_key"],
             "context:internet-prod"
+        );
+        assert_eq!(
+            detail_payload["members"][0]["component_context_profile_key"],
+            serde_json::Value::Null
         );
     }
 

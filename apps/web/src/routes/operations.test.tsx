@@ -84,6 +84,8 @@ describe("OperationsPage", () => {
 								internet_exposed: true,
 								production: true,
 								mission_critical: true,
+								vpn_restricted: null,
+								non_privileged_user: null,
 							},
 						],
 					}),
@@ -120,7 +122,7 @@ describe("OperationsPage", () => {
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
-				/context:internet-prod: Internet Production \(internet, production, critical\)/i,
+				/context:internet-prod: Internet Production \(internet, production, critical, vpn:n\/a, privilege:n\/a\)/i,
 			),
 		).toBeInTheDocument();
 		expect(
@@ -130,7 +132,7 @@ describe("OperationsPage", () => {
 		).toBeInTheDocument();
 	});
 
-	it("applies one context profile across one managed collection", async () => {
+	it("sets one collection default context profile", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);
 			if (url === "/api/health") {
@@ -167,6 +169,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: "context:internet-prod",
 						source: null,
 						scan_schedule: null,
 						health: {
@@ -180,7 +183,7 @@ describe("OperationsPage", () => {
 						members: [
 							{
 								component_key: "component:payments-api",
-								context_profile_key: "context:internet-prod",
+								component_context_profile_key: null,
 							},
 						],
 					}),
@@ -192,9 +195,6 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						change: "assigned",
 						profile_key: "context:internet-prod",
-						targeted: 1,
-						assigned: 1,
-						unchanged: 0,
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -210,19 +210,17 @@ describe("OperationsPage", () => {
 
 		fireEvent.click(
 			screen.getByRole("button", {
-				name: "Apply Context Profile to Collection",
+				name: "Set Collection Default Context",
 			}),
 		);
 
 		expect(
 			await screen.findByText(
-				/Change: assigned\. Profile: context:internet-prod\. Targeted: 1\. Assigned: 1\. Unchanged: 0\./i,
+				/Change: assigned\. Profile: context:internet-prod\./i,
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(
-				/component:payments-api \(context:internet-prod\)/i,
-			),
+			await screen.findByText(/Default context: context:internet-prod\./i),
 		).toBeInTheDocument();
 	});
 
@@ -273,6 +271,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: null,
 						health: {
@@ -286,7 +285,7 @@ describe("OperationsPage", () => {
 						members: [
 							{
 								component_key: "component:payments-api",
-								context_profile_key: null,
+								component_context_profile_key: null,
 							},
 						],
 					}),
@@ -391,6 +390,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: {
 							kind: "component-list",
 							mode: "replace",
@@ -408,7 +408,7 @@ describe("OperationsPage", () => {
 						members: [
 							{
 								component_key: "component:payments-api",
-								context_profile_key: null,
+								component_context_profile_key: null,
 							},
 						],
 					}),
@@ -501,6 +501,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: {
 							cadence_minutes: 60,
@@ -520,7 +521,7 @@ describe("OperationsPage", () => {
 						members: [
 							{
 								component_key: "component:payments-api",
-								context_profile_key: null,
+								component_context_profile_key: null,
 							},
 						],
 					}),
@@ -690,6 +691,7 @@ describe("OperationsPage", () => {
 					JSON.stringify({
 						collection_key: "release:2026.05",
 						name: "May Release",
+						context_profile_key: null,
 						source: null,
 						scan_schedule: null,
 						health: {
@@ -703,7 +705,7 @@ describe("OperationsPage", () => {
 						members: [
 							{
 								component_key: "component:payments-api",
-								context_profile_key: null,
+								component_context_profile_key: null,
 							},
 						],
 					}),

@@ -20,7 +20,8 @@ The current system already closed the following legacy-value gaps:
 - governed finding reopen flows back to the canonical open state
 - deterministic contextual risk from managed context profiles
 - first bulk governance actions over one release-scoped open cohort
-- collection-scoped context actions over one closed release scope
+- collection-scoped default context overlays over one closed release scope,
+  merged with component-specific overrides
 
 ## Remaining debt to close
 

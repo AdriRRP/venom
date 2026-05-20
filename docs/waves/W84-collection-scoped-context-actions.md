@@ -8,8 +8,9 @@ Infra profile: `db`
 
 ## Goal
 
-Apply one managed context profile across one closed release scope without
-component-by-component fan-out in the UI.
+Attach one managed default context profile to one closed release scope and
+merge it with component-specific context field by field, letting the component
+override win where it is explicitly defined.
 
 ## Feature paths
 
@@ -46,9 +47,9 @@ component-by-component fan-out in the UI.
 
 | Slice | Status | Goal | Verification |
 |---|---|---|---|
-| `W84-S01` | done | add one durable collection-scoped context assignment action in domain inventory and replayable local durability | `unit`, `acceptance` |
-| `W84-S02` | done | expose one collection-scoped context assignment through API and Postgres durability | `integration` |
-| `W84-S03` | done | let the operator apply one context profile across one collection in the console and cover it in browser smoke | `web`, `e2e` |
+| `W84-S01` | done | add one durable collection default-context assignment in domain inventory and replayable local durability | `unit`, `acceptance` |
+| `W84-S02` | done | expose one collection default-context assignment through API and Postgres durability | `integration` |
+| `W84-S03` | done | let the operator set one collection default context in the console and cover the scoped merge behavior in browser smoke | `web`, `e2e` |
 
 ## Language impact
 

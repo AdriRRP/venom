@@ -13,8 +13,8 @@ use venom_domain::findings::{
     FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
     ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity, Suppression, build_release_dashboard,
-    contextualize_active_findings, query_collection_governance_overview,
-    summarize_collection_health,
+    contextualize_active_findings, contextualize_collection_active_findings,
+    query_collection_governance_overview, summarize_collection_health,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, BindArtifactResult, CollectionRegistration, CollectionSource,
@@ -436,6 +436,42 @@ async fn venom_durably_registers_context_profile(
     }
 }
 
+#[given(expr = "VENOM durably registers context profile {string} named {string} marked production")]
+#[when(expr = "VENOM durably registers context profile {string} named {string} marked production")]
+async fn venom_durably_registers_production_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name).with_production(true),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed and mission critical"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked internet exposed and mission critical"
+)]
+async fn venom_durably_registers_edge_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name)
+            .with_internet_exposed(true)
+            .with_mission_critical(true),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[given(expr = "VENOM durably assigns context profile {string} to component {string}")]
 #[when(expr = "VENOM durably assigns context profile {string} to component {string}")]
 async fn venom_durably_assigns_context_profile(
@@ -466,6 +502,22 @@ async fn venom_durably_assigns_context_profile_to_collection(
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
     }
+}
+
+#[then(expr = "the durable state shows collection {string} uses default context profile {string}")]
+async fn the_durable_state_shows_collection_uses_default_context_profile(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    expected_profile_key: String,
+) {
+    assert_eq!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .assigned_collection_context_profile(&collection_key),
+        Some(expected_profile_key.as_str())
+    );
 }
 
 #[given(expr = "VENOM durably creates collection {string} named {string}")]
@@ -842,9 +894,9 @@ async fn the_durable_state_shows_context_profile_flags(
         .inventory()
         .context_profile(&profile_key)
         .expect("context profile should exist");
-    assert!(profile.internet_exposed);
-    assert!(profile.production);
-    assert!(profile.mission_critical);
+    assert_eq!(profile.internet_exposed, Some(true));
+    assert_eq!(profile.production, Some(true));
+    assert_eq!(profile.mission_critical, Some(true));
 }
 
 #[when(
@@ -1231,6 +1283,38 @@ async fn venom_queries_contextual_active_findings_for_component_and_artifact(
 }
 
 #[when(
+    expr = "VENOM queries contextual active findings for collection {string} with minimum severity {string}, offset {int}, and limit {int}"
+)]
+async fn venom_queries_contextual_active_findings_for_collection(
+    world: &mut AcceptanceWorld,
+    collection_key: String,
+    min_severity: String,
+    offset: usize,
+    limit: usize,
+) {
+    let scope = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .collection_scoped_artifacts(&collection_key)
+        .expect("collection scope must exist before scoped finding query");
+    let query = ScopedActiveFindingsQuery::new()
+        .with_min_severity(parse_severity(&min_severity))
+        .with_offset(offset)
+        .with_limit(limit);
+    let page = world
+        .durable_state_ref()
+        .read_model()
+        .query_scoped_active_findings(&scope, &query);
+    world.last_contextual_active_findings = contextualize_collection_active_findings(
+        world.durable_state_ref().ingestion().inventory(),
+        &collection_key,
+        page.findings.clone(),
+    );
+    world.last_scoped_active_findings_page = Some(page);
+}
+
+#[when(
     expr = "VENOM queries active findings for component {string} and artifact {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
 )]
 async fn venom_queries_active_findings_for_component_and_artifact_with_governance(
@@ -1321,6 +1405,7 @@ async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection
     world.last_collection_health_summary = Some(summarize_collection_health(
         inventory,
         durable_state.read_model(),
+        &collection_key,
         &scope,
     ));
 }

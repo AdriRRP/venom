@@ -84,6 +84,31 @@ pub fn contextualize_active_findings(
 }
 
 #[must_use]
+pub fn contextualize_collection_active_findings(
+    inventory: &ComponentInventory,
+    collection_key: &str,
+    findings: Vec<ActiveFindingProjection>,
+) -> Vec<ContextualActiveFindingProjection> {
+    let mut context_cache: BTreeMap<Box<str>, Option<ManagedContextProfile>> = BTreeMap::new();
+    findings
+        .into_iter()
+        .map(|finding| {
+            let component_key = finding.finding.component_key.clone();
+            let context_profile = context_cache
+                .entry(component_key.clone())
+                .or_insert_with(|| {
+                    inventory.managed_component_context_profile_in_collection(
+                        collection_key,
+                        component_key.as_ref(),
+                    )
+                })
+                .clone();
+            ContextualActiveFindingProjection::from_active_finding(finding, context_profile)
+        })
+        .collect()
+}
+
+#[must_use]
 pub fn contextual_risk_level(
     severity: Severity,
     context_profile: Option<&ManagedContextProfile>,
@@ -99,9 +124,9 @@ pub fn contextual_risk_level(
         };
     };
 
-    let context_pressure = u8::from(context_profile.internet_exposed)
-        + u8::from(context_profile.production)
-        + u8::from(context_profile.mission_critical);
+    let context_pressure = u8::from(context_profile.internet_exposed.unwrap_or(false))
+        + u8::from(context_profile.production.unwrap_or(false))
+        + u8::from(context_profile.mission_critical.unwrap_or(false));
 
     if severity == Severity::Unknown {
         return ContextualRiskLevel::Unknown;
@@ -147,9 +172,11 @@ mod tests {
         let profile = ManagedContextProfile {
             profile_key: "context:internet-prod".into(),
             name: "Internet Production".into(),
-            internet_exposed: true,
-            production: true,
-            mission_critical: true,
+            internet_exposed: Some(true),
+            production: Some(true),
+            mission_critical: Some(true),
+            vpn_restricted: None,
+            non_privileged_user: None,
         };
 
         assert_eq!(
@@ -186,9 +213,11 @@ mod tests {
         let profile = ManagedContextProfile {
             profile_key: "context:internet-prod".into(),
             name: "Internet Production".into(),
-            internet_exposed: true,
-            production: true,
-            mission_critical: true,
+            internet_exposed: Some(true),
+            production: Some(true),
+            mission_critical: Some(true),
+            vpn_restricted: None,
+            non_privileged_user: None,
         };
 
         let contextual =

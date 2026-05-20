@@ -61,6 +61,8 @@ export function OperationsPage() {
 		contextInternetExposed: true,
 		contextProduction: true,
 		contextMissionCritical: true,
+		contextVpnRestricted: false,
+		contextNonPrivilegedUser: false,
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
@@ -394,6 +396,8 @@ export function OperationsPage() {
 								internetExposed: operatorState.contextInternetExposed,
 								production: operatorState.contextProduction,
 								missionCritical: operatorState.contextMissionCritical,
+								vpnRestricted: operatorState.contextVpnRestricted,
+								nonPrivilegedUser: operatorState.contextNonPrivilegedUser,
 							});
 						}}
 					>
@@ -465,6 +469,34 @@ export function OperationsPage() {
 							/>
 							Mission critical
 						</label>
+						<label>
+							<input
+								checked={operatorState.contextVpnRestricted}
+								name="contextVpnRestricted"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextVpnRestricted: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							VPN restricted
+						</label>
+						<label>
+							<input
+								checked={operatorState.contextNonPrivilegedUser}
+								name="contextNonPrivilegedUser"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										contextNonPrivilegedUser: event.target.checked,
+									}))
+								}
+								type="checkbox"
+							/>
+							Non-privileged user
+						</label>
 						<button className="primary-button" type="submit">
 							Register Context Profile
 						</button>
@@ -486,9 +518,36 @@ export function OperationsPage() {
 							{contextProfilesSummary.profiles.map((profile) => (
 								<li key={profile.profile_key}>
 									{profile.profile_key}: {profile.name} (
-									{profile.internet_exposed ? "internet" : "internal"},{" "}
-									{profile.production ? "production" : "non-production"},{" "}
-									{profile.mission_critical ? "critical" : "non-critical"})
+									{profile.internet_exposed === null
+										? "internet:n/a"
+										: profile.internet_exposed
+											? "internet"
+											: "internal"}
+									,{" "}
+									{profile.production === null
+										? "production:n/a"
+										: profile.production
+											? "production"
+											: "non-production"}
+									,{" "}
+									{profile.mission_critical === null
+										? "criticality:n/a"
+										: profile.mission_critical
+											? "critical"
+											: "non-critical"}
+									,{" "}
+									{profile.vpn_restricted === null
+										? "vpn:n/a"
+										: profile.vpn_restricted
+											? "vpn-restricted"
+											: "vpn-open"}
+									,{" "}
+									{profile.non_privileged_user === null
+										? "privilege:n/a"
+										: profile.non_privileged_user
+											? "non-privileged"
+											: "privileged"}
+									)
 								</li>
 							))}
 						</ul>
@@ -539,7 +598,7 @@ export function OperationsPage() {
 					<div className="panel-header">
 						<div>
 							<p className="eyebrow">Release Scope</p>
-							<h2>Apply Context Profile to Collection</h2>
+							<h2>Set Collection Default Context Profile</h2>
 						</div>
 					</div>
 					<form
@@ -561,21 +620,16 @@ export function OperationsPage() {
 							<input readOnly value={operatorState.contextProfileKey} />
 						</label>
 						<button className="primary-button" type="submit">
-							Apply Context Profile to Collection
+							Set Collection Default Context
 						</button>
 					</form>
 					{assignCollectionContextProfileMutation.data ? (
 						<div className="result-card">
-							<strong>Last collection context assignment</strong>
+							<strong>Last collection default context</strong>
 							<p>
 								Change: {assignCollectionContextProfileMutation.data.change}.
 								Profile:{" "}
 								{assignCollectionContextProfileMutation.data.profile_key}.
-								Targeted: {assignCollectionContextProfileMutation.data.targeted}
-								. Assigned:{" "}
-								{assignCollectionContextProfileMutation.data.assigned}.
-								Unchanged:{" "}
-								{assignCollectionContextProfileMutation.data.unchanged}.
 							</p>
 						</div>
 					) : null}
@@ -766,6 +820,10 @@ export function OperationsPage() {
 									<p>No schedule configured.</p>
 								)}
 								<p>
+									Default context:{" "}
+									{collectionDetailQuery.data.context_profile_key ?? "none"}.
+								</p>
+								<p>
 									Source:{" "}
 									{collectionDetailQuery.data.source
 										? `${collectionDetailQuery.data.source.mode} from ${collectionDetailQuery.data.source.component_keys.length} declared components`
@@ -780,8 +838,8 @@ export function OperationsPage() {
 									{collectionDetailQuery.data.members.map((member) => (
 										<li key={member.component_key}>
 											{member.component_key}
-											{member.context_profile_key
-												? ` (${member.context_profile_key})`
+											{member.component_context_profile_key
+												? ` (${member.component_context_profile_key})`
 												: ""}
 										</li>
 									))}

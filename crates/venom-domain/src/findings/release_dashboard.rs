@@ -48,7 +48,14 @@ pub fn build_release_dashboard(
         .map(|collection| {
             let health = inventory
                 .collection_scoped_artifacts(collection.collection_key.as_ref())
-                .map(|scope| summarize_collection_health(inventory, read_model, &scope))
+                .map(|scope| {
+                    summarize_collection_health(
+                        inventory,
+                        read_model,
+                        collection.collection_key.as_ref(),
+                        &scope,
+                    )
+                })
                 .unwrap_or_default();
 
             ReleaseDashboardCollection {
