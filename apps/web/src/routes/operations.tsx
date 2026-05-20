@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
 	addCollectionComponent,
+	assignCollectionContextProfile,
 	assignContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
@@ -124,6 +125,19 @@ export function OperationsPage() {
 			assignContextProfile(request.componentKey, {
 				profileKey: request.profileKey,
 			}),
+	});
+
+	const assignCollectionContextProfileMutation = useMutation({
+		mutationFn: (request: { collectionKey: string; profileKey: string }) =>
+			assignCollectionContextProfile(request.collectionKey, {
+				profileKey: request.profileKey,
+			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["collections"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
 	});
 
 	const addCollectionComponentMutation = useMutation({
@@ -525,6 +539,49 @@ export function OperationsPage() {
 					<div className="panel-header">
 						<div>
 							<p className="eyebrow">Release Scope</p>
+							<h2>Apply Context Profile to Collection</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void assignCollectionContextProfileMutation.mutateAsync({
+								collectionKey: operatorState.collectionKey,
+								profileKey: operatorState.contextProfileKey,
+							});
+						}}
+					>
+						<label>
+							Collection key
+							<input readOnly value={operatorState.collectionKey} />
+						</label>
+						<label>
+							Profile key
+							<input readOnly value={operatorState.contextProfileKey} />
+						</label>
+						<button className="primary-button" type="submit">
+							Apply Context Profile to Collection
+						</button>
+					</form>
+					{assignCollectionContextProfileMutation.data ? (
+						<div className="result-card">
+							<strong>Last collection context assignment</strong>
+							<p>
+								Change: {assignCollectionContextProfileMutation.data.change}. Profile:{" "}
+								{assignCollectionContextProfileMutation.data.profile_key}. Targeted:{" "}
+								{assignCollectionContextProfileMutation.data.targeted}. Assigned:{" "}
+								{assignCollectionContextProfileMutation.data.assigned}. Unchanged:{" "}
+								{assignCollectionContextProfileMutation.data.unchanged}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Release Scope</p>
 							<h2>Create Collection</h2>
 						</div>
 					</div>
@@ -718,7 +775,12 @@ export function OperationsPage() {
 								</p>
 								<ul>
 									{collectionDetailQuery.data.members.map((member) => (
-										<li key={member.component_key}>{member.component_key}</li>
+										<li key={member.component_key}>
+											{member.component_key}
+											{member.context_profile_key
+												? ` (${member.context_profile_key})`
+												: ""}
+										</li>
 									))}
 								</ul>
 							</>

@@ -18,3 +18,19 @@ Feature: Manage context profiles
       And VENOM reloads the durable state
       Then the durable state shows component "component:payments-api" uses context profile "context:internet-prod"
       And the durable state shows context profile "context:internet-prod" is internet exposed, production, and mission critical
+
+    Scenario: Assign one context profile across one collection and reload
+      Given no managed components
+      And a new durable state
+      And a component "component:payments-api"
+      And a component "component:billing-api"
+      When VENOM durably registers component "component:payments-api" named "Payments API"
+      And VENOM durably registers component "component:billing-api" named "Billing API"
+      And VENOM durably creates collection "release:2026.05" named "May Release"
+      And VENOM durably adds component "component:payments-api" to collection "release:2026.05"
+      And VENOM durably adds component "component:billing-api" to collection "release:2026.05"
+      And VENOM durably registers context profile "context:internet-prod" named "Internet Production" marked internet exposed, production, and mission critical
+      And VENOM durably assigns context profile "context:internet-prod" to collection "release:2026.05"
+      And VENOM reloads the durable state
+      Then the durable state shows component "component:payments-api" uses context profile "context:internet-prod"
+      And the durable state shows component "component:billing-api" uses context profile "context:internet-prod"

@@ -452,6 +452,22 @@ async fn venom_durably_assigns_context_profile(
     }
 }
 
+#[given(expr = "VENOM durably assigns context profile {string} to collection {string}")]
+#[when(expr = "VENOM durably assigns context profile {string} to collection {string}")]
+async fn venom_durably_assigns_context_profile_to_collection(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    collection_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .assign_context_profile_for_collection(&collection_key, &profile_key)
+    {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[given(expr = "VENOM durably creates collection {string} named {string}")]
 #[when(expr = "VENOM durably creates collection {string} named {string}")]
 async fn venom_durably_creates_collection(

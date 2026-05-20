@@ -225,6 +225,43 @@ pub struct AssignContextProfileResult {
     pub profile_key: Option<Box<str>>,
 }
 
+/// Observable outcome of assigning one context profile across one managed collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignCollectionContextProfileChange {
+    /// At least one managed member now uses the context profile.
+    Assigned,
+    /// Every targeted managed member already used the context profile.
+    Unchanged,
+    /// The assignment was rejected because the collection or profile is missing.
+    Rejected,
+}
+
+impl AssignCollectionContextProfileChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of assigning one context profile across one managed collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignCollectionContextProfileResult {
+    /// Observable state change caused by the assignment attempt.
+    pub change: AssignCollectionContextProfileChange,
+    /// Assigned profile key after the operation when the collection and profile exist.
+    pub profile_key: Option<Box<str>>,
+    /// Total number of managed collection members targeted by the action.
+    pub targeted: usize,
+    /// Number of managed members that changed to the profile.
+    pub assigned: usize,
+    /// Number of managed members that already used the profile.
+    pub unchanged: usize,
+}
+
 /// Canonical registration request for one managed collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionRegistration {
@@ -790,6 +827,61 @@ impl ComponentInventory {
         }
     }
 
+    /// Assign one managed context profile to every managed component in one managed collection.
+    #[must_use]
+    pub fn assign_context_profile_for_collection(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+    ) -> AssignCollectionContextProfileResult {
+        if !self.context_profiles.contains_key(profile_key) {
+            return AssignCollectionContextProfileResult {
+                change: AssignCollectionContextProfileChange::Rejected,
+                profile_key: None,
+                targeted: 0,
+                assigned: 0,
+                unchanged: 0,
+            };
+        }
+
+        let Some(component_keys) = self.collection_component_keys(collection_key) else {
+            return AssignCollectionContextProfileResult {
+                change: AssignCollectionContextProfileChange::Rejected,
+                profile_key: None,
+                targeted: 0,
+                assigned: 0,
+                unchanged: 0,
+            };
+        };
+
+        let mut assigned = 0;
+        let mut unchanged = 0;
+        for component_key in &component_keys {
+            let record = self
+                .components
+                .get_mut(component_key.as_ref())
+                .expect("managed collection members must exist in the component inventory");
+            if record.context_profile_key.as_deref() == Some(profile_key) {
+                unchanged += 1;
+            } else {
+                record.context_profile_key = Some(profile_key.into());
+                assigned += 1;
+            }
+        }
+
+        AssignCollectionContextProfileResult {
+            change: if assigned > 0 {
+                AssignCollectionContextProfileChange::Assigned
+            } else {
+                AssignCollectionContextProfileChange::Unchanged
+            },
+            profile_key: Some(profile_key.into()),
+            targeted: component_keys.len(),
+            assigned,
+            unchanged,
+        }
+    }
+
     /// Register one closed collection under management.
     #[must_use]
     pub fn register_collection(
@@ -1148,6 +1240,13 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn collection_component_keys(&self, collection_key: &str) -> Option<Vec<Box<str>>> {
+        self.collections
+            .get(collection_key)
+            .map(|record| record.component_keys.iter().cloned().collect())
+    }
+
+    #[must_use]
     pub fn managed_component_context_profile(
         &self,
         component_key: &str,
@@ -1361,12 +1460,13 @@ impl ComponentInventory {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddCollectionComponentChange, BindArtifactChange, CollectionRegistration, CollectionSource,
-        CollectionSourceMode, ComponentInventory, ComponentListCollectionSource,
-        ComponentRegistration, ConfigureCollectionScanScheduleChange,
-        ConfigureCollectionSourceChange, ConfigureProviderChange, ContextProfileRegistration,
-        MaterializeCollectionSourceChange, RegisterCollectionChange, RegisterComponentChange,
-        RegisterContextProfileChange, RemoveCollectionComponentChange,
+        AddCollectionComponentChange, AssignCollectionContextProfileChange, BindArtifactChange,
+        CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentInventory,
+        ComponentListCollectionSource, ComponentRegistration,
+        ConfigureCollectionScanScheduleChange, ConfigureCollectionSourceChange,
+        ConfigureProviderChange, ContextProfileRegistration, MaterializeCollectionSourceChange,
+        RegisterCollectionChange, RegisterComponentChange, RegisterContextProfileChange,
+        RemoveCollectionComponentChange,
     };
     use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
@@ -1585,6 +1685,50 @@ mod tests {
         assert_eq!(result.profile_key.as_deref(), Some("context:internet-prod"));
         assert_eq!(
             inventory.assigned_context_profile("component:payments-api"),
+            Some("context:internet-prod")
+        );
+    }
+
+    #[test]
+    fn managed_collection_can_assign_one_context_profile_to_all_members() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:billing-api",
+            "Billing API",
+        ));
+        let _ =
+            inventory.register_collection(CollectionRegistration::new("release:2026.05", "May"));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:billing-api");
+        let _ = inventory.register_context_profile(ContextProfileRegistration::new(
+            "context:internet-prod",
+            "Internet Production",
+            true,
+            true,
+            true,
+        ));
+
+        let result = inventory
+            .assign_context_profile_for_collection("release:2026.05", "context:internet-prod");
+
+        assert_eq!(
+            result.change,
+            AssignCollectionContextProfileChange::Assigned
+        );
+        assert_eq!(result.profile_key.as_deref(), Some("context:internet-prod"));
+        assert_eq!(result.targeted, 2);
+        assert_eq!(result.assigned, 2);
+        assert_eq!(result.unchanged, 0);
+        assert_eq!(
+            inventory.assigned_context_profile("component:payments-api"),
+            Some("context:internet-prod")
+        );
+        assert_eq!(
+            inventory.assigned_context_profile("component:billing-api"),
             Some("context:internet-prod")
         );
     }

@@ -130,6 +130,100 @@ describe("OperationsPage", () => {
 		).toBeInTheDocument();
 	});
 
+	it("applies one context profile across one managed collection", async () => {
+		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			if (url === "/api/health") {
+				return new Response("ok", { status: 200 });
+			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 1,
+						collections: [
+							{
+								collection_key: "release:2026.05",
+								name: "May Release",
+								members: 1,
+								source: null,
+								scan_schedule: null,
+								due_now: false,
+								health: {
+									total: 0,
+									open: 0,
+									risk_accepted: 0,
+									suppressed: 0,
+									critical_risk: 0,
+									high_risk: 0,
+								},
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						source: null,
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [
+							{
+								component_key: "component:payments-api",
+								context_profile_key: "context:internet-prod",
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05/context-profile") {
+				return new Response(
+					JSON.stringify({
+						change: "assigned",
+						profile_key: "context:internet-prod",
+						targeted: 1,
+						assigned: 1,
+						unchanged: 0,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response(null, { status: 404 });
+		}) as typeof fetch;
+
+		render(
+			<QueryClientProvider client={new QueryClient()}>
+				<OperationsPage />
+			</QueryClientProvider>,
+		);
+
+		fireEvent.click(
+			screen.getByRole("button", {
+				name: "Apply Context Profile to Collection",
+			}),
+		);
+
+		expect(
+			await screen.findByText(
+				/Change: assigned\. Profile: context:internet-prod\. Targeted: 1\. Assigned: 1\. Unchanged: 0\./i,
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(/component:payments-api \(context:internet-prod\)/i),
+		).toBeInTheDocument();
+	});
+
 	it("creates one collection and adds one managed component", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);
@@ -187,7 +281,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -304,7 +403,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -411,7 +515,12 @@ describe("OperationsPage", () => {
 							critical_risk: 1,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -589,7 +698,12 @@ describe("OperationsPage", () => {
 							critical_risk: 0,
 							high_risk: 0,
 						},
-						members: [{ component_key: "component:payments-api" }],
+						members: [
+							{
+								component_key: "component:payments-api",
+								context_profile_key: null,
+							},
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);

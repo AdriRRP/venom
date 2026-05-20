@@ -1,7 +1,8 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
-    ArtifactRef, AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange,
-    BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
+    ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
+    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
+    BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
     CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
@@ -309,6 +310,41 @@ impl DurableState {
             self.append_event(&DurableEvent::ComponentContextProfileAssigned {
                 component_key: component_key.into(),
                 profile_key: profile_key.into(),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one managed context profile across one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn assign_context_profile_for_collection(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignCollectionContextProfileResult, DurableStateError> {
+        let current_inventory = self.ingestion.inventory();
+        let changed_component_keys = current_inventory
+            .collection_component_keys(collection_key)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|component_key| {
+                current_inventory.assigned_context_profile(component_key.as_ref())
+                    != Some(profile_key)
+            })
+            .collect::<Vec<_>>();
+
+        let mut candidate_inventory = current_inventory.clone();
+        let result =
+            candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
+        if result.change == AssignCollectionContextProfileChange::Assigned {
+            self.append_event(&DurableEvent::CollectionContextProfileAssigned {
+                collection_key: collection_key.into(),
+                profile_key: profile_key.into(),
+                component_keys: changed_component_keys,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
@@ -959,6 +995,7 @@ impl DurableState {
             | DurableEvent::ArtifactBound { .. }
             | DurableEvent::ComponentProviderConfigured { .. }
             | DurableEvent::ComponentContextProfileAssigned { .. }
+            | DurableEvent::CollectionContextProfileAssigned { .. }
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
             | DurableEvent::CollectionComponentRemoved { .. }
@@ -1094,6 +1131,16 @@ impl DurableState {
             } => self.apply_context_profile_assigned(
                 component_key.as_ref(),
                 profile_key.as_ref(),
+                line,
+            ),
+            DurableEvent::CollectionContextProfileAssigned {
+                collection_key,
+                profile_key,
+                component_keys,
+            } => self.apply_collection_context_profile_assigned(
+                collection_key.as_ref(),
+                profile_key.as_ref(),
+                &component_keys,
                 line,
             ),
             DurableEvent::CollectionRegistered { .. }
@@ -1531,6 +1578,42 @@ impl DurableState {
         }
     }
 
+    fn apply_collection_context_profile_assigned(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+        component_keys: &[Box<str>],
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        if !self
+            .ingestion
+            .inventory()
+            .is_collection_managed(collection_key)
+        {
+            return Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid collection context profile assignment".into(),
+            });
+        }
+
+        for component_key in component_keys {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .assign_context_profile(component_key.as_ref(), profile_key);
+            match result.change {
+                AssignContextProfileChange::Assigned | AssignContextProfileChange::Unchanged => {}
+                AssignContextProfileChange::Rejected => {
+                    return Err(DurableStateError::CorruptHistory {
+                        line,
+                        reason: "invalid collection context profile assignment".into(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_collection_component_added(
         &mut self,
         collection_key: &str,
@@ -1834,6 +1917,11 @@ enum DurableEvent {
     ComponentContextProfileAssigned {
         component_key: Box<str>,
         profile_key: Box<str>,
+    },
+    CollectionContextProfileAssigned {
+        collection_key: Box<str>,
+        profile_key: Box<str>,
+        component_keys: Vec<Box<str>>,
     },
     CollectionComponentAdded {
         collection_key: Box<str>,

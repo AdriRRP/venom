@@ -214,7 +214,22 @@ export type CollectionDetailResponse = {
 	source: CollectionSource | null;
 	scan_schedule: CollectionScanSchedule | null;
 	health: CollectionHealth;
-	members: Array<{ component_key: string }>;
+	members: Array<{
+		component_key: string;
+		context_profile_key: string | null;
+	}>;
+};
+
+export type AssignCollectionContextProfileRequest = {
+	profileKey: string;
+};
+
+export type AssignCollectionContextProfileResponse = {
+	change: string;
+	profile_key: string | null;
+	targeted: number;
+	assigned: number;
+	unchanged: number;
 };
 
 export type ConfigureCollectionSourcePayload = {
@@ -1018,6 +1033,28 @@ export async function assignContextProfile(
 		);
 	}
 	return (await response.json()) as AssignContextProfileResponse;
+}
+
+export async function assignCollectionContextProfile(
+	collectionKey: string,
+	request: AssignCollectionContextProfileRequest,
+): Promise<AssignCollectionContextProfileResponse> {
+	const response = await fetch(
+		`/api/collections/${encodeURIComponent(collectionKey)}/context-profile`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				profile_key: request.profileKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`collection context profile assignment failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as AssignCollectionContextProfileResponse;
 }
 
 export async function requestScan(

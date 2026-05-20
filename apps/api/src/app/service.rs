@@ -223,6 +223,10 @@ impl ApiReadSnapshot {
                 .component_keys
                 .into_iter()
                 .map(|component_key| CollectionMemberItem {
+                    context_profile_key: self
+                        .inventory
+                        .assigned_context_profile(component_key.as_ref())
+                        .map(str::to_owned),
                     component_key: component_key.into(),
                 })
                 .collect(),
@@ -742,6 +746,36 @@ impl ApiApplication {
         Ok(AssignContextProfileResponse {
             change: result.change.as_str().to_owned(),
             profile_key: result.profile_key.map(Into::into),
+        })
+    }
+
+    /// Assign one managed execution-context profile across one managed collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable write fails.
+    pub async fn assign_collection_context_profile(
+        &mut self,
+        collection_key: &str,
+        request: AssignCollectionContextProfileRequest,
+    ) -> Result<AssignCollectionContextProfileResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_context_profile_for_collection(collection_key, &request.profile_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_context_profile_for_collection(collection_key, &request.profile_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(AssignCollectionContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            profile_key: result.profile_key.map(Into::into),
+            targeted: result.targeted,
+            assigned: result.assigned,
+            unchanged: result.unchanged,
         })
     }
 
@@ -1874,6 +1908,7 @@ impl From<CollectionHealthSummary> for CollectionHealthItem {
 #[derive(Debug, Serialize)]
 pub struct CollectionMemberItem {
     pub component_key: String,
+    pub context_profile_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -1925,10 +1960,24 @@ pub struct AssignContextProfileRequest {
     pub profile_key: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AssignCollectionContextProfileRequest {
+    pub profile_key: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AssignContextProfileResponse {
     pub change: String,
     pub profile_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssignCollectionContextProfileResponse {
+    pub change: String,
+    pub profile_key: Option<String>,
+    pub targeted: usize,
+    pub assigned: usize,
+    pub unchanged: usize,
 }
 
 #[derive(Debug, Deserialize)]

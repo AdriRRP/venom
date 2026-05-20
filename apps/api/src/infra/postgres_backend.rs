@@ -19,6 +19,7 @@ use venom_domain::integration::{
     IntegrationRuntimeConfig, PendingIntegrationEvent, PublishIntegrationEventsResult,
 };
 use venom_domain::inventory::{
+    AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
     AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
     CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentInventory,
     ComponentListCollectionSource, ComponentRegistration, ConfigureCollectionScanScheduleChange,
@@ -434,6 +435,53 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component context profile upsert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one context profile across one managed collection in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn assign_context_profile_for_collection(
+        &mut self,
+        collection_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignCollectionContextProfileResult, String> {
+        let current_inventory = self.ingestion.inventory();
+        let changed_component_keys = current_inventory
+            .collection_component_keys(collection_key)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|component_key| {
+                current_inventory.assigned_context_profile(component_key.as_ref())
+                    != Some(profile_key)
+            })
+            .collect::<Vec<_>>();
+
+        let mut candidate_inventory = current_inventory.clone();
+        let result =
+            candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
+        if result.change == AssignCollectionContextProfileChange::Assigned {
+            let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
+                "INSERT INTO {} (component_key, profile_key) ",
+                self.names.component_context_profiles
+            ));
+            query_builder.push_values(changed_component_keys.iter(), |mut row, component_key| {
+                row.push_bind(component_key.as_ref()).push_bind(profile_key);
+            });
+            query_builder.push(
+                " ON CONFLICT (component_key) DO UPDATE SET profile_key = EXCLUDED.profile_key, updated_at = NOW()",
+            );
+            query_builder
+                .build()
+                .execute(&self.pool)
+                .await
+                .map_err(|error| {
+                    format!("postgres collection context profile upsert failed: {error}")
+                })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
