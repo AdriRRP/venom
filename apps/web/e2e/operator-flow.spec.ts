@@ -215,6 +215,17 @@ test("operator console can manage one release collection and execute one schedul
 			/Health: 1 active - 1 open - 0 risk accepted - 0 suppressed - 1 critical risk - 0 high risk/i,
 		),
 	).toBeVisible();
+
+	await page.getByRole("link", { name: "System Events" }).click();
+	await expect(
+		page.getByRole("heading", { level: 2, name: "System Event Trace" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("cell", { name: "collection-scan-materialized" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("cell", { name: "scan-command-completed" }),
+	).toBeVisible();
 });
 
 test("findings console can query one seeded release collection", async ({

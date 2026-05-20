@@ -5,6 +5,7 @@ import {
 	redirect,
 } from "@tanstack/react-router";
 import { DashboardPage } from "../routes/dashboard";
+import { EventsPage } from "../routes/events";
 import { FindingsPage } from "../routes/findings";
 import { OperationsPage } from "../routes/operations";
 
@@ -34,10 +35,17 @@ const operationsRoute = createRoute({
 	component: OperationsPage,
 });
 
+const eventsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/events",
+	component: EventsPage,
+});
+
 const routeTree = rootRoute.addChildren([
 	dashboardRoute,
 	findingsRoute,
 	operationsRoute,
+	eventsRoute,
 ]);
 
 export const router = createRouter({ routeTree });

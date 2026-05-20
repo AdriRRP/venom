@@ -17,6 +17,7 @@ import {
 	fetchContextProfiles,
 	fetchReleaseDashboard,
 	fetchScanCommandStatus,
+	fetchSystemEvents,
 	materializeCollectionSource,
 	registerCollection,
 	registerComponent,
@@ -153,6 +154,7 @@ describe("fetchApiHealth", () => {
 		});
 		await fetchCollections();
 		await fetchReleaseDashboard();
+		await fetchSystemEvents({ category: "command", limit: 25 });
 		await fetchCollectionDetail("release:2026.05");
 		await fetchCollectionActiveFindings({
 			collectionKey: "release:2026.05",
@@ -187,13 +189,16 @@ describe("fetchApiHealth", () => {
 		expect(calls[5]?.init?.body).toContain('"freshness":"deterministic"');
 		expect(calls[6]?.input).toBe("/api/collections");
 		expect(calls[7]?.input).toBe("/api/dashboard/releases");
-		expect(calls[8]?.input).toBe("/api/collections/release%3A2026.05");
-		expect(calls[9]?.input).toContain(
+		expect(calls[8]?.input).toBe(
+			"/api/system-events?category=command&limit=25",
+		);
+		expect(calls[9]?.input).toBe("/api/collections/release%3A2026.05");
+		expect(calls[10]?.input).toContain(
 			"/api/collections/release%3A2026.05/findings/active?",
 		);
-		expect(calls[9]?.input).toContain("min_severity=high");
-		expect(calls[9]?.input).toContain("governance_state=suppressed");
-		expect(calls[9]?.input).toContain("package_name=openssl");
+		expect(calls[10]?.input).toContain("min_severity=high");
+		expect(calls[10]?.input).toContain("governance_state=suppressed");
+		expect(calls[10]?.input).toContain("package_name=openssl");
 	});
 
 	it("serializes context profile registration, listing, and assignment", async () => {
