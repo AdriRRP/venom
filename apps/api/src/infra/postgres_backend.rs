@@ -2138,7 +2138,10 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("postgres scan command completion failed: {error}"))?;
-        self.insert_system_events_in_transaction(&mut transaction, &[system_event.clone()])
+        self.insert_system_events_in_transaction(
+            &mut transaction,
+            std::slice::from_ref(system_event),
+        )
             .await?;
         self.commit_transaction(transaction).await
     }
