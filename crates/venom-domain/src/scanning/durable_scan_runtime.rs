@@ -337,7 +337,7 @@ impl ScanCommandQueue {
         };
 
         if let Some(stored_report) = command.captured_report {
-            return self.resume_captured_report(&command_id, stored_report, state);
+            return self.resume_captured_report(&command_id, &stored_report, state);
         }
 
         let outcome = match provider.scan(&command.request).await {
@@ -357,7 +357,7 @@ impl ScanCommandQueue {
                     self.capture_report(&command_id, &report)?;
                     return self.resume_captured_report(
                         &command_id,
-                        StoredProviderScanReport::from_report(&report)
+                        &StoredProviderScanReport::from_report(&report)
                             .map_err(ScanCommandQueueError::State)?,
                         state,
                     );
@@ -378,7 +378,7 @@ impl ScanCommandQueue {
     fn resume_captured_report(
         &mut self,
         command_id: &str,
-        stored_report: StoredProviderScanReport,
+        stored_report: &StoredProviderScanReport,
         state: &mut DurableState,
     ) -> Result<RunNextScanResult, ScanCommandQueueError> {
         let report = stored_report
@@ -611,7 +611,12 @@ impl ScanCommandQueue {
                 command_id,
                 report,
                 occurred_at_unix_ms,
-            } => self.apply_report_captured_event(command_id, report, occurred_at_unix_ms, line),
+            } => self.apply_report_captured_event(
+                command_id.as_ref(),
+                report,
+                occurred_at_unix_ms,
+                line,
+            ),
             DurableScanEvent::IntegrationEventPublished {
                 event_id,
                 occurred_at_unix_ms,
@@ -646,12 +651,12 @@ impl ScanCommandQueue {
 
     fn apply_report_captured_event(
         &mut self,
-        command_id: Box<str>,
+        command_id: &str,
         report: StoredProviderScanReport,
         _occurred_at_unix_ms: u64,
         line: usize,
     ) -> Result<(), ScanCommandQueueError> {
-        let Some(record) = self.commands.get_mut(command_id.as_ref()) else {
+        let Some(record) = self.commands.get_mut(command_id) else {
             return Err(ScanCommandQueueError::CorruptHistory {
                 line,
                 reason: "captured report without prior enqueue".into(),
