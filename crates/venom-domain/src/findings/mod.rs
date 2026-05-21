@@ -36,5 +36,6 @@ pub use finding_read_model::{
 };
 pub use finding_tracker::{FindingChangeSet, FindingTracker};
 pub use release_dashboard::{
-    ReleaseDashboard, ReleaseDashboardCollection, ReleaseDashboardSummary, build_release_dashboard,
+    ReleaseBoard, ReleaseBoardCollection, ReleaseDashboard, ReleaseDashboardCollection,
+    ReleaseDashboardSummary, build_release_board, build_release_dashboard,
 };

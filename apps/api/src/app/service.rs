@@ -10,8 +10,9 @@ use venom_domain::findings::{
     BulkReopenFindingResult, BulkSuppressFindingResult, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReopenFindingResult, ReportedFinding, RiskAcceptance,
-    ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    PackageCoordinate, ProviderScanReport, ReleaseBoard, ReleaseDashboard, ReopenFindingResult,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
+    SuppressFindingResult, Suppression, build_release_board, build_release_dashboard,
     contextualize_active_findings, contextualize_collection_active_findings,
     query_collection_governance_overview,
 };
@@ -56,7 +57,7 @@ pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     system_events: Arc<Vec<SystemEvent>>,
-    release_board: Arc<Vec<ReleaseBoardRow>>,
+    release_board: Arc<ReleaseBoard>,
 }
 
 impl ApiReadSnapshot {
@@ -151,17 +152,23 @@ impl ApiReadSnapshot {
         let now_unix_ms = current_unix_millis()?;
         let collections = self
             .release_board
+            .collections
             .iter()
             .map(|collection| CollectionSummary {
                 collection_key: collection.collection_key.to_string(),
                 name: collection.name.to_string(),
                 members: collection.members,
-                source: collection.source.clone(),
-                scan_schedule: collection.scan_schedule,
+                source: collection
+                    .source
+                    .clone()
+                    .map(CollectionSourceSummaryItem::from),
+                scan_schedule: collection
+                    .scan_schedule
+                    .map(CollectionScanScheduleItem::from),
                 due_now: collection
                     .scan_schedule
                     .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms),
-                health: collection.health,
+                health: CollectionHealthItem::from(collection.health),
             })
             .collect::<Vec<_>>();
         let managed_collections = collections.len();
@@ -178,9 +185,8 @@ impl ApiReadSnapshot {
     /// Returns [`ApiApplicationError`] when the current system time cannot be read.
     pub fn release_dashboard(&self) -> Result<ReleaseDashboardResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
-        Ok(build_release_dashboard_response(
-            self.release_board.as_ref(),
-            now_unix_ms,
+        Ok(ReleaseDashboardResponse::from_dashboard(
+            build_release_dashboard(&self.release_board, now_unix_ms),
         ))
     }
 
@@ -349,101 +355,12 @@ impl ApiReadSnapshot {
 
     fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthItem {
         self.release_board
+            .collections
             .iter()
             .find(|collection| collection.collection_key.as_ref() == collection_key)
             .map_or_else(CollectionHealthItem::default, |collection| {
-                collection.health
+                CollectionHealthItem::from(collection.health)
             })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ReleaseBoardRow {
-    collection_key: Box<str>,
-    name: Box<str>,
-    members: usize,
-    source: Option<CollectionSourceSummaryItem>,
-    scan_schedule: Option<CollectionScanScheduleItem>,
-    health: CollectionHealthItem,
-}
-
-fn build_release_board(
-    inventory: &ComponentInventory,
-    read_model: &FindingReadModel,
-) -> Vec<ReleaseBoardRow> {
-    inventory
-        .collection_operations_summaries(0)
-        .into_iter()
-        .map(|collection| {
-            let health = inventory
-                .collection_scoped_artifacts(collection.collection_key.as_ref())
-                .map(|scope| {
-                    venom_domain::summarize_collection_health(
-                        inventory,
-                        read_model,
-                        collection.collection_key.as_ref(),
-                        &scope,
-                    )
-                })
-                .unwrap_or_default();
-
-            ReleaseBoardRow {
-                collection_key: collection.collection_key,
-                name: collection.name,
-                members: collection.members,
-                source: collection.source.map(CollectionSourceSummaryItem::from),
-                scan_schedule: collection
-                    .scan_schedule
-                    .map(CollectionScanScheduleItem::from),
-                health: CollectionHealthItem::from(health),
-            }
-        })
-        .collect()
-}
-
-fn build_release_dashboard_response(
-    collections: &[ReleaseBoardRow],
-    now_unix_ms: u64,
-) -> ReleaseDashboardResponse {
-    let dashboard_collections = collections
-        .iter()
-        .map(|collection| ReleaseDashboardCollectionItem {
-            collection_key: collection.collection_key.to_string(),
-            name: collection.name.to_string(),
-            members: collection.members,
-            due_now: collection
-                .scan_schedule
-                .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms),
-            scan_schedule: collection.scan_schedule,
-            health: collection.health,
-        })
-        .collect::<Vec<_>>();
-
-    let summary = dashboard_collections.iter().fold(
-        ReleaseDashboardSummaryItem {
-            managed_collections: dashboard_collections.len(),
-            ..ReleaseDashboardSummaryItem::default()
-        },
-        |mut summary, collection| {
-            if collection.scan_schedule.is_some() {
-                summary.scheduled_collections += 1;
-            }
-            if collection.due_now {
-                summary.due_now_collections += 1;
-            }
-            summary.total_active_findings += collection.health.total;
-            summary.open_findings += collection.health.open;
-            summary.risk_accepted_findings += collection.health.risk_accepted;
-            summary.suppressed_findings += collection.health.suppressed;
-            summary.critical_risk_findings += collection.health.critical_risk;
-            summary.high_risk_findings += collection.health.high_risk;
-            summary
-        },
-    );
-
-    ReleaseDashboardResponse {
-        summary,
-        collections: dashboard_collections,
     }
 }
 
@@ -2102,7 +2019,18 @@ pub struct ReleaseDashboardResponse {
     pub collections: Vec<ReleaseDashboardCollectionItem>,
 }
 
-impl ReleaseDashboardResponse {}
+impl ReleaseDashboardResponse {
+    fn from_dashboard(dashboard: ReleaseDashboard) -> Self {
+        Self {
+            summary: ReleaseDashboardSummaryItem::from(dashboard.summary),
+            collections: dashboard
+                .collections
+                .into_iter()
+                .map(ReleaseDashboardCollectionItem::from)
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct CollectionSummary {
