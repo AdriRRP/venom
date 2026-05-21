@@ -7,14 +7,15 @@ use std::time::SystemTime;
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     ActiveFindingsPage, ActiveFindingsQuery, ArtifactKind, ArtifactRef,
-    BulkGovernanceCohortSummary, CollectionGovernanceOverview, CollectionHealthSummary,
-    ContextualActiveFindingProjection, EvidenceFreshness, FindingChangeSet, FindingGovernanceState,
-    FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression, build_release_board, build_release_dashboard,
-    contextualize_active_findings, contextualize_collection_active_findings,
-    query_collection_governance_overview, summarize_collection_health,
+    BulkGovernanceCohortSummary, BulkGovernanceQuery, CollectionGovernanceOverview,
+    CollectionHealthSummary, ContextualActiveFindingProjection, EvidenceFreshness,
+    FindingChangeSet, FindingGovernanceState, FindingIngestion, FindingIngestionError,
+    FindingProvider, FindingProviderError, FindingProviderErrorKind, FindingRef, PackageCoordinate,
+    ProviderScanReport, ReleaseDashboard, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsPage, ScopedActiveFindingsQuery, Severity, Suppression,
+    build_release_board, build_release_dashboard, contextualize_active_findings,
+    contextualize_collection_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 use venom_domain::inventory::{
     AddCollectionComponentResult, AssignComponentTagResult, AssignTagContextProfileResult,
@@ -1236,8 +1237,7 @@ async fn venom_durably_accepts_risk_for_open_collection_findings(
     min_severity: String,
     reason: String,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
+    let query = BulkGovernanceQuery::new(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().accept_risk_for_collection(
         &collection_key,
@@ -1258,8 +1258,7 @@ async fn venom_durably_accepts_risk_for_open_tag_findings(
     min_severity: String,
     reason: String,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
+    let query = BulkGovernanceQuery::new(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().accept_risk_for_tag(
         &tag_key,
@@ -1281,8 +1280,7 @@ async fn venom_durably_accepts_risk_for_open_collection_findings_until(
     reason: String,
     until_unix_ms: usize,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
+    let query = BulkGovernanceQuery::new(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().accept_risk_for_collection(
         &collection_key,
@@ -1304,8 +1302,7 @@ async fn venom_durably_suppresses_open_collection_findings(
     min_severity: String,
     reason: String,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
+    let query = BulkGovernanceQuery::new(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().suppress_findings_for_collection(
         &collection_key,
@@ -1326,8 +1323,7 @@ async fn venom_durably_suppresses_open_tag_findings(
     min_severity: String,
     reason: String,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
+    let query = BulkGovernanceQuery::new(FindingGovernanceState::Open)
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().suppress_findings_for_tag(
         &tag_key,
@@ -1378,8 +1374,7 @@ async fn venom_durably_reopens_governed_collection_findings(
     governance_state: String,
     min_severity: String,
 ) {
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(parse_governance_state(&governance_state))
+    let query = BulkGovernanceQuery::new(parse_governance_state(&governance_state))
         .with_min_severity(parse_severity(&min_severity));
     match world
         .durable_state_mut()

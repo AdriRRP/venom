@@ -30,7 +30,7 @@ pub use finding_provider::{
     Severity,
 };
 pub use finding_read_model::{
-    ActiveFindingProjection, ActiveFindingsPage, ActiveFindingsQuery,
+    ActiveFindingProjection, ActiveFindingsPage, ActiveFindingsQuery, BulkGovernanceQuery,
     DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel, MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
     ScopedActiveFinding, ScopedActiveFindingsPage, ScopedActiveFindingsQuery,
 };

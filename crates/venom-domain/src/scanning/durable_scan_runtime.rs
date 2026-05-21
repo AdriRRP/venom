@@ -1,3 +1,4 @@
+use crate::durable_state::StoredProviderScanReport;
 use crate::findings::finding_provider_contract::validate_provider_scan_report;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
@@ -68,12 +69,52 @@ impl ScanCommandQueue {
         &mut self,
         request: ScanRequest,
     ) -> Result<EnqueueScanResult, ScanCommandQueueError> {
+        let command_id = self.enqueue_with_origin(request, None)?;
+        Ok(EnqueueScanResult { command_id })
+    }
+
+    /// Durably enqueue one collection-scheduled batch keyed by the due time that triggered it.
+    ///
+    /// If the same batch is already durable, returns the existing command ids
+    /// instead of duplicating work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanCommandQueueError`] when the queue cannot durably append
+    /// the missing command events.
+    pub fn enqueue_collection_batch(
+        &mut self,
+        collection_key: &str,
+        due_at_unix_ms: u64,
+        requests: Vec<ScanRequest>,
+    ) -> Result<Vec<Box<str>>, ScanCommandQueueError> {
+        if let Some(existing) = self.find_collection_batch(collection_key, due_at_unix_ms) {
+            return Ok(existing);
+        }
+
+        let origin = CollectionScheduleOrigin {
+            collection_key: collection_key.into(),
+            due_at_unix_ms,
+        };
+        let mut command_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            command_ids.push(self.enqueue_with_origin(request, Some(&origin))?);
+        }
+        Ok(command_ids)
+    }
+
+    fn enqueue_with_origin(
+        &mut self,
+        request: ScanRequest,
+        collection_schedule_origin: Option<&CollectionScheduleOrigin>,
+    ) -> Result<Box<str>, ScanCommandQueueError> {
         let command_id = next_command_id();
         let occurred_at_unix_ms = current_unix_millis()?;
         self.append_event(&DurableScanEvent::Enqueued {
             command_id: command_id.clone(),
             request: request.clone(),
             occurred_at_unix_ms,
+            collection_schedule_origin: collection_schedule_origin.cloned(),
         })?;
         self.order.push(command_id.clone());
         self.commands.insert(
@@ -81,13 +122,16 @@ impl ScanCommandQueue {
             ScanCommandRecord {
                 request,
                 status: ScanCommandStatus::Pending,
+                collection_schedule_origin: collection_schedule_origin.cloned(),
+                captured_report: None,
             },
         );
+        let collection_key = collection_schedule_origin.map(|origin| origin.collection_key.clone());
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-enqueued-live-{command_id}").into_boxed_str(),
             occurred_at_unix_ms,
             kind: SystemEventKind::ScanCommandEnqueued,
-            collection_key: None,
+            collection_key,
             component_key: self
                 .commands
                 .get(command_id.as_ref())
@@ -98,14 +142,14 @@ impl ScanCommandQueue {
             retryable: None,
             detail: None,
         });
-        Ok(EnqueueScanResult { command_id })
+        Ok(command_id)
     }
 
     #[must_use]
     pub fn pending_commands(&self) -> usize {
         self.commands
             .values()
-            .filter(|command| command.status == ScanCommandStatus::Pending)
+            .filter(|command| !command.status.is_terminal())
             .count()
     }
 
@@ -130,6 +174,28 @@ impl ScanCommandQueue {
     #[must_use]
     pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
         &self.system_events
+    }
+
+    fn find_collection_batch(
+        &self,
+        collection_key: &str,
+        due_at_unix_ms: u64,
+    ) -> Option<Vec<Box<str>>> {
+        let command_ids = self
+            .order
+            .iter()
+            .filter(|command_id| {
+                self.commands
+                    .get(command_id.as_ref())
+                    .and_then(|record| record.collection_schedule_origin.as_ref())
+                    .is_some_and(|origin| {
+                        origin.collection_key.as_ref() == collection_key
+                            && origin.due_at_unix_ms == due_at_unix_ms
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        (!command_ids.is_empty()).then_some(command_ids)
     }
 
     #[must_use]
@@ -233,8 +299,7 @@ impl ScanCommandQueue {
     pub fn next_pending_component_key(&self) -> Option<&str> {
         self.order.iter().find_map(|command_id| {
             self.commands.get(command_id.as_ref()).and_then(|record| {
-                (record.status == ScanCommandStatus::Pending)
-                    .then_some(record.request.component_key.as_ref())
+                (!record.status.is_terminal()).then_some(record.request.component_key.as_ref())
             })
         })
     }
@@ -255,29 +320,33 @@ impl ScanCommandQueue {
             .order
             .iter()
             .find(|command_id| {
-                self.command_status(command_id.as_ref()) == Some(ScanCommandStatus::Pending)
+                self.commands
+                    .get(command_id.as_ref())
+                    .is_some_and(|record| !record.status.is_terminal())
             })
             .cloned()
         else {
             return Ok(RunNextScanResult::Idle);
         };
 
-        let Some(request) = self
-            .commands
-            .get(command_id.as_ref())
-            .map(|record| record.request.clone())
-        else {
+        let Some(command) = self.commands.get(command_id.as_ref()).cloned() else {
             return Err(ScanCommandQueueError::CorruptHistory {
                 line: 0,
                 reason: "pending scan command missing from in-memory queue".into(),
             });
         };
 
-        let outcome = match provider.scan(&request).await {
+        if let Some(stored_report) = command.captured_report {
+            return self.resume_captured_report(&command_id, &stored_report, state);
+        }
+
+        let outcome = match provider.scan(&command.request).await {
             Ok(report) => {
-                if let Err(violation) =
-                    validate_provider_scan_report(provider.provider_key(), &request, &report)
-                {
+                if let Err(violation) = validate_provider_scan_report(
+                    provider.provider_key(),
+                    &command.request,
+                    &report,
+                ) {
                     RunNextScanResult::Failed(FailedScanCommand {
                         command_id: command_id.clone(),
                         error_code: "provider-error".into(),
@@ -285,24 +354,13 @@ impl ScanCommandQueue {
                         detail: violation.message().to_owned().into_boxed_str(),
                     })
                 } else {
-                    match state.record_scan_report(&report) {
-                        Ok(change_set) => RunNextScanResult::Completed(CompletedScanCommand {
-                            command_id: command_id.clone(),
-                            provider_key: report.provider_key.clone(),
-                            findings_reported: report.findings.len(),
-                            change_set,
-                        }),
-                        Err(DurableStateError::Ingestion(error)) => {
-                            RunNextScanResult::Failed(FailedScanCommand {
-                                command_id: command_id.clone(),
-                                error_code: error.as_str().into(),
-                                retryable: false,
-                                detail: "provider report cannot be applied to managed ownership"
-                                    .into(),
-                            })
-                        }
-                        Err(error) => return Err(ScanCommandQueueError::State(error)),
-                    }
+                    self.capture_report(&command_id, &report)?;
+                    return self.resume_captured_report(
+                        &command_id,
+                        &StoredProviderScanReport::from_report(&report)
+                            .map_err(ScanCommandQueueError::State)?,
+                        state,
+                    );
                 }
             }
             Err(error) => RunNextScanResult::Failed(FailedScanCommand {
@@ -315,6 +373,61 @@ impl ScanCommandQueue {
 
         self.record_outcome(&outcome)?;
         Ok(outcome)
+    }
+
+    fn resume_captured_report(
+        &mut self,
+        command_id: &str,
+        stored_report: &StoredProviderScanReport,
+        state: &mut DurableState,
+    ) -> Result<RunNextScanResult, ScanCommandQueueError> {
+        let report = stored_report
+            .clone()
+            .into_domain()
+            .map_err(ScanCommandQueueError::State)?;
+        let outcome = match state.record_scan_report_for_command(command_id, &report) {
+            Ok(change_set) => RunNextScanResult::Completed(CompletedScanCommand {
+                command_id: command_id.into(),
+                provider_key: report.provider_key.clone(),
+                findings_reported: report.findings.len(),
+                change_set,
+            }),
+            Err(DurableStateError::Ingestion(error)) => {
+                RunNextScanResult::Failed(FailedScanCommand {
+                    command_id: command_id.into(),
+                    error_code: error.as_str().into(),
+                    retryable: false,
+                    detail: "provider report cannot be applied to managed ownership".into(),
+                })
+            }
+            Err(error) => return Err(ScanCommandQueueError::State(error)),
+        };
+        self.record_outcome(&outcome)?;
+        Ok(outcome)
+    }
+
+    fn capture_report(
+        &mut self,
+        command_id: &str,
+        report: &crate::ProviderScanReport,
+    ) -> Result<(), ScanCommandQueueError> {
+        let occurred_at_unix_ms = current_unix_millis()?;
+        let stored_report =
+            StoredProviderScanReport::from_report(report).map_err(ScanCommandQueueError::State)?;
+        self.append_event(&DurableScanEvent::ReportCaptured {
+            command_id: command_id.into(),
+            report: stored_report.clone(),
+            occurred_at_unix_ms,
+        })?;
+        let Some(command) = self.commands.get_mut(command_id) else {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line: 0,
+                reason: "captured scan command missing from in-memory queue".into(),
+            });
+        };
+        command.status = ScanCommandStatus::Applying;
+        command.captured_report = Some(stored_report);
+        Ok(())
     }
 
     fn record_outcome(&mut self, outcome: &RunNextScanResult) -> Result<(), ScanCommandQueueError> {
@@ -362,6 +475,7 @@ impl ScanCommandQueue {
         };
         let component_key = command.request.component_key.clone();
         command.status = ScanCommandStatus::Completed;
+        command.captured_report = None;
         self.pending_integration_events
             .push_back(pending_integration_event);
         self.push_system_event(SystemEvent {
@@ -415,6 +529,7 @@ impl ScanCommandQueue {
             });
         };
         command.status = ScanCommandStatus::Failed;
+        command.captured_report = None;
         self.push_system_event(SystemEvent {
             event_id: format!(
                 "scan-command-failed-live-{}-{occurred_at_unix_ms}",
@@ -469,7 +584,14 @@ impl ScanCommandQueue {
                 command_id,
                 request,
                 occurred_at_unix_ms,
-            } => self.apply_enqueued_event(command_id, request, occurred_at_unix_ms, line),
+                collection_schedule_origin,
+            } => self.apply_enqueued_event(
+                command_id,
+                request,
+                occurred_at_unix_ms,
+                collection_schedule_origin,
+                line,
+            ),
             DurableScanEvent::Completed {
                 command_id,
                 findings_reported,
@@ -483,6 +605,16 @@ impl ScanCommandQueue {
                 &change_set,
                 occurred_at_unix_ms,
                 *pending_integration_event,
+                line,
+            ),
+            DurableScanEvent::ReportCaptured {
+                command_id,
+                report,
+                occurred_at_unix_ms,
+            } => self.apply_report_captured_event(
+                command_id.as_ref(),
+                report,
+                occurred_at_unix_ms,
                 line,
             ),
             DurableScanEvent::IntegrationEventPublished {
@@ -517,11 +649,36 @@ impl ScanCommandQueue {
         }
     }
 
+    fn apply_report_captured_event(
+        &mut self,
+        command_id: &str,
+        report: StoredProviderScanReport,
+        _occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        let Some(record) = self.commands.get_mut(command_id) else {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line,
+                reason: "captured report without prior enqueue".into(),
+            });
+        };
+        if record.status != ScanCommandStatus::Pending {
+            return Err(ScanCommandQueueError::CorruptHistory {
+                line,
+                reason: "captured report for non-pending scan command".into(),
+            });
+        }
+        record.status = ScanCommandStatus::Applying;
+        record.captured_report = Some(report);
+        Ok(())
+    }
+
     fn apply_enqueued_event(
         &mut self,
         command_id: Box<str>,
         request: ScanRequest,
         occurred_at_unix_ms: u64,
+        collection_schedule_origin: Option<CollectionScheduleOrigin>,
         line: usize,
     ) -> Result<(), ScanCommandQueueError> {
         if self.commands.contains_key(command_id.as_ref()) {
@@ -536,17 +693,20 @@ impl ScanCommandQueue {
             ScanCommandRecord {
                 request,
                 status: ScanCommandStatus::Pending,
+                collection_schedule_origin: collection_schedule_origin.clone(),
+                captured_report: None,
             },
         );
         let component_key = self
             .commands
             .get(command_id.as_ref())
             .map(|record| record.request.component_key.clone());
+        let collection_key = collection_schedule_origin.map(|origin| origin.collection_key);
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-enqueued-{line}").into_boxed_str(),
             occurred_at_unix_ms,
             kind: SystemEventKind::ScanCommandEnqueued,
-            collection_key: None,
+            collection_key,
             component_key,
             command_id: Some(command_id),
             integration_event_id: None,
@@ -575,6 +735,9 @@ impl ScanCommandQueue {
                 .push_back(pending_integration_event);
         }
         self.mark_terminal(line, &command_id, ScanCommandStatus::Completed)?;
+        if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
+            record.captured_report = None;
+        }
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-completed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -650,6 +813,9 @@ impl ScanCommandQueue {
             .get(command_id.as_ref())
             .map(|record| record.request.component_key.clone());
         self.mark_terminal(line, &command_id, ScanCommandStatus::Failed)?;
+        if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
+            record.captured_report = None;
+        }
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-failed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -696,7 +862,10 @@ impl ScanCommandQueue {
                 reason: "terminal event without prior enqueue".into(),
             });
         };
-        if record.status != ScanCommandStatus::Pending {
+        if !matches!(
+            record.status,
+            ScanCommandStatus::Pending | ScanCommandStatus::Applying
+        ) {
             return Err(ScanCommandQueueError::CorruptHistory {
                 line,
                 reason: "duplicate terminal state for scan command".into(),
@@ -743,6 +912,7 @@ fn current_unix_millis() -> Result<u64, ScanCommandQueueError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanCommandStatus {
     Pending,
+    Applying,
     Completed,
     Failed,
 }
@@ -752,9 +922,15 @@ impl ScanCommandStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Applying => "applying",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }
+    }
+
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
     }
 }
 
@@ -762,6 +938,14 @@ impl ScanCommandStatus {
 struct ScanCommandRecord {
     request: ScanRequest,
     status: ScanCommandStatus,
+    collection_schedule_origin: Option<CollectionScheduleOrigin>,
+    captured_report: Option<StoredProviderScanReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionScheduleOrigin {
+    collection_key: Box<str>,
+    due_at_unix_ms: u64,
 }
 
 /// Observable result of enqueuing one durable scan command.
@@ -838,6 +1022,14 @@ enum DurableScanEvent {
     Enqueued {
         command_id: Box<str>,
         request: ScanRequest,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+        #[serde(default)]
+        collection_schedule_origin: Option<CollectionScheduleOrigin>,
+    },
+    ReportCaptured {
+        command_id: Box<str>,
+        report: StoredProviderScanReport,
         #[serde(default)]
         occurred_at_unix_ms: u64,
     },
@@ -962,6 +1154,22 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PanicProvider;
+
+    impl FindingProvider for PanicProvider {
+        fn provider_key(&self) -> &'static str {
+            "fixture-provider"
+        }
+
+        async fn scan<'a>(
+            &'a self,
+            _request: &'a ScanRequest,
+        ) -> Result<ProviderScanReport, FindingProviderError> {
+            panic!("applying commands must not rescan the provider")
+        }
+    }
+
     fn durable_inventory() -> (DurableState, crate::ScanRequest) {
         let path = temp_path("durable-runtime-state");
         let mut state = DurableState::open(&path).expect("durable state should open");
@@ -1011,6 +1219,23 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             1
         );
+    }
+
+    #[test]
+    fn collection_batch_enqueue_is_idempotent_for_the_same_due_origin() {
+        let queue_path = temp_path("durable-runtime-collection-batch");
+        let (_state, request) = durable_inventory();
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
+
+        let first = runtime
+            .enqueue_collection_batch("release:2026.05", 1_000, vec![request.clone()])
+            .expect("first batch should persist");
+        let second = runtime
+            .enqueue_collection_batch("release:2026.05", 1_000, vec![request])
+            .expect("second batch should reuse the durable batch");
+
+        assert_eq!(first, second);
+        assert_eq!(runtime.pending_commands(), 1);
     }
 
     #[tokio::test]
@@ -1071,6 +1296,73 @@ mod tests {
             Some(ScanCommandStatus::Completed)
         );
         assert_eq!(rebuilt.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn applying_scan_command_resumes_without_rescanning_provider() {
+        let state_path = temp_path("durable-runtime-apply-state");
+        let queue_path = temp_path("durable-runtime-apply-queue");
+        let mut state = DurableState::open(&state_path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact should persist");
+        let request = ScanPlanner::new(state.ingestion().inventory())
+            .plan(
+                "component:payments-api",
+                artifact(),
+                EvidenceFreshness::Deterministic,
+            )
+            .expect("planner should create request");
+        let provider = FakeProvider::success(vec![ReportedFinding::new(
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        )]);
+        let report = provider
+            .scan(&request)
+            .await
+            .expect("fixture provider should create one report");
+
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
+        let enqueue = runtime.enqueue(request).expect("enqueue should persist");
+        runtime
+            .capture_report(enqueue.command_id.as_ref(), &report)
+            .expect("captured report should persist");
+        let _ = state
+            .record_scan_report_for_command(enqueue.command_id.as_ref(), &report)
+            .expect("state application should persist");
+
+        let mut rebuilt_runtime =
+            ScanCommandQueue::open(&queue_path).expect("runtime should replay applying state");
+        let mut rebuilt_state =
+            DurableState::open(&state_path).expect("durable state should replay applied report");
+
+        assert_eq!(
+            rebuilt_runtime.command_status(enqueue.command_id.as_ref()),
+            Some(ScanCommandStatus::Applying)
+        );
+
+        let result = rebuilt_runtime
+            .run_next(&mut rebuilt_state, &PanicProvider)
+            .await
+            .expect("runtime should finalize the applying command");
+
+        assert!(matches!(result, RunNextScanResult::Completed(_)));
+        assert_eq!(
+            rebuilt_runtime.command_status(enqueue.command_id.as_ref()),
+            Some(ScanCommandStatus::Completed)
+        );
+        assert_eq!(
+            rebuilt_state
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
     }
 
     #[derive(Debug)]

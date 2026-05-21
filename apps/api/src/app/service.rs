@@ -7,14 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
-    BulkReopenFindingResult, BulkSuppressFindingResult, CollectionHealthSummary,
-    ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReleaseBoard, ReleaseDashboard, ReopenFindingResult,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingResult, Suppression, build_release_board, build_release_dashboard,
-    contextualize_active_findings, contextualize_collection_active_findings,
-    query_collection_governance_overview,
+    BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult,
+    CollectionHealthSummary, ContextualActiveFindingProjection, EvidenceFreshness,
+    FindingGovernanceState, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseBoard,
+    ReleaseDashboard, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression, build_release_board,
+    build_release_dashboard, contextualize_active_findings,
+    contextualize_collection_active_findings, query_collection_governance_overview,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -1577,34 +1577,33 @@ impl ApiApplication {
                 let due_scans = CollectionScanScheduler::new(&mut inventory)
                     .collect_due(now_unix_ms, max_collections);
 
-                for due_scan in &due_scans {
+                let processed_collections = due_scans.len();
+                let mut enqueued_commands = 0_usize;
+                let mut last_collection_key = None;
+                for due_scan in due_scans {
+                    let command_ids = local
+                        .runtime
+                        .enqueue_collection_batch(
+                            due_scan.collection_key.as_ref(),
+                            due_scan.due_at_unix_ms,
+                            due_scan.requests,
+                        )
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                    enqueued_commands += command_ids.len();
+                    last_collection_key = Some(due_scan.collection_key.to_string());
                     local
                         .state
                         .record_collection_scan_materialization(
                             due_scan.collection_key.as_ref(),
                             due_scan.next_due_at_unix_ms,
                             now_unix_ms,
-                            u32::try_from(due_scan.requests.len()).map_err(|_| {
+                            u32::try_from(command_ids.len()).map_err(|_| {
                                 ApiApplicationError::State(
                                     "collection scheduler command count overflow".to_owned(),
                                 )
                             })?,
                         )
                         .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                }
-
-                let processed_collections = due_scans.len();
-                let mut enqueued_commands = 0_usize;
-                let mut last_collection_key = None;
-                for due_scan in due_scans {
-                    enqueued_commands += due_scan.requests.len();
-                    last_collection_key = Some(due_scan.collection_key.to_string());
-                    for scan_request in due_scan.requests {
-                        let _ = local
-                            .runtime
-                            .enqueue(scan_request)
-                            .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                    }
                 }
 
                 let pending_due_remaining =
@@ -3144,11 +3143,8 @@ fn build_scoped_active_findings_query(
 fn build_bulk_collection_governance_query(
     min_severity: Option<&str>,
     package_name: Option<&str>,
-) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
-    let mut query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
-        .with_offset(0)
-        .with_limit(200);
+) -> Result<BulkGovernanceQuery, ApiApplicationError> {
+    let mut query = BulkGovernanceQuery::new(FindingGovernanceState::Open);
     if let Some(min_severity) = min_severity {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
@@ -3162,7 +3158,7 @@ fn build_bulk_collection_reopen_query(
     governance_state: Option<&str>,
     min_severity: Option<&str>,
     package_name: Option<&str>,
-) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
+) -> Result<BulkGovernanceQuery, ApiApplicationError> {
     let governance_state = governance_state.ok_or_else(|| {
         ApiApplicationError::InvalidRequest(
             "bulk reopen requires a governed state filter".to_owned(),
@@ -3175,10 +3171,7 @@ fn build_bulk_collection_reopen_query(
         ));
     }
 
-    let mut query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(governance_state)
-        .with_offset(0)
-        .with_limit(200);
+    let mut query = BulkGovernanceQuery::new(governance_state);
     if let Some(min_severity) = min_severity {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }

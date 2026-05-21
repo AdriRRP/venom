@@ -5,6 +5,8 @@ use crate::{ComponentInventory, ScanPlanner, ScanRequest};
 pub struct DueCollectionScan {
     /// Stable collection identity that was due.
     pub collection_key: Box<str>,
+    /// Due time that triggered this scheduler materialization.
+    pub due_at_unix_ms: u64,
     /// Canonical scan requests materialized for this collection.
     pub requests: Vec<ScanRequest>,
     /// Next due time after this scheduler pass, in unix milliseconds.
@@ -49,6 +51,7 @@ impl<'a> CollectionScanScheduler<'a> {
             else {
                 continue;
             };
+            let due_at_unix_ms = schedule.next_due_at_unix_ms;
             let Ok(batch) = ScanPlanner::new(self.inventory)
                 .plan_collection(collection_key.as_ref(), schedule.freshness)
             else {
@@ -64,6 +67,7 @@ impl<'a> CollectionScanScheduler<'a> {
             );
             due_scans.push(DueCollectionScan {
                 collection_key,
+                due_at_unix_ms,
                 requests: batch.requests,
                 next_due_at_unix_ms,
             });

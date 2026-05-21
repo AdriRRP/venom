@@ -3,14 +3,14 @@ use crate::{
     ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
     AssignComponentTagChange, AssignComponentTagResult, AssignContextProfileChange,
     AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
-    BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult,
-    BulkSuppressFindingResult, CollectionRegistration, CollectionSource, CollectionSourceMode,
-    ComponentRegistration, ComponentTagRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
-    ConfigureCollectionSourceResult, ConfigureIntegrationRuntimeChange,
-    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
-    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
-    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkGovernanceQuery,
+    BulkReopenFindingResult, BulkSuppressFindingResult, CollectionRegistration, CollectionSource,
+    CollectionSourceMode, ComponentRegistration, ComponentTagRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
+    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
     MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
@@ -18,12 +18,12 @@ use crate::{
     RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
     RemoveCollectionComponentResult, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
-    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
-    SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
-    SystemEventsQuery, findings::finding_read_model::canonicalize_reported_findings,
+    RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ pub struct DurableState {
     governance: FindingGovernance,
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
+    applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
     system_events: VecDeque<SystemEvent>,
 }
@@ -73,6 +74,7 @@ impl DurableState {
             governance: FindingGovernance::default(),
             read_model: FindingReadModel::default(),
             integration_runtime_config: None,
+            applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
             system_events: VecDeque::new(),
         };
@@ -627,6 +629,33 @@ impl DurableState {
         &mut self,
         report: &ProviderScanReport,
     ) -> Result<FindingChangeSet, DurableStateError> {
+        self.record_scan_report_internal(None, report)
+    }
+
+    /// Durably record one scan report for one canonical scan command.
+    ///
+    /// Repeated calls with the same `command_id` reuse the already durable
+    /// change set instead of mutating findings again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn record_scan_report_for_command(
+        &mut self,
+        command_id: &str,
+        report: &ProviderScanReport,
+    ) -> Result<FindingChangeSet, DurableStateError> {
+        if let Some(change_set) = self.applied_scan_commands.get(command_id) {
+            return Ok(change_set.clone());
+        }
+        self.record_scan_report_internal(Some(command_id), report)
+    }
+
+    fn record_scan_report_internal(
+        &mut self,
+        command_id: Option<&str>,
+        report: &ProviderScanReport,
+    ) -> Result<FindingChangeSet, DurableStateError> {
         let mut candidate_ingestion = self.ingestion.clone();
         let mut candidate_read_model = self.read_model.clone();
         let change_set = candidate_ingestion
@@ -642,11 +671,17 @@ impl DurableState {
             change_set.clone(),
         );
         self.append_event(&DurableEvent::ProviderScanRecorded {
+            command_id: command_id.map(Into::into),
             report: StoredProviderScanReport::from_report(report)?,
+            change_set: Some(change_set.clone()),
             pending_integration_event: Box::new(Some(pending_integration_event.clone())),
         })?;
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        if let Some(command_id) = command_id {
+            self.applied_scan_commands
+                .insert(command_id.into(), change_set.clone());
+        }
         self.pending_integration_events
             .push_back(pending_integration_event);
         Ok(change_set)
@@ -712,7 +747,7 @@ impl DurableState {
     pub fn accept_risk_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, DurableStateError> {
         let scope = self
@@ -726,7 +761,7 @@ impl DurableState {
             })?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -787,7 +822,7 @@ impl DurableState {
     pub fn accept_risk_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, DurableStateError> {
         let scope = self
@@ -797,7 +832,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -957,7 +992,7 @@ impl DurableState {
     pub fn suppress_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, DurableStateError> {
         let scope = self
@@ -967,7 +1002,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1028,7 +1063,7 @@ impl DurableState {
     pub fn suppress_findings_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, DurableStateError> {
         let scope = self
@@ -1038,7 +1073,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1099,7 +1134,7 @@ impl DurableState {
     pub fn reopen_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, DurableStateError> {
         let scope = self
             .ingestion
@@ -1108,7 +1143,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1164,6 +1199,7 @@ impl DurableState {
         self.governance = FindingGovernance::default();
         self.read_model = FindingReadModel::default();
         self.integration_runtime_config = None;
+        self.applied_scan_commands.clear();
         self.pending_integration_events.clear();
         self.system_events.clear();
 
@@ -1209,9 +1245,17 @@ impl DurableState {
                 Ok(())
             }
             DurableEvent::ProviderScanRecorded {
+                command_id,
                 report,
+                change_set,
                 pending_integration_event,
-            } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
+            } => self.apply_provider_scan_recorded(
+                command_id,
+                report,
+                change_set,
+                *pending_integration_event,
+                line,
+            ),
             DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::FindingsRiskAccepted { .. }
             | DurableEvent::TagFindingsRiskAccepted { .. }
@@ -2087,7 +2131,9 @@ impl DurableState {
 
     fn apply_provider_scan_recorded(
         &mut self,
+        command_id: Option<Box<str>>,
         report: StoredProviderScanReport,
+        change_set: Option<FindingChangeSet>,
         pending_integration_event: Option<PendingIntegrationEvent>,
         line: usize,
     ) -> Result<(), DurableStateError> {
@@ -2111,6 +2157,9 @@ impl DurableState {
         if let Some(pending_integration_event) = pending_integration_event {
             self.pending_integration_events
                 .push_back(pending_integration_event);
+        }
+        if let (Some(command_id), Some(change_set)) = (command_id, change_set) {
+            self.applied_scan_commands.insert(command_id, change_set);
         }
         Ok(())
     }
@@ -2307,7 +2356,11 @@ enum DurableEvent {
         config: IntegrationRuntimeConfig,
     },
     ProviderScanRecorded {
+        #[serde(default)]
+        command_id: Option<Box<str>>,
         report: StoredProviderScanReport,
+        #[serde(default)]
+        change_set: Option<FindingChangeSet>,
         #[serde(default)]
         pending_integration_event: Box<Option<PendingIntegrationEvent>>,
     },
@@ -2546,7 +2599,7 @@ impl StoredCollectionSourceMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredProviderScanReport {
+pub(crate) struct StoredProviderScanReport {
     provider_key: Box<str>,
     component_key: Box<str>,
     artifact: ArtifactRef,
@@ -2557,7 +2610,7 @@ struct StoredProviderScanReport {
 }
 
 impl StoredProviderScanReport {
-    fn from_report(report: &ProviderScanReport) -> Result<Self, DurableStateError> {
+    pub(crate) fn from_report(report: &ProviderScanReport) -> Result<Self, DurableStateError> {
         Ok(Self {
             provider_key: report.provider_key.clone(),
             component_key: report.component_key.clone(),
@@ -2574,7 +2627,7 @@ impl StoredProviderScanReport {
         })
     }
 
-    fn into_domain(self) -> Result<ProviderScanReport, DurableStateError> {
+    pub(crate) fn into_domain(self) -> Result<ProviderScanReport, DurableStateError> {
         let observed_at = self.observed_at.into_system_time()?;
         let mut report = ProviderScanReport::new(
             self.provider_key,
@@ -2721,10 +2774,11 @@ impl StoredPackageCoordinate {
 mod tests {
     use super::DurableState;
     use crate::{
-        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
-        ConfigureProviderChange, EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
-        PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
+        ArtifactKind, ArtifactRef, BulkGovernanceQuery, CollectionRegistration,
+        ComponentRegistration, ConfigureProviderChange, EvidenceFreshness, FindingGovernanceState,
+        IntegrationEvent, IntegrationEventPublishError, IntegrationEventPublisher,
+        IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+        ReportedFinding, RiskAcceptance,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -3100,6 +3154,115 @@ mod tests {
             rebuilt.pending_integration_events()[0].event,
             IntegrationEvent::FindingChangesObserved { .. }
         ));
+    }
+
+    #[test]
+    fn command_scoped_scan_report_recording_is_idempotent() {
+        let path = temp_path("durable-state-command-idempotence");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+
+        let first = state
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("first scan report should persist");
+        let second = state
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("second scan report should reuse the durable change set");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            state
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+
+        let mut rebuilt = DurableState::open(&path).expect("durable state should replay");
+        let replayed = rebuilt
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("replayed state should keep command-scoped idempotence");
+
+        assert_eq!(replayed, first);
+        assert_eq!(
+            rebuilt
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+    }
+
+    #[test]
+    fn bulk_collection_risk_acceptance_targets_the_full_matching_cohort() {
+        let path = temp_path("durable-state-bulk-cohort");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .expect("collection should persist");
+        let _ = state
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .expect("collection membership should persist");
+        let findings = (0..205)
+            .map(|index| {
+                ReportedFinding::new(
+                    format!("CVE-2026-{index:04}"),
+                    PackageCoordinate::new(format!("pkg-{index:04}"), "1.0.0"),
+                )
+                .with_severity(crate::Severity::High)
+            })
+            .collect::<Vec<_>>();
+        let _ = state
+            .record_scan_report(&report(findings))
+            .expect("scan report should persist");
+
+        let result = state
+            .accept_risk_for_collection(
+                "release:2026.05",
+                &BulkGovernanceQuery::new(FindingGovernanceState::Open),
+                RiskAcceptance::new("Accepted whole release"),
+            )
+            .expect("bulk risk acceptance should persist");
+
+        assert_eq!(result.targeted, 205);
+        assert_eq!(result.accepted, 205);
+        assert_eq!(result.unchanged, 0);
     }
 
     #[derive(Debug)]

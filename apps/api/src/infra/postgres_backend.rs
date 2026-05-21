@@ -7,11 +7,11 @@ use venom_domain::findings::finding_provider_contract::{
 };
 use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
-    BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness, FindingChangeSet,
-    FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
+    BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
+    FindingChangeSet, FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport,
     ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsQuery, SuppressFindingChange, SuppressFindingResult, Suppression,
+    SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -752,7 +752,7 @@ impl PostgresStore {
     pub async fn accept_risk_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
         let scope = self
@@ -762,7 +762,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -857,7 +857,7 @@ impl PostgresStore {
     pub async fn accept_risk_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
         let scope = self
@@ -867,7 +867,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1071,7 +1071,7 @@ impl PostgresStore {
     pub async fn suppress_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
         let scope = self
@@ -1081,7 +1081,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1168,7 +1168,7 @@ impl PostgresStore {
     pub async fn suppress_findings_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
         let scope = self
@@ -1178,7 +1178,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1267,7 +1267,7 @@ impl PostgresStore {
     pub async fn reopen_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, String> {
         let scope = self
             .ingestion
@@ -1276,7 +1276,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -3691,6 +3691,7 @@ fn parse_integration_runtime_config_row(
 const fn scan_command_status_name(value: ScanCommandStatus) -> &'static str {
     match value {
         ScanCommandStatus::Pending => "pending",
+        ScanCommandStatus::Applying => "applying",
         ScanCommandStatus::Completed => "completed",
         ScanCommandStatus::Failed => "failed",
     }
@@ -3699,6 +3700,7 @@ const fn scan_command_status_name(value: ScanCommandStatus) -> &'static str {
 fn parse_scan_command_status(value: &str) -> Result<ScanCommandStatus, String> {
     match value {
         "pending" => Ok(ScanCommandStatus::Pending),
+        "applying" => Ok(ScanCommandStatus::Applying),
         "completed" => Ok(ScanCommandStatus::Completed),
         "failed" => Ok(ScanCommandStatus::Failed),
         other => Err(format!("unsupported scan command status: {other}")),
@@ -3761,11 +3763,12 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
-        ArtifactKind, ArtifactRef, CollectionRegistration, CollectionSource, CollectionSourceMode,
-        ComponentListCollectionSource, ComponentRegistration, EvidenceFreshness, FindingProvider,
-        FindingProviderError, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
-        ReportedFinding, RunNextScanResult, ScanCommandStatus,
+        ArtifactKind, ArtifactRef, BulkGovernanceQuery, CollectionRegistration, CollectionSource,
+        CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
+        EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
+        IntegrationEvent, IntegrationEventPublishError, IntegrationEventPublisher,
+        PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
+        RiskAcceptance, RunNextScanResult, ScanCommandStatus,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -4228,5 +4231,71 @@ mod tests {
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_bulk_collection_risk_acceptance_targets_the_full_matching_cohort() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("bulk_cohort");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+        let findings = (0..205)
+            .map(|index| {
+                ReportedFinding::new(
+                    format!("CVE-2026-{index:04}"),
+                    PackageCoordinate::new(format!("pkg-{index:04}"), "1.0.0"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            findings,
+        );
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let result = backend
+            .accept_risk_for_collection(
+                "release:2026.05",
+                &BulkGovernanceQuery::new(FindingGovernanceState::Open),
+                RiskAcceptance::new("Accepted whole release"),
+            )
+            .await
+            .expect("bulk risk acceptance should persist");
+
+        assert_eq!(result.targeted, 205);
+        assert_eq!(result.accepted, 205);
+        assert_eq!(result.unchanged, 0);
     }
 }

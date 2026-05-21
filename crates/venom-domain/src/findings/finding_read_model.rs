@@ -136,6 +136,36 @@ impl ScopedActiveFindingsQuery {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkGovernanceQuery {
+    pub governance_state: FindingGovernanceState,
+    pub min_severity: Option<Severity>,
+    pub package_name: Option<Box<str>>,
+}
+
+impl BulkGovernanceQuery {
+    #[must_use]
+    pub const fn new(governance_state: FindingGovernanceState) -> Self {
+        Self {
+            governance_state,
+            min_severity: None,
+            package_name: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_min_severity(mut self, min_severity: Severity) -> Self {
+        self.min_severity = Some(min_severity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_package_name(mut self, package_name: impl Into<Box<str>>) -> Self {
+        self.package_name = Some(package_name.into());
+        self
+    }
+}
+
 impl Default for ScopedActiveFindingsQuery {
     fn default() -> Self {
         Self::new()
@@ -346,6 +376,51 @@ impl FindingReadModel {
         scope: &[CollectionScopedArtifact],
         query: &ScopedActiveFindingsQuery,
     ) -> Vec<ScopedActiveFinding> {
+        self.collect_filtered_scoped_active_findings(scope, |scope_item, finding| {
+            query
+                .min_severity
+                .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+                && query.governance_state.is_none_or(|governance_state| {
+                    self.finding_governance_state(
+                        scope_item.component_key.as_ref(),
+                        &scope_item.artifact,
+                        finding,
+                    ) == governance_state
+                })
+                && query
+                    .package_name
+                    .as_deref()
+                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
+        })
+    }
+
+    #[must_use]
+    pub fn collect_bulk_governance_cohort(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        query: &BulkGovernanceQuery,
+    ) -> Vec<ScopedActiveFinding> {
+        self.collect_filtered_scoped_active_findings(scope, |scope_item, finding| {
+            self.finding_governance_state(
+                scope_item.component_key.as_ref(),
+                &scope_item.artifact,
+                finding,
+            ) == query.governance_state
+                && query
+                    .min_severity
+                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+                && query
+                    .package_name
+                    .as_deref()
+                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
+        })
+    }
+
+    fn collect_filtered_scoped_active_findings(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        mut predicate: impl FnMut(&CollectionScopedArtifact, &ActiveFindingRecord) -> bool,
+    ) -> Vec<ScopedActiveFinding> {
         let mut filtered = scope
             .iter()
             .flat_map(|scope_item| {
@@ -358,26 +433,7 @@ impl FindingReadModel {
                     .flatten()
                     .map(move |finding| (scope_item, finding))
             })
-            .filter(|(_, finding)| {
-                query
-                    .min_severity
-                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
-            })
-            .filter(|(scope_item, finding)| {
-                query.governance_state.is_none_or(|governance_state| {
-                    self.finding_governance_state(
-                        scope_item.component_key.as_ref(),
-                        &scope_item.artifact,
-                        finding,
-                    ) == governance_state
-                })
-            })
-            .filter(|(_, finding)| {
-                query
-                    .package_name
-                    .as_deref()
-                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
-            })
+            .filter(|(scope_item, finding)| predicate(scope_item, finding))
             .collect::<Vec<_>>();
         filtered.sort_unstable_by_key(|(scope_item, finding)| {
             (
@@ -594,8 +650,8 @@ struct FindingDedupKey<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveFindingsQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT, FindingReadModel,
-        MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFindingsQuery,
+        ActiveFindingsQuery, BulkGovernanceQuery, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+        FindingReadModel, MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFindingsQuery,
     };
     use crate::{
         ArtifactKind, ArtifactRef, CollectionScopedArtifact, EvidenceFreshness, FindingRef,
@@ -774,6 +830,34 @@ mod tests {
             page.findings[1].finding.vulnerability_id.as_ref(),
             "CVE-2026-0003"
         );
+    }
+
+    #[test]
+    fn bulk_governance_cohort_is_not_capped_by_page_limit() {
+        let mut read_model = FindingReadModel::new();
+        let findings = (0..205)
+            .map(|index| {
+                ReportedFinding::new(
+                    format!("CVE-2026-{index:04}"),
+                    PackageCoordinate::new(format!("pkg-{index:04}"), "1.0.0"),
+                )
+                .with_severity(Severity::High)
+            })
+            .collect::<Vec<_>>();
+        read_model.record_scan_report(&report(findings));
+
+        let scope = vec![CollectionScopedArtifact {
+            component_key: "component:payments-api".into(),
+            artifact: artifact(),
+        }];
+
+        let cohort = read_model.collect_bulk_governance_cohort(
+            &scope,
+            &BulkGovernanceQuery::new(crate::FindingGovernanceState::Open)
+                .with_min_severity(Severity::Unknown),
+        );
+
+        assert_eq!(cohort.len(), 205);
     }
 
     #[test]
