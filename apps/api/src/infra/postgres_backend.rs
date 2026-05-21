@@ -1,5 +1,6 @@
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
@@ -1216,18 +1217,30 @@ impl PostgresStore {
     }
 
     #[must_use]
-    pub fn read_model_snapshot(&self) -> FindingReadModel {
-        self.read_model.clone()
+    pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
+        Arc::new(self.read_model.clone())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn inventory_snapshot(&self) -> ComponentInventory {
         self.ingestion.inventory().clone()
     }
 
     #[must_use]
+    pub fn inventory_snapshot_arc(&self) -> Arc<ComponentInventory> {
+        Arc::new(self.ingestion.inventory().clone())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[must_use]
     pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
         self.system_events.iter().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
+        Arc::new(self.system_events.iter().cloned().collect())
     }
 
     #[must_use]
@@ -1572,12 +1585,18 @@ impl PostgresStore {
         self.commands.get(command_id).map(|record| record.status)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
         self.commands
             .iter()
             .map(|(command_id, record)| (command_id.clone(), record.status))
             .collect()
+    }
+
+    #[must_use]
+    pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
+        Arc::new(self.command_statuses_snapshot())
     }
 
     #[must_use]

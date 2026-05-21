@@ -65,26 +65,26 @@ pub struct ApiReadSnapshot {
 impl ApiReadSnapshot {
     #[must_use]
     pub fn new(
-        inventory: ComponentInventory,
-        read_model: FindingReadModel,
-        system_events: Vec<SystemEvent>,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+        inventory: Arc<ComponentInventory>,
+        read_model: Arc<FindingReadModel>,
+        system_events: Arc<Vec<SystemEvent>>,
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     ) -> Self {
         let release_board = Arc::new(build_release_board(&inventory, &read_model));
         Self {
-            inventory: Arc::new(inventory),
-            read_model: Arc::new(read_model),
-            system_events: Arc::new(system_events),
-            command_statuses: Arc::new(command_statuses),
+            inventory,
+            read_model,
+            system_events,
+            command_statuses,
             release_board,
         }
     }
 
     #[must_use]
-    pub fn with_inventory(&self, inventory: ComponentInventory) -> Self {
+    pub fn with_inventory_arc(&self, inventory: Arc<ComponentInventory>) -> Self {
         let release_board = Arc::new(build_release_board(&inventory, &self.read_model));
         Self {
-            inventory: Arc::new(inventory),
+            inventory,
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::clone(&self.system_events),
             command_statuses: Arc::clone(&self.command_statuses),
@@ -93,11 +93,11 @@ impl ApiReadSnapshot {
     }
 
     #[must_use]
-    pub fn with_read_model(&self, read_model: FindingReadModel) -> Self {
+    pub fn with_read_model_arc(&self, read_model: Arc<FindingReadModel>) -> Self {
         let release_board = Arc::new(build_release_board(&self.inventory, &read_model));
         Self {
             inventory: Arc::clone(&self.inventory),
-            read_model: Arc::new(read_model),
+            read_model,
             system_events: Arc::clone(&self.system_events),
             command_statuses: Arc::clone(&self.command_statuses),
             release_board,
@@ -105,26 +105,26 @@ impl ApiReadSnapshot {
     }
 
     #[must_use]
-    pub fn with_system_events(&self, system_events: Vec<SystemEvent>) -> Self {
+    pub fn with_system_events_arc(&self, system_events: Arc<Vec<SystemEvent>>) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
-            system_events: Arc::new(system_events),
+            system_events,
             command_statuses: Arc::clone(&self.command_statuses),
             release_board: Arc::clone(&self.release_board),
         }
     }
 
     #[must_use]
-    pub fn with_command_statuses(
+    pub fn with_command_statuses_arc(
         &self,
-        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::clone(&self.system_events),
-            command_statuses: Arc::new(command_statuses),
+            command_statuses,
             release_board: Arc::clone(&self.release_board),
         }
     }
@@ -459,52 +459,55 @@ impl ApiApplication {
     pub fn read_snapshot(&self) -> ApiReadSnapshot {
         match &self.backend {
             ApiStore::Local(local) => ApiReadSnapshot::new(
-                local.state.ingestion().inventory().clone(),
-                local.state.read_model().clone(),
-                merge_system_events(local.state.system_events(), local.runtime.system_events()),
-                local.runtime.command_statuses_snapshot(),
+                Arc::new(local.state.ingestion().inventory().clone()),
+                Arc::new(local.state.read_model().clone()),
+                Arc::new(merge_system_events(
+                    local.state.system_events(),
+                    local.runtime.system_events(),
+                )),
+                Arc::new(local.runtime.command_statuses_snapshot()),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
-                postgres.inventory_snapshot(),
-                postgres.read_model_snapshot(),
-                postgres.system_events_snapshot(),
-                postgres.command_statuses_snapshot(),
+                postgres.inventory_snapshot_arc(),
+                postgres.read_model_snapshot_arc(),
+                postgres.system_events_snapshot_arc(),
+                postgres.command_statuses_snapshot_arc(),
             ),
         }
     }
 
     #[must_use]
-    pub fn inventory_snapshot(&self) -> ComponentInventory {
+    pub fn inventory_snapshot_arc(&self) -> Arc<ComponentInventory> {
         match &self.backend {
-            ApiStore::Local(local) => local.state.ingestion().inventory().clone(),
-            ApiStore::Postgres(postgres) => postgres.inventory_snapshot(),
+            ApiStore::Local(local) => Arc::new(local.state.ingestion().inventory().clone()),
+            ApiStore::Postgres(postgres) => postgres.inventory_snapshot_arc(),
         }
     }
 
     #[must_use]
-    pub fn read_model_snapshot(&self) -> FindingReadModel {
+    pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
         match &self.backend {
-            ApiStore::Local(local) => local.state.read_model().clone(),
-            ApiStore::Postgres(postgres) => postgres.read_model_snapshot(),
+            ApiStore::Local(local) => Arc::new(local.state.read_model().clone()),
+            ApiStore::Postgres(postgres) => postgres.read_model_snapshot_arc(),
         }
     }
 
     #[must_use]
-    pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
+    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
         match &self.backend {
-            ApiStore::Local(local) => {
-                merge_system_events(local.state.system_events(), local.runtime.system_events())
-            }
-            ApiStore::Postgres(postgres) => postgres.system_events_snapshot(),
+            ApiStore::Local(local) => Arc::new(merge_system_events(
+                local.state.system_events(),
+                local.runtime.system_events(),
+            )),
+            ApiStore::Postgres(postgres) => postgres.system_events_snapshot_arc(),
         }
     }
 
-    /// Query the durable status of one scan command.
     #[must_use]
-    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
+    pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
         match &self.backend {
-            ApiStore::Local(local) => local.runtime.command_statuses_snapshot(),
-            ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot(),
+            ApiStore::Local(local) => Arc::new(local.runtime.command_statuses_snapshot()),
+            ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot_arc(),
         }
     }
 
