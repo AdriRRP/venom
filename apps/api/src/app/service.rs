@@ -10,11 +10,10 @@ use venom_domain::findings::{
     BulkReopenFindingResult, BulkSuppressFindingResult, CollectionHealthSummary,
     ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReleaseDashboard, ReopenFindingResult, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult,
-    Suppression, build_release_dashboard, contextualize_active_findings,
-    contextualize_collection_active_findings, query_collection_governance_overview,
-    summarize_collection_health,
+    PackageCoordinate, ProviderScanReport, ReopenFindingResult, ReportedFinding, RiskAcceptance,
+    ScanRequest, ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    contextualize_active_findings, contextualize_collection_active_findings,
+    query_collection_governance_overview,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -57,6 +56,7 @@ pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     system_events: Arc<Vec<SystemEvent>>,
+    release_board: Arc<Vec<ReleaseBoardRow>>,
 }
 
 impl ApiReadSnapshot {
@@ -66,28 +66,34 @@ impl ApiReadSnapshot {
         read_model: FindingReadModel,
         system_events: Vec<SystemEvent>,
     ) -> Self {
+        let release_board = Arc::new(build_release_board(&inventory, &read_model));
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::new(read_model),
             system_events: Arc::new(system_events),
+            release_board,
         }
     }
 
     #[must_use]
     pub fn with_inventory(&self, inventory: ComponentInventory) -> Self {
+        let release_board = Arc::new(build_release_board(&inventory, &self.read_model));
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::clone(&self.system_events),
+            release_board,
         }
     }
 
     #[must_use]
     pub fn with_read_model(&self, read_model: FindingReadModel) -> Self {
+        let release_board = Arc::new(build_release_board(&self.inventory, &read_model));
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::new(read_model),
             system_events: Arc::clone(&self.system_events),
+            release_board,
         }
     }
 
@@ -97,6 +103,7 @@ impl ApiReadSnapshot {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::new(system_events),
+            release_board: Arc::clone(&self.release_board),
         }
     }
 
@@ -143,22 +150,18 @@ impl ApiReadSnapshot {
     pub fn list_collections(&self) -> Result<ListCollectionsResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
         let collections = self
-            .inventory
-            .collection_operations_summaries(now_unix_ms)
-            .into_iter()
-            .map(|collection| {
-                let health = self.collection_health_summary(collection.collection_key.as_ref());
-                CollectionSummary {
-                    collection_key: collection.collection_key.into(),
-                    name: collection.name.into(),
-                    members: collection.members,
-                    source: collection.source.map(CollectionSourceSummaryItem::from),
-                    scan_schedule: collection
-                        .scan_schedule
-                        .map(CollectionScanScheduleItem::from),
-                    due_now: collection.due_now,
-                    health: CollectionHealthItem::from(health),
-                }
+            .release_board
+            .iter()
+            .map(|collection| CollectionSummary {
+                collection_key: collection.collection_key.to_string(),
+                name: collection.name.to_string(),
+                members: collection.members,
+                source: collection.source.clone(),
+                scan_schedule: collection.scan_schedule,
+                due_now: collection
+                    .scan_schedule
+                    .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms),
+                health: collection.health,
             })
             .collect::<Vec<_>>();
         let managed_collections = collections.len();
@@ -175,8 +178,9 @@ impl ApiReadSnapshot {
     /// Returns [`ApiApplicationError`] when the current system time cannot be read.
     pub fn release_dashboard(&self) -> Result<ReleaseDashboardResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
-        Ok(ReleaseDashboardResponse::from_dashboard(
-            build_release_dashboard(&self.inventory, &self.read_model, now_unix_ms),
+        Ok(build_release_dashboard_response(
+            self.release_board.as_ref(),
+            now_unix_ms,
         ))
     }
 
@@ -221,7 +225,7 @@ impl ApiReadSnapshot {
             scan_schedule: collection
                 .scan_schedule
                 .map(CollectionScanScheduleItem::from),
-            health: CollectionHealthItem::from(self.collection_health_summary(collection_key)),
+            health: self.collection_health_summary(collection_key),
             members: collection
                 .component_keys
                 .into_iter()
@@ -343,18 +347,103 @@ impl ApiReadSnapshot {
         })
     }
 
-    fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthSummary {
-        self.inventory
-            .collection_scoped_artifacts(collection_key)
-            .map(|scope| {
-                summarize_collection_health(
-                    &self.inventory,
-                    &self.read_model,
-                    collection_key,
-                    &scope,
-                )
+    fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthItem {
+        self.release_board
+            .iter()
+            .find(|collection| collection.collection_key.as_ref() == collection_key)
+            .map_or_else(CollectionHealthItem::default, |collection| {
+                collection.health
             })
-            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseBoardRow {
+    collection_key: Box<str>,
+    name: Box<str>,
+    members: usize,
+    source: Option<CollectionSourceSummaryItem>,
+    scan_schedule: Option<CollectionScanScheduleItem>,
+    health: CollectionHealthItem,
+}
+
+fn build_release_board(
+    inventory: &ComponentInventory,
+    read_model: &FindingReadModel,
+) -> Vec<ReleaseBoardRow> {
+    inventory
+        .collection_operations_summaries(0)
+        .into_iter()
+        .map(|collection| {
+            let health = inventory
+                .collection_scoped_artifacts(collection.collection_key.as_ref())
+                .map(|scope| {
+                    venom_domain::summarize_collection_health(
+                        inventory,
+                        read_model,
+                        collection.collection_key.as_ref(),
+                        &scope,
+                    )
+                })
+                .unwrap_or_default();
+
+            ReleaseBoardRow {
+                collection_key: collection.collection_key,
+                name: collection.name,
+                members: collection.members,
+                source: collection.source.map(CollectionSourceSummaryItem::from),
+                scan_schedule: collection
+                    .scan_schedule
+                    .map(CollectionScanScheduleItem::from),
+                health: CollectionHealthItem::from(health),
+            }
+        })
+        .collect()
+}
+
+fn build_release_dashboard_response(
+    collections: &[ReleaseBoardRow],
+    now_unix_ms: u64,
+) -> ReleaseDashboardResponse {
+    let dashboard_collections = collections
+        .iter()
+        .map(|collection| ReleaseDashboardCollectionItem {
+            collection_key: collection.collection_key.to_string(),
+            name: collection.name.to_string(),
+            members: collection.members,
+            due_now: collection
+                .scan_schedule
+                .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms),
+            scan_schedule: collection.scan_schedule,
+            health: collection.health,
+        })
+        .collect::<Vec<_>>();
+
+    let summary = dashboard_collections.iter().fold(
+        ReleaseDashboardSummaryItem {
+            managed_collections: dashboard_collections.len(),
+            ..ReleaseDashboardSummaryItem::default()
+        },
+        |mut summary, collection| {
+            if collection.scan_schedule.is_some() {
+                summary.scheduled_collections += 1;
+            }
+            if collection.due_now {
+                summary.due_now_collections += 1;
+            }
+            summary.total_active_findings += collection.health.total;
+            summary.open_findings += collection.health.open;
+            summary.risk_accepted_findings += collection.health.risk_accepted;
+            summary.suppressed_findings += collection.health.suppressed;
+            summary.critical_risk_findings += collection.health.critical_risk;
+            summary.high_risk_findings += collection.health.high_risk;
+            summary
+        },
+    );
+
+    ReleaseDashboardResponse {
+        summary,
+        collections: dashboard_collections,
     }
 }
 
@@ -2013,18 +2102,7 @@ pub struct ReleaseDashboardResponse {
     pub collections: Vec<ReleaseDashboardCollectionItem>,
 }
 
-impl ReleaseDashboardResponse {
-    fn from_dashboard(dashboard: ReleaseDashboard) -> Self {
-        Self {
-            summary: ReleaseDashboardSummaryItem::from(dashboard.summary),
-            collections: dashboard
-                .collections
-                .into_iter()
-                .map(ReleaseDashboardCollectionItem::from)
-                .collect(),
-        }
-    }
-}
+impl ReleaseDashboardResponse {}
 
 #[derive(Debug, Serialize)]
 pub struct CollectionSummary {
@@ -2107,7 +2185,7 @@ impl From<CollectionSource> for CollectionSourceItem {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct ReleaseDashboardSummaryItem {
     pub managed_collections: usize,
     pub scheduled_collections: usize,
@@ -2159,7 +2237,7 @@ impl From<venom_domain::ReleaseDashboardCollection> for ReleaseDashboardCollecti
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct CollectionHealthItem {
     pub total: usize,
     pub open: usize,
