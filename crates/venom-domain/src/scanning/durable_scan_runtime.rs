@@ -97,7 +97,7 @@ impl ScanCommandQueue {
         };
         let mut command_ids = Vec::with_capacity(requests.len());
         for request in requests {
-            command_ids.push(self.enqueue_with_origin(request, Some(origin.clone()))?);
+            command_ids.push(self.enqueue_with_origin(request, Some(&origin))?);
         }
         Ok(command_ids)
     }
@@ -105,7 +105,7 @@ impl ScanCommandQueue {
     fn enqueue_with_origin(
         &mut self,
         request: ScanRequest,
-        collection_schedule_origin: Option<CollectionScheduleOrigin>,
+        collection_schedule_origin: Option<&CollectionScheduleOrigin>,
     ) -> Result<Box<str>, ScanCommandQueueError> {
         let command_id = next_command_id();
         let occurred_at_unix_ms = current_unix_millis()?;
@@ -113,7 +113,7 @@ impl ScanCommandQueue {
             command_id: command_id.clone(),
             request: request.clone(),
             occurred_at_unix_ms,
-            collection_schedule_origin: collection_schedule_origin.clone(),
+            collection_schedule_origin: collection_schedule_origin.cloned(),
         })?;
         self.order.push(command_id.clone());
         self.commands.insert(
@@ -121,12 +121,10 @@ impl ScanCommandQueue {
             ScanCommandRecord {
                 request,
                 status: ScanCommandStatus::Pending,
-                collection_schedule_origin: collection_schedule_origin.clone(),
+                collection_schedule_origin: collection_schedule_origin.cloned(),
             },
         );
-        let collection_key = collection_schedule_origin
-            .as_ref()
-            .map(|origin| origin.collection_key.clone());
+        let collection_key = collection_schedule_origin.map(|origin| origin.collection_key.clone());
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-enqueued-live-{command_id}").into_boxed_str(),
             occurred_at_unix_ms,
