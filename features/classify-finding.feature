@@ -31,6 +31,23 @@ Feature: Classify finding
       And the first contextual active finding risk is "high"
       And the first contextual active finding has no context profile
 
+  Rule: Mitigating context traits can lower contextual risk deterministically
+    Scenario: One high finding in a VPN-restricted non-privileged context becomes medium
+      Given no managed components
+      And a new durable state
+      And a component "component:payments-api"
+      And an artifact "registry.example/payments@sha256:111"
+      And a provider scan report with vulnerability "CVE-2026-0001" in package "openssl" version "3.0.0" and severity "high"
+      When VENOM durably registers component "component:payments-api" named "Payments API"
+      And VENOM durably binds artifact "registry.example/payments@sha256:111" to component "component:payments-api"
+      And VENOM durably registers context profile "context:corp-api-private" named "Corporate Private API" marked VPN restricted and non privileged user
+      And VENOM durably assigns context profile "context:corp-api-private" to component "component:payments-api"
+      And VENOM durably records the provider scan report
+      And VENOM queries contextual active findings for component "component:payments-api" and artifact "registry.example/payments@sha256:111" with minimum severity "unknown", offset 0, and limit 10
+      Then the first contextual active finding raw severity is "high"
+      And the first contextual active finding risk is "medium"
+      And the first contextual active finding context profile is "context:corp-api-private"
+
   Rule: Collection defaults can fill missing component context without overriding component specificity
     Scenario: One collection default and one component override merge field by field
       Given no managed components

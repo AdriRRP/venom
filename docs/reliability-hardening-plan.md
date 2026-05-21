@@ -21,12 +21,10 @@ Completed:
 8. `W96-local-collection-scan-request-atomicity`
 9. `W97-postgres-post-commit-application-hardening`
 10. `W98-api-lock-and-snapshot-topology`
+11. `W99-contextual-risk-semantic-completion`
 
 Remaining:
 
-11. `W99-contextual-risk-semantic-completion`
-    Make the richer execution context model affect deterministic risk
-    classification instead of stopping at three context dimensions.
 12. `W100-bulk-cohort-streaming`
     Remove avoidable full-vector materialization and ordering from large
     bulk-governance cohorts.

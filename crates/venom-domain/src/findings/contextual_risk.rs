@@ -145,9 +145,11 @@ pub fn contextual_risk_level(
         };
     };
 
-    let context_pressure = u8::from(context_profile.internet_exposed.unwrap_or(false))
-        + u8::from(context_profile.production.unwrap_or(false))
-        + u8::from(context_profile.mission_critical.unwrap_or(false));
+    let context_pressure = i8::from(context_profile.internet_exposed.unwrap_or(false))
+        + i8::from(context_profile.production.unwrap_or(false))
+        + i8::from(context_profile.mission_critical.unwrap_or(false))
+        - i8::from(context_profile.vpn_restricted.unwrap_or(false))
+        - i8::from(context_profile.non_privileged_user.unwrap_or(false));
 
     if severity == Severity::Unknown {
         return ContextualRiskLevel::Unknown;
@@ -159,14 +161,15 @@ pub fn contextual_risk_level(
         return ContextualRiskLevel::Critical;
     }
     if severity == Severity::High {
-        return if context_pressure == 0 {
-            ContextualRiskLevel::High
-        } else {
-            ContextualRiskLevel::Critical
+        return match context_pressure {
+            i8::MIN..=-1 => ContextualRiskLevel::Medium,
+            0 => ContextualRiskLevel::High,
+            _ => ContextualRiskLevel::Critical,
         };
     }
     if severity == Severity::Medium {
         return match context_pressure {
+            i8::MIN..=-1 => ContextualRiskLevel::Low,
             0 => ContextualRiskLevel::Medium,
             1 => ContextualRiskLevel::High,
             _ => ContextualRiskLevel::Critical,
@@ -174,7 +177,7 @@ pub fn contextual_risk_level(
     }
 
     match context_pressure {
-        0 => ContextualRiskLevel::Low,
+        i8::MIN..=0 => ContextualRiskLevel::Low,
         1 | 2 => ContextualRiskLevel::Medium,
         _ => ContextualRiskLevel::High,
     }
@@ -212,6 +215,24 @@ mod tests {
         assert_eq!(
             contextual_risk_level(Severity::High, None),
             ContextualRiskLevel::High
+        );
+    }
+
+    #[test]
+    fn high_finding_in_vpn_restricted_non_privileged_context_becomes_medium() {
+        let profile = ManagedContextProfile {
+            profile_key: "context:corp-api-private".into(),
+            name: "Corporate Private API".into(),
+            internet_exposed: None,
+            production: None,
+            mission_critical: None,
+            vpn_restricted: Some(true),
+            non_privileged_user: Some(true),
+        };
+
+        assert_eq!(
+            contextual_risk_level(Severity::High, Some(&profile.values())),
+            ContextualRiskLevel::Medium
         );
     }
 

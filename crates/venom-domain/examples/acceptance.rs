@@ -543,6 +543,27 @@ async fn venom_durably_registers_vpn_restricted_context_profile(
     }
 }
 
+#[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked VPN restricted and non privileged user"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked VPN restricted and non privileged user"
+)]
+async fn venom_durably_registers_private_api_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name)
+            .with_vpn_restricted(true)
+            .with_non_privileged_user(true),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[given(expr = "VENOM durably registers context profile {string} named {string} marked internal")]
 #[when(expr = "VENOM durably registers context profile {string} named {string} marked internal")]
 async fn venom_durably_registers_internal_context_profile(
