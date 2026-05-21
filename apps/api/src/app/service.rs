@@ -1577,34 +1577,33 @@ impl ApiApplication {
                 let due_scans = CollectionScanScheduler::new(&mut inventory)
                     .collect_due(now_unix_ms, max_collections);
 
-                for due_scan in &due_scans {
+                let processed_collections = due_scans.len();
+                let mut enqueued_commands = 0_usize;
+                let mut last_collection_key = None;
+                for due_scan in due_scans {
+                    let command_ids = local
+                        .runtime
+                        .enqueue_collection_batch(
+                            due_scan.collection_key.as_ref(),
+                            due_scan.due_at_unix_ms,
+                            due_scan.requests,
+                        )
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                    enqueued_commands += command_ids.len();
+                    last_collection_key = Some(due_scan.collection_key.to_string());
                     local
                         .state
                         .record_collection_scan_materialization(
                             due_scan.collection_key.as_ref(),
                             due_scan.next_due_at_unix_ms,
                             now_unix_ms,
-                            u32::try_from(due_scan.requests.len()).map_err(|_| {
+                            u32::try_from(command_ids.len()).map_err(|_| {
                                 ApiApplicationError::State(
                                     "collection scheduler command count overflow".to_owned(),
                                 )
                             })?,
                         )
                         .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                }
-
-                let processed_collections = due_scans.len();
-                let mut enqueued_commands = 0_usize;
-                let mut last_collection_key = None;
-                for due_scan in due_scans {
-                    enqueued_commands += due_scan.requests.len();
-                    last_collection_key = Some(due_scan.collection_key.to_string());
-                    for scan_request in due_scan.requests {
-                        let _ = local
-                            .runtime
-                            .enqueue(scan_request)
-                            .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                    }
                 }
 
                 let pending_due_remaining =

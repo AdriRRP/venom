@@ -68,12 +68,52 @@ impl ScanCommandQueue {
         &mut self,
         request: ScanRequest,
     ) -> Result<EnqueueScanResult, ScanCommandQueueError> {
+        let command_id = self.enqueue_with_origin(request, None)?;
+        Ok(EnqueueScanResult { command_id })
+    }
+
+    /// Durably enqueue one collection-scheduled batch keyed by the due time that triggered it.
+    ///
+    /// If the same batch is already durable, returns the existing command ids
+    /// instead of duplicating work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanCommandQueueError`] when the queue cannot durably append
+    /// the missing command events.
+    pub fn enqueue_collection_batch(
+        &mut self,
+        collection_key: &str,
+        due_at_unix_ms: u64,
+        requests: Vec<ScanRequest>,
+    ) -> Result<Vec<Box<str>>, ScanCommandQueueError> {
+        if let Some(existing) = self.find_collection_batch(collection_key, due_at_unix_ms) {
+            return Ok(existing);
+        }
+
+        let origin = CollectionScheduleOrigin {
+            collection_key: collection_key.into(),
+            due_at_unix_ms,
+        };
+        let mut command_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            command_ids.push(self.enqueue_with_origin(request, Some(origin.clone()))?);
+        }
+        Ok(command_ids)
+    }
+
+    fn enqueue_with_origin(
+        &mut self,
+        request: ScanRequest,
+        collection_schedule_origin: Option<CollectionScheduleOrigin>,
+    ) -> Result<Box<str>, ScanCommandQueueError> {
         let command_id = next_command_id();
         let occurred_at_unix_ms = current_unix_millis()?;
         self.append_event(&DurableScanEvent::Enqueued {
             command_id: command_id.clone(),
             request: request.clone(),
             occurred_at_unix_ms,
+            collection_schedule_origin: collection_schedule_origin.clone(),
         })?;
         self.order.push(command_id.clone());
         self.commands.insert(
@@ -81,13 +121,17 @@ impl ScanCommandQueue {
             ScanCommandRecord {
                 request,
                 status: ScanCommandStatus::Pending,
+                collection_schedule_origin: collection_schedule_origin.clone(),
             },
         );
+        let collection_key = collection_schedule_origin
+            .as_ref()
+            .map(|origin| origin.collection_key.clone());
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-enqueued-live-{command_id}").into_boxed_str(),
             occurred_at_unix_ms,
             kind: SystemEventKind::ScanCommandEnqueued,
-            collection_key: None,
+            collection_key,
             component_key: self
                 .commands
                 .get(command_id.as_ref())
@@ -98,7 +142,7 @@ impl ScanCommandQueue {
             retryable: None,
             detail: None,
         });
-        Ok(EnqueueScanResult { command_id })
+        Ok(command_id)
     }
 
     #[must_use]
@@ -130,6 +174,28 @@ impl ScanCommandQueue {
     #[must_use]
     pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
         &self.system_events
+    }
+
+    fn find_collection_batch(
+        &self,
+        collection_key: &str,
+        due_at_unix_ms: u64,
+    ) -> Option<Vec<Box<str>>> {
+        let command_ids = self
+            .order
+            .iter()
+            .filter(|command_id| {
+                self.commands
+                    .get(command_id.as_ref())
+                    .and_then(|record| record.collection_schedule_origin.as_ref())
+                    .is_some_and(|origin| {
+                        origin.collection_key.as_ref() == collection_key
+                            && origin.due_at_unix_ms == due_at_unix_ms
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        (!command_ids.is_empty()).then_some(command_ids)
     }
 
     #[must_use]
@@ -469,7 +535,14 @@ impl ScanCommandQueue {
                 command_id,
                 request,
                 occurred_at_unix_ms,
-            } => self.apply_enqueued_event(command_id, request, occurred_at_unix_ms, line),
+                collection_schedule_origin,
+            } => self.apply_enqueued_event(
+                command_id,
+                request,
+                occurred_at_unix_ms,
+                collection_schedule_origin,
+                line,
+            ),
             DurableScanEvent::Completed {
                 command_id,
                 findings_reported,
@@ -522,6 +595,7 @@ impl ScanCommandQueue {
         command_id: Box<str>,
         request: ScanRequest,
         occurred_at_unix_ms: u64,
+        collection_schedule_origin: Option<CollectionScheduleOrigin>,
         line: usize,
     ) -> Result<(), ScanCommandQueueError> {
         if self.commands.contains_key(command_id.as_ref()) {
@@ -536,17 +610,19 @@ impl ScanCommandQueue {
             ScanCommandRecord {
                 request,
                 status: ScanCommandStatus::Pending,
+                collection_schedule_origin: collection_schedule_origin.clone(),
             },
         );
         let component_key = self
             .commands
             .get(command_id.as_ref())
             .map(|record| record.request.component_key.clone());
+        let collection_key = collection_schedule_origin.map(|origin| origin.collection_key);
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-enqueued-{line}").into_boxed_str(),
             occurred_at_unix_ms,
             kind: SystemEventKind::ScanCommandEnqueued,
-            collection_key: None,
+            collection_key,
             component_key,
             command_id: Some(command_id),
             integration_event_id: None,
@@ -762,6 +838,13 @@ impl ScanCommandStatus {
 struct ScanCommandRecord {
     request: ScanRequest,
     status: ScanCommandStatus,
+    collection_schedule_origin: Option<CollectionScheduleOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CollectionScheduleOrigin {
+    collection_key: Box<str>,
+    due_at_unix_ms: u64,
 }
 
 /// Observable result of enqueuing one durable scan command.
@@ -840,6 +923,8 @@ enum DurableScanEvent {
         request: ScanRequest,
         #[serde(default)]
         occurred_at_unix_ms: u64,
+        #[serde(default)]
+        collection_schedule_origin: Option<CollectionScheduleOrigin>,
     },
     Completed {
         command_id: Box<str>,
@@ -1011,6 +1096,23 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             1
         );
+    }
+
+    #[test]
+    fn collection_batch_enqueue_is_idempotent_for_the_same_due_origin() {
+        let queue_path = temp_path("durable-runtime-collection-batch");
+        let (_state, request) = durable_inventory();
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
+
+        let first = runtime
+            .enqueue_collection_batch("release:2026.05", 1_000, vec![request.clone()])
+            .expect("first batch should persist");
+        let second = runtime
+            .enqueue_collection_batch("release:2026.05", 1_000, vec![request])
+            .expect("second batch should reuse the durable batch");
+
+        assert_eq!(first, second);
+        assert_eq!(runtime.pending_commands(), 1);
     }
 
     #[tokio::test]

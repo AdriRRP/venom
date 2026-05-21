@@ -15,15 +15,11 @@ Completed:
 2. `W90-api-read-snapshot-compaction`
 3. `W91-release-projection-consolidation`
 4. `W92-gate-signal-hardening`
+5. `W93-bulk-governance-cohort-veracity`
+6. `W94-local-collection-scan-materialization-atomicity`
 
 Remaining:
 
-5. `W93-bulk-governance-cohort-veracity`
-   Separate paged read queries from bulk-action cohort queries so bulk actions
-   never silently operate on one page only.
-6. `W94-local-collection-scan-materialization-atomicity`
-   Remove the local two-store split between collection schedule materialization
-   and durable command enqueue.
 7. `W95-local-scan-outcome-atomicity`
    Remove the local split between durable finding mutation and durable scan
    command terminal outcome.
