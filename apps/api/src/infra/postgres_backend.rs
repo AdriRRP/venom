@@ -1,4 +1,4 @@
-use sqlx::{PgPool, QueryBuilder, postgres::PgPoolOptions, types::Json};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -692,38 +692,6 @@ impl PostgresStore {
             let component_key = finding.component_key.clone();
             let reason = acceptance.reason.clone();
             let occurred_at_unix_ms = current_unix_millis()?;
-            sqlx::query(&format!(
-                concat!(
-                    "INSERT INTO {} ",
-                    "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
-                    "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                    "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
-                ),
-                self.names.finding_risk_acceptances
-            ))
-            .bind(finding.component_key.as_ref())
-            .bind(artifact_kind_name(finding.artifact.kind))
-            .bind(finding.artifact.identity.as_ref())
-            .bind(finding.vulnerability_id.as_ref())
-            .bind(finding.package.name.as_ref())
-            .bind(finding.package.version.as_ref())
-            .bind(finding.package.purl.as_deref().unwrap_or(""))
-            .bind(acceptance.reason.as_ref())
-            .bind(
-                acceptance
-                    .until_unix_ms
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| "risk acceptance until overflow".to_owned())?,
-            )
-            .execute(&self.pool)
-            .await
-            .map_err(|error| format!("postgres finding risk acceptance upsert failed: {error}"))?;
-
-            candidate_read_model.accept_risk(finding, acceptance);
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("finding-risk-accepted"),
                 occurred_at_unix_ms,
@@ -736,7 +704,20 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(reason),
             };
-            self.insert_system_event(&event).await?;
+            let mut tx = self.pool.begin().await.map_err(|error| {
+                format!("postgres finding risk acceptance begin failed: {error}")
+            })?;
+            self.upsert_risk_acceptance_in_transaction(&mut tx, &finding, &acceptance)
+                .await?;
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit().await.map_err(|error| {
+                format!("postgres finding risk acceptance commit failed: {error}")
+            })?;
+
+            candidate_read_model.accept_risk(finding, acceptance);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -785,45 +766,6 @@ impl PostgresStore {
                     format!("postgres risk acceptance batch begin failed: {error}")
                 })?;
 
-            for finding in &changed {
-                sqlx::query(&format!(
-                    concat!(
-                        "INSERT INTO {} ",
-                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
-                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                        "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
-                    ),
-                    self.names.finding_risk_acceptances
-                ))
-                .bind(finding.component_key.as_ref())
-                .bind(artifact_kind_name(finding.artifact.kind))
-                .bind(finding.artifact.identity.as_ref())
-                .bind(finding.vulnerability_id.as_ref())
-                .bind(finding.package.name.as_ref())
-                .bind(finding.package.version.as_ref())
-                .bind(finding.package.purl.as_deref().unwrap_or(""))
-                .bind(acceptance.reason.as_ref())
-                .bind(
-                    acceptance
-                        .until_unix_ms
-                        .map(i64::try_from)
-                        .transpose()
-                        .map_err(|_| "risk acceptance until overflow".to_owned())?,
-                )
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| {
-                    format!("postgres finding risk acceptance batch upsert failed: {error}")
-                })?;
-            }
-
-            tx.commit().await.map_err(|error| {
-                format!("postgres risk acceptance batch commit failed: {error}")
-            })?;
-
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("findings-risk-accepted"),
                 occurred_at_unix_ms,
@@ -836,7 +778,18 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(acceptance.reason.clone()),
             };
-            self.insert_system_event(&event).await?;
+            for finding in &changed {
+                self.upsert_risk_acceptance_in_transaction(&mut tx, finding, &acceptance)
+                    .await?;
+            }
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit().await.map_err(|error| {
+                format!("postgres risk acceptance batch commit failed: {error}")
+            })?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -888,45 +841,6 @@ impl PostgresStore {
                 format!("postgres tag risk acceptance batch begin failed: {error}")
             })?;
 
-            for finding in &changed {
-                sqlx::query(&format!(
-                    concat!(
-                        "INSERT INTO {} ",
-                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
-                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                        "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
-                    ),
-                    self.names.finding_risk_acceptances
-                ))
-                .bind(finding.component_key.as_ref())
-                .bind(artifact_kind_name(finding.artifact.kind))
-                .bind(finding.artifact.identity.as_ref())
-                .bind(finding.vulnerability_id.as_ref())
-                .bind(finding.package.name.as_ref())
-                .bind(finding.package.version.as_ref())
-                .bind(finding.package.purl.as_deref().unwrap_or(""))
-                .bind(acceptance.reason.as_ref())
-                .bind(
-                    acceptance
-                        .until_unix_ms
-                        .map(i64::try_from)
-                        .transpose()
-                        .map_err(|_| "risk acceptance until overflow".to_owned())?,
-                )
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| {
-                    format!("postgres tag finding risk acceptance batch upsert failed: {error}")
-                })?;
-            }
-
-            tx.commit().await.map_err(|error| {
-                format!("postgres tag risk acceptance batch commit failed: {error}")
-            })?;
-
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("tag-findings-risk-accepted"),
                 occurred_at_unix_ms,
@@ -939,7 +853,18 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(format!("tag {tag_key}: {}", acceptance.reason).into_boxed_str()),
             };
-            self.insert_system_event(&event).await?;
+            for finding in &changed {
+                self.upsert_risk_acceptance_in_transaction(&mut tx, finding, &acceptance)
+                    .await?;
+            }
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit().await.map_err(|error| {
+                format!("postgres tag risk acceptance batch commit failed: {error}")
+            })?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -971,10 +896,6 @@ impl PostgresStore {
         if result.change == ReopenFindingChange::Reopened {
             let component_key = finding.component_key.clone();
             let occurred_at_unix_ms = current_unix_millis()?;
-            self.delete_governance_decision_rows(&finding).await?;
-            candidate_read_model.reopen(&finding);
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("finding-reopened"),
                 occurred_at_unix_ms,
@@ -987,7 +908,22 @@ impl PostgresStore {
                 retryable: None,
                 detail: None,
             };
-            self.insert_system_event(&event).await?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| format!("postgres finding reopen begin failed: {error}"))?;
+            self.delete_governance_decision_rows_in_transaction(&mut tx, &finding)
+                .await?;
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres finding reopen commit failed: {error}"))?;
+
+            candidate_read_model.reopen(&finding);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -1016,31 +952,6 @@ impl PostgresStore {
             let component_key = finding.component_key.clone();
             let reason = suppression.reason.clone();
             let occurred_at_unix_ms = current_unix_millis()?;
-            sqlx::query(&format!(
-                concat!(
-                    "INSERT INTO {} ",
-                    "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
-                    "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                    "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
-                ),
-                self.names.finding_suppressions
-            ))
-            .bind(finding.component_key.as_ref())
-            .bind(artifact_kind_name(finding.artifact.kind))
-            .bind(finding.artifact.identity.as_ref())
-            .bind(finding.vulnerability_id.as_ref())
-            .bind(finding.package.name.as_ref())
-            .bind(finding.package.version.as_ref())
-            .bind(finding.package.purl.as_deref().unwrap_or(""))
-            .bind(suppression.reason.as_ref())
-            .execute(&self.pool)
-            .await
-            .map_err(|error| format!("postgres finding suppression upsert failed: {error}"))?;
-
-            candidate_read_model.suppress(finding, suppression);
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("finding-suppressed"),
                 occurred_at_unix_ms,
@@ -1053,7 +964,21 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(reason),
             };
-            self.insert_system_event(&event).await?;
+            let mut tx =
+                self.pool.begin().await.map_err(|error| {
+                    format!("postgres finding suppression begin failed: {error}")
+                })?;
+            self.upsert_suppression_in_transaction(&mut tx, &finding, &suppression)
+                .await?;
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres finding suppression commit failed: {error}"))?;
+
+            candidate_read_model.suppress(finding, suppression);
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -1103,36 +1028,6 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres suppression batch begin failed: {error}"))?;
 
-            for finding in &changed_findings {
-                sqlx::query(&format!(
-                    concat!(
-                        "INSERT INTO {} ",
-                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
-                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                        "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
-                    ),
-                    self.names.finding_suppressions
-                ))
-                .bind(finding.component_key.as_ref())
-                .bind(artifact_kind_name(finding.artifact.kind))
-                .bind(finding.artifact.identity.as_ref())
-                .bind(finding.vulnerability_id.as_ref())
-                .bind(finding.package.name.as_ref())
-                .bind(finding.package.version.as_ref())
-                .bind(finding.package.purl.as_deref().unwrap_or(""))
-                .bind(suppression.reason.as_ref())
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("postgres finding suppression batch upsert failed: {error}"))?;
-            }
-
-            tx.commit()
-                .await
-                .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
-
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("findings-suppressed"),
                 occurred_at_unix_ms,
@@ -1145,7 +1040,18 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(suppression.reason.clone()),
             };
-            self.insert_system_event(&event).await?;
+            for finding in &changed_findings {
+                self.upsert_suppression_in_transaction(&mut tx, finding, &suppression)
+                    .await?;
+            }
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -1198,38 +1104,6 @@ impl PostgresStore {
                     format!("postgres tag suppression batch begin failed: {error}")
                 })?;
 
-            for finding in &changed {
-                sqlx::query(&format!(
-                    concat!(
-                        "INSERT INTO {} ",
-                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
-                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
-                        "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
-                    ),
-                    self.names.finding_suppressions
-                ))
-                .bind(finding.component_key.as_ref())
-                .bind(artifact_kind_name(finding.artifact.kind))
-                .bind(finding.artifact.identity.as_ref())
-                .bind(finding.vulnerability_id.as_ref())
-                .bind(finding.package.name.as_ref())
-                .bind(finding.package.version.as_ref())
-                .bind(finding.package.purl.as_deref().unwrap_or(""))
-                .bind(suppression.reason.as_ref())
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| {
-                    format!("postgres tag finding suppression batch upsert failed: {error}")
-                })?;
-            }
-
-            tx.commit().await.map_err(|error| {
-                format!("postgres tag suppression batch commit failed: {error}")
-            })?;
-
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("tag-findings-suppressed"),
                 occurred_at_unix_ms,
@@ -1242,7 +1116,18 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(format!("tag {tag_key}: {}", suppression.reason).into_boxed_str()),
             };
-            self.insert_system_event(&event).await?;
+            for finding in &changed {
+                self.upsert_suppression_in_transaction(&mut tx, finding, &suppression)
+                    .await?;
+            }
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit().await.map_err(|error| {
+                format!("postgres tag suppression batch commit failed: {error}")
+            })?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -1296,17 +1181,6 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres reopen batch begin failed: {error}"))?;
 
-            for finding in &reopened_findings {
-                self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
-                    .await?;
-            }
-
-            tx.commit()
-                .await
-                .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
-
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
             let event = SystemEvent {
                 event_id: next_system_event_id("findings-reopened"),
                 occurred_at_unix_ms,
@@ -1319,7 +1193,18 @@ impl PostgresStore {
                 retryable: None,
                 detail: None,
             };
-            self.insert_system_event(&event).await?;
+            for finding in &reopened_findings {
+                self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
+                    .await?;
+            }
+            self.insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
             self.push_system_event(event);
         }
 
@@ -2259,19 +2144,6 @@ impl PostgresStore {
             .map_err(|error| format!("postgres system event insert failed: {error}"))?;
         }
         Ok(())
-    }
-
-    async fn delete_governance_decision_rows(&self, finding: &FindingRef) -> Result<(), String> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| format!("postgres reopen begin failed: {error}"))?;
-        self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
-            .await?;
-        tx.commit()
-            .await
-            .map_err(|error| format!("postgres reopen commit failed: {error}"))
     }
 
     async fn delete_governance_decision_rows_in_transaction(
@@ -3544,6 +3416,24 @@ impl PostgresStore {
     }
 
     async fn insert_system_event(&self, event: &SystemEvent) -> Result<(), String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("postgres system event begin failed: {error}"))?;
+        self.insert_system_event_in_transaction(&mut tx, event)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("postgres system event commit failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn insert_system_event_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        event: &SystemEvent,
+    ) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "INSERT INTO {} (event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
@@ -3570,9 +3460,76 @@ impl PostgresStore {
         )
         .bind(event.retryable)
         .bind(event.detail.as_deref())
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(|error| format!("postgres system event insert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn upsert_risk_acceptance_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        finding: &FindingRef,
+        acceptance: &RiskAcceptance,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+                "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
+            ),
+            self.names.finding_risk_acceptances
+        ))
+        .bind(finding.component_key.as_ref())
+        .bind(artifact_kind_name(finding.artifact.kind))
+        .bind(finding.artifact.identity.as_ref())
+        .bind(finding.vulnerability_id.as_ref())
+        .bind(finding.package.name.as_ref())
+        .bind(finding.package.version.as_ref())
+        .bind(finding.package.purl.as_deref().unwrap_or(""))
+        .bind(acceptance.reason.as_ref())
+        .bind(
+            acceptance
+                .until_unix_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| "risk acceptance until overflow".to_owned())?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("postgres finding risk acceptance upsert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn upsert_suppression_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        finding: &FindingRef,
+        suppression: &Suppression,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
+                "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
+            ),
+            self.names.finding_suppressions
+        ))
+        .bind(finding.component_key.as_ref())
+        .bind(artifact_kind_name(finding.artifact.kind))
+        .bind(finding.artifact.identity.as_ref())
+        .bind(finding.vulnerability_id.as_ref())
+        .bind(finding.package.name.as_ref())
+        .bind(finding.package.version.as_ref())
+        .bind(finding.package.purl.as_deref().unwrap_or(""))
+        .bind(suppression.reason.as_ref())
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("postgres finding suppression upsert failed: {error}"))?;
         Ok(())
     }
 }
