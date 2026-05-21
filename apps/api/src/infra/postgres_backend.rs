@@ -1289,33 +1289,6 @@ impl PostgresStore {
             .map_err(|error| error.as_str().to_owned())?;
         let command_id = next_command_id();
         let occurred_at_unix_ms = current_unix_millis()?;
-
-        sqlx::query(&format!(
-            concat!(
-                "INSERT INTO {} ",
-                "(command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
-                "VALUES ($1, $2, $3, $4, $5, $6)"
-            ),
-            self.names.scan_commands
-        ))
-        .bind(command_id.as_ref())
-        .bind(request.component_key.as_ref())
-        .bind(artifact_kind_name(request.artifact.kind))
-        .bind(request.artifact.identity.as_ref())
-        .bind(freshness_name(request.freshness))
-        .bind(scan_command_status_name(ScanCommandStatus::Pending))
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("postgres scan command insert failed: {error}"))?;
-
-        self.order.push(command_id.clone());
-        self.commands.insert(
-            command_id.clone(),
-            ScanCommandRecord {
-                request,
-                status: ScanCommandStatus::Pending,
-            },
-        );
         let event = SystemEvent {
             event_id: next_system_event_id("scan-command-enqueued"),
             occurred_at_unix_ms,
@@ -1328,7 +1301,27 @@ impl PostgresStore {
             retryable: None,
             detail: None,
         };
-        self.insert_system_event(&event).await?;
+
+        let mut transaction = self.begin_transaction().await?;
+        self.insert_pending_scan_commands(
+            &mut transaction,
+            std::slice::from_ref(&command_id),
+            std::slice::from_ref(&request),
+        )
+        .await
+        .map_err(|error| format!("postgres scan command insert failed: {error}"))?;
+        self.insert_system_events_in_transaction(&mut transaction, std::slice::from_ref(&event))
+            .await?;
+        self.commit_transaction(transaction).await?;
+
+        self.order.push(command_id.clone());
+        self.commands.insert(
+            command_id.clone(),
+            ScanCommandRecord {
+                request,
+                status: ScanCommandStatus::Pending,
+            },
+        );
         self.push_system_event(event);
         Ok(command_id)
     }
@@ -1355,42 +1348,38 @@ impl PostgresStore {
             .map(|_| next_command_id())
             .collect::<Vec<_>>();
         let occurred_at_unix_ms = current_unix_millis()?;
-
-        let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
-            "INSERT INTO {} (command_id, component_key, artifact_kind, artifact_identity, freshness, status) ",
-            self.names.scan_commands
-        ));
-        query_builder.push_values(
-            command_ids.iter().zip(batch.requests.iter()),
-            |mut row, (command_id, request)| {
-                row.push_bind(command_id.as_ref())
-                    .push_bind(request.component_key.as_ref())
-                    .push_bind(artifact_kind_name(request.artifact.kind))
-                    .push_bind(request.artifact.identity.as_ref())
-                    .push_bind(freshness_name(request.freshness))
-                    .push_bind(scan_command_status_name(ScanCommandStatus::Pending));
-            },
-        );
-        query_builder
-            .build()
-            .execute(&self.pool)
-            .await
-            .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
-
-        for (command_id, request) in command_ids.iter().cloned().zip(batch.requests) {
-            let event = SystemEvent {
+        let system_events = command_ids
+            .iter()
+            .cloned()
+            .zip(batch.requests.iter())
+            .map(|(command_id, request)| SystemEvent {
                 event_id: next_system_event_id("scan-command-enqueued"),
                 occurred_at_unix_ms,
                 kind: SystemEventKind::ScanCommandEnqueued,
                 collection_key: Some(collection_key.into()),
                 component_key: Some(request.component_key.clone()),
-                command_id: Some(command_id.clone()),
+                command_id: Some(command_id),
                 integration_event_id: None,
                 finding_count: None,
                 retryable: None,
                 detail: None,
-            };
-            self.insert_system_event(&event).await?;
+            })
+            .collect::<Vec<_>>();
+
+        let mut transaction = self.begin_transaction().await?;
+        self.insert_pending_scan_commands(&mut transaction, &command_ids, &batch.requests)
+            .await
+            .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
+        self.insert_system_events_in_transaction(&mut transaction, &system_events)
+            .await?;
+        self.commit_transaction(transaction).await?;
+
+        for ((command_id, request), event) in command_ids
+            .iter()
+            .cloned()
+            .zip(batch.requests)
+            .zip(system_events)
+        {
             self.push_system_event(event);
             self.order.push(command_id.clone());
             self.commands.insert(
@@ -4123,6 +4112,12 @@ mod tests {
             reopened.command_status(command_ids[1].as_ref()),
             Some(ScanCommandStatus::Pending)
         );
+        let enqueued_events = reopened
+            .system_events_snapshot()
+            .into_iter()
+            .filter(|event| event.kind == SystemEventKind::ScanCommandEnqueued)
+            .count();
+        assert_eq!(enqueued_events, 2);
     }
 
     #[tokio::test]

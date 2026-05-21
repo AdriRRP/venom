@@ -34,6 +34,9 @@ Completed:
 15. `W103-postgres-integration-publication-event-atomicity`
     Persist integration publication outcome updates and their operator-facing
     system events in one Postgres transaction.
+16. `W104-postgres-scan-request-event-atomicity`
+    Persist Postgres scan-command enqueue writes and their operator-facing
+    system events in one transaction.
 
 ## Exit condition
 
