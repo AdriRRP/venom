@@ -1,5 +1,5 @@
-use crate::findings::finding_provider_contract::validate_provider_scan_report;
 use crate::durable_state::StoredProviderScanReport;
+use crate::findings::finding_provider_contract::validate_provider_scan_report;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, PendingIntegrationEvent,
@@ -299,8 +299,7 @@ impl ScanCommandQueue {
     pub fn next_pending_component_key(&self) -> Option<&str> {
         self.order.iter().find_map(|command_id| {
             self.commands.get(command_id.as_ref()).and_then(|record| {
-                (!record.status.is_terminal())
-                    .then_some(record.request.component_key.as_ref())
+                (!record.status.is_terminal()).then_some(record.request.component_key.as_ref())
             })
         })
     }
@@ -393,14 +392,14 @@ impl ScanCommandQueue {
                 findings_reported: report.findings.len(),
                 change_set,
             }),
-            Err(DurableStateError::Ingestion(error)) => RunNextScanResult::Failed(
-                FailedScanCommand {
+            Err(DurableStateError::Ingestion(error)) => {
+                RunNextScanResult::Failed(FailedScanCommand {
                     command_id: command_id.into(),
                     error_code: error.as_str().into(),
                     retryable: false,
                     detail: "provider report cannot be applied to managed ownership".into(),
-                },
-            ),
+                })
+            }
             Err(error) => return Err(ScanCommandQueueError::State(error)),
         };
         self.record_outcome(&outcome)?;
