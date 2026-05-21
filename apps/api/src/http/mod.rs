@@ -92,28 +92,28 @@ impl ApiState {
     fn refresh_inventory_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
-            .with_inventory(service.inventory_snapshot());
+            .with_inventory_arc(service.inventory_snapshot_arc());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 
     fn refresh_read_model_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
-            .with_read_model(service.read_model_snapshot());
+            .with_read_model_arc(service.read_model_snapshot_arc());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 
     fn refresh_system_events_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
-            .with_system_events(service.system_events_snapshot());
+            .with_system_events_arc(service.system_events_snapshot_arc());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 
     fn refresh_command_status_snapshot(&self, service: &ApiApplication) {
         let next = self
             .read_snapshot()
-            .with_command_statuses(service.command_statuses_snapshot());
+            .with_command_statuses_arc(service.command_statuses_snapshot_arc());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
     }
 }

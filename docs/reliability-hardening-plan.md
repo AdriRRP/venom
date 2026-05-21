@@ -25,6 +25,12 @@ Completed:
 12. `W100-bulk-cohort-streaming`
     Remove avoidable full-vector materialization and ordering from large
     bulk-governance cohorts.
+13. `W101-postgres-governance-event-atomicity`
+    Persist governance writes and their operator-facing system events in the
+    same Postgres transaction.
+14. `W102-api-read-snapshot-arc-sharing`
+    Reuse unchanged HTTP read-snapshot lanes through `Arc` when refreshing one
+    lane at a time.
 
 ## Exit condition
 
