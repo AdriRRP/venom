@@ -3691,6 +3691,7 @@ fn parse_integration_runtime_config_row(
 const fn scan_command_status_name(value: ScanCommandStatus) -> &'static str {
     match value {
         ScanCommandStatus::Pending => "pending",
+        ScanCommandStatus::Applying => "applying",
         ScanCommandStatus::Completed => "completed",
         ScanCommandStatus::Failed => "failed",
     }
@@ -3699,6 +3700,7 @@ const fn scan_command_status_name(value: ScanCommandStatus) -> &'static str {
 fn parse_scan_command_status(value: &str) -> Result<ScanCommandStatus, String> {
     match value {
         "pending" => Ok(ScanCommandStatus::Pending),
+        "applying" => Ok(ScanCommandStatus::Applying),
         "completed" => Ok(ScanCommandStatus::Completed),
         "failed" => Ok(ScanCommandStatus::Failed),
         other => Err(format!("unsupported scan command status: {other}")),

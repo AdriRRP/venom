@@ -23,7 +23,7 @@ use crate::{
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ pub struct DurableState {
     governance: FindingGovernance,
     read_model: FindingReadModel,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
+    applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
     system_events: VecDeque<SystemEvent>,
 }
@@ -73,6 +74,7 @@ impl DurableState {
             governance: FindingGovernance::default(),
             read_model: FindingReadModel::default(),
             integration_runtime_config: None,
+            applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
             system_events: VecDeque::new(),
         };
@@ -627,6 +629,33 @@ impl DurableState {
         &mut self,
         report: &ProviderScanReport,
     ) -> Result<FindingChangeSet, DurableStateError> {
+        self.record_scan_report_internal(None, report)
+    }
+
+    /// Durably record one scan report for one canonical scan command.
+    ///
+    /// Repeated calls with the same `command_id` reuse the already durable
+    /// change set instead of mutating findings again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn record_scan_report_for_command(
+        &mut self,
+        command_id: &str,
+        report: &ProviderScanReport,
+    ) -> Result<FindingChangeSet, DurableStateError> {
+        if let Some(change_set) = self.applied_scan_commands.get(command_id) {
+            return Ok(change_set.clone());
+        }
+        self.record_scan_report_internal(Some(command_id), report)
+    }
+
+    fn record_scan_report_internal(
+        &mut self,
+        command_id: Option<&str>,
+        report: &ProviderScanReport,
+    ) -> Result<FindingChangeSet, DurableStateError> {
         let mut candidate_ingestion = self.ingestion.clone();
         let mut candidate_read_model = self.read_model.clone();
         let change_set = candidate_ingestion
@@ -642,11 +671,17 @@ impl DurableState {
             change_set.clone(),
         );
         self.append_event(&DurableEvent::ProviderScanRecorded {
+            command_id: command_id.map(Into::into),
             report: StoredProviderScanReport::from_report(report)?,
+            change_set: Some(change_set.clone()),
             pending_integration_event: Box::new(Some(pending_integration_event.clone())),
         })?;
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        if let Some(command_id) = command_id {
+            self.applied_scan_commands
+                .insert(command_id.into(), change_set.clone());
+        }
         self.pending_integration_events
             .push_back(pending_integration_event);
         Ok(change_set)
@@ -1164,6 +1199,7 @@ impl DurableState {
         self.governance = FindingGovernance::default();
         self.read_model = FindingReadModel::default();
         self.integration_runtime_config = None;
+        self.applied_scan_commands.clear();
         self.pending_integration_events.clear();
         self.system_events.clear();
 
@@ -1209,9 +1245,17 @@ impl DurableState {
                 Ok(())
             }
             DurableEvent::ProviderScanRecorded {
+                command_id,
                 report,
+                change_set,
                 pending_integration_event,
-            } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
+            } => self.apply_provider_scan_recorded(
+                command_id,
+                report,
+                change_set,
+                *pending_integration_event,
+                line,
+            ),
             DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::FindingsRiskAccepted { .. }
             | DurableEvent::TagFindingsRiskAccepted { .. }
@@ -2087,7 +2131,9 @@ impl DurableState {
 
     fn apply_provider_scan_recorded(
         &mut self,
+        command_id: Option<Box<str>>,
         report: StoredProviderScanReport,
+        change_set: Option<FindingChangeSet>,
         pending_integration_event: Option<PendingIntegrationEvent>,
         line: usize,
     ) -> Result<(), DurableStateError> {
@@ -2111,6 +2157,9 @@ impl DurableState {
         if let Some(pending_integration_event) = pending_integration_event {
             self.pending_integration_events
                 .push_back(pending_integration_event);
+        }
+        if let (Some(command_id), Some(change_set)) = (command_id, change_set) {
+            self.applied_scan_commands.insert(command_id, change_set);
         }
         Ok(())
     }
@@ -2307,7 +2356,11 @@ enum DurableEvent {
         config: IntegrationRuntimeConfig,
     },
     ProviderScanRecorded {
+        #[serde(default)]
+        command_id: Option<Box<str>>,
         report: StoredProviderScanReport,
+        #[serde(default)]
+        change_set: Option<FindingChangeSet>,
         #[serde(default)]
         pending_integration_event: Box<Option<PendingIntegrationEvent>>,
     },
@@ -2546,7 +2599,7 @@ impl StoredCollectionSourceMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredProviderScanReport {
+pub(crate) struct StoredProviderScanReport {
     provider_key: Box<str>,
     component_key: Box<str>,
     artifact: ArtifactRef,
@@ -2557,7 +2610,7 @@ struct StoredProviderScanReport {
 }
 
 impl StoredProviderScanReport {
-    fn from_report(report: &ProviderScanReport) -> Result<Self, DurableStateError> {
+    pub(crate) fn from_report(report: &ProviderScanReport) -> Result<Self, DurableStateError> {
         Ok(Self {
             provider_key: report.provider_key.clone(),
             component_key: report.component_key.clone(),
@@ -2574,7 +2627,7 @@ impl StoredProviderScanReport {
         })
     }
 
-    fn into_domain(self) -> Result<ProviderScanReport, DurableStateError> {
+    pub(crate) fn into_domain(self) -> Result<ProviderScanReport, DurableStateError> {
         let observed_at = self.observed_at.into_system_time()?;
         let mut report = ProviderScanReport::new(
             self.provider_key,
@@ -3101,6 +3154,67 @@ mod tests {
             rebuilt.pending_integration_events()[0].event,
             IntegrationEvent::FindingChangesObserved { .. }
         ));
+    }
+
+    #[test]
+    fn command_scoped_scan_report_recording_is_idempotent() {
+        let path = temp_path("durable-state-command-idempotence");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+
+        let first = state
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("first scan report should persist");
+        let second = state
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("second scan report should reuse the durable change set");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            state
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+
+        let mut rebuilt = DurableState::open(&path).expect("durable state should replay");
+        let replayed = rebuilt
+            .record_scan_report_for_command(
+                "scan-command-1",
+                &report(vec![ReportedFinding::new(
+                    "CVE-2026-0001",
+                    PackageCoordinate::new("openssl", "3.0.0"),
+                )]),
+            )
+            .expect("replayed state should keep command-scoped idempotence");
+
+        assert_eq!(replayed, first);
+        assert_eq!(
+            rebuilt
+                .read_model()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
     }
 
     #[test]

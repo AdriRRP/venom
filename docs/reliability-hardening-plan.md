@@ -17,12 +17,7 @@ Completed:
 4. `W92-gate-signal-hardening`
 5. `W93-bulk-governance-cohort-veracity`
 6. `W94-local-collection-scan-materialization-atomicity`
-
-Remaining:
-
 7. `W95-local-scan-outcome-atomicity`
-   Remove the local split between durable finding mutation and durable scan
-   command terminal outcome.
 
 ## Exit condition
 
