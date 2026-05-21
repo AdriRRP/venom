@@ -2150,6 +2150,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_requests_collection_scan_batch_for_multiple_members() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("collection-scan-multi", "state"),
+                temp_path("collection-scan-multi", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:billing-api",
+                            "name": "Billing API"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("billing component request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components/component:billing-api/artifacts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/billing@sha256:222"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("billing artifact request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = register_release_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = add_payments_component_to_collection(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/collections/release:2026.05/components")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "component_key": "component:billing-api" }).to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("billing membership request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_collection_scan_request(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["collection_key"], "release:2026.05");
+        assert_eq!(payload["freshness"], "deterministic");
+        assert_eq!(payload["enqueued"], 2);
+        assert_eq!(payload["command_ids"].as_array().map_or(0, Vec::len), 2);
+    }
+
+    #[tokio::test]
     async fn api_configures_collection_scan_schedule_and_exposes_it_in_detail() {
         let router = build_router(
             ApiState::open(

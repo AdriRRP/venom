@@ -1518,22 +1518,20 @@ impl ApiApplication {
         request: RequestCollectionScanCommand,
     ) -> Result<RequestCollectionScanResponse, ApiApplicationError> {
         let freshness = parse_freshness(&request.freshness)?;
-        let command_ids = match &mut self.backend {
+        let command_ids: Vec<String> = match &mut self.backend {
             ApiStore::Local(local) => {
                 let batch = ScanPlanner::new(local.state.ingestion().inventory())
                     .plan_collection(collection_key, freshness)
                     .map_err(|error| {
                         ApiApplicationError::InvalidRequest(error.as_str().to_owned())
                     })?;
-                let mut command_ids = Vec::with_capacity(batch.requests.len());
-                for scan_request in batch.requests {
-                    let command = local
-                        .runtime
-                        .enqueue(scan_request)
-                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                    command_ids.push(command.command_id.into());
-                }
-                command_ids
+                local
+                    .runtime
+                    .enqueue_batch(batch.requests)
+                    .map_err(|error| ApiApplicationError::State(error.to_string()))?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
             }
             ApiStore::Postgres(postgres) => postgres
                 .request_collection_scan(collection_key, freshness)
