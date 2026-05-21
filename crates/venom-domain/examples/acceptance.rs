@@ -291,6 +291,37 @@ async fn a_provider_scan_report_with_medium_and_low_findings(
 }
 
 #[given(
+    expr = "a provider scan report with a high vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+#[when(
+    expr = "a provider scan report with a high vulnerability {string} in package {string} version {string} and a low vulnerability {string} in package {string} version {string}"
+)]
+async fn a_provider_scan_report_with_high_and_low_findings(
+    world: &mut AcceptanceWorld,
+    high_vulnerability_id: String,
+    high_package_name: String,
+    high_package_version: String,
+    low_vulnerability_id: String,
+    low_package_name: String,
+    low_package_version: String,
+) {
+    world.pending_report = Some(build_report(
+        world,
+        vec![
+            build_finding(
+                high_vulnerability_id,
+                high_package_name,
+                high_package_version,
+            )
+            .with_severity(Severity::High),
+            build_finding(low_vulnerability_id, low_package_name, low_package_version)
+                .with_severity(Severity::Low),
+        ],
+    ));
+    world.provider_failure = None;
+}
+
+#[given(
     expr = "a recorded provider scan report with vulnerability {string} in package {string} version {string}"
 )]
 async fn a_recorded_provider_scan_report(
@@ -414,6 +445,7 @@ async fn venom_durably_registers_component(
     component_key: String,
     name: String,
 ) {
+    world.component_key = Some(component_key.clone());
     let result = world
         .durable_state_mut()
         .register_component(ComponentRegistration::new(component_key, name));
@@ -485,6 +517,25 @@ async fn venom_durably_registers_production_context_profile(
 ) {
     match world.durable_state_mut().register_context_profile(
         ContextProfileRegistration::overlay(profile_key, name).with_production(true),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked VPN restricted"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked VPN restricted"
+)]
+async fn venom_durably_registers_vpn_restricted_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name).with_vpn_restricted(true),
     ) {
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
@@ -664,6 +715,7 @@ async fn venom_durably_binds_artifact_to_component(
     component_key: String,
 ) {
     let artifact = ArtifactRef::new(ArtifactKind::ContainerImage, artifact_identity);
+    world.artifact = Some(artifact.clone());
     let result = world
         .durable_state_mut()
         .bind_artifact(&component_key, artifact);
@@ -1099,6 +1151,7 @@ async fn venom_executes_the_planned_scan(world: &mut AcceptanceWorld) {
     }
 }
 
+#[given("VENOM durably records the provider scan report")]
 #[when("VENOM durably records the provider scan report")]
 async fn venom_durably_records_the_provider_scan_report(world: &mut AcceptanceWorld) {
     let report = world
@@ -1286,6 +1339,9 @@ async fn venom_durably_suppresses_open_tag_findings(
     }
 }
 
+#[given(
+    expr = "VENOM durably suppresses vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
+)]
 #[when(
     expr = "VENOM durably suppresses vulnerability {string} in package {string} version {string} on component {string} and artifact {string} with reason {string}"
 )]
@@ -1564,11 +1620,11 @@ async fn venom_queries_active_findings_for_collection_with_governance(
         .inventory()
         .collection_scoped_artifacts(&collection_key)
         .expect("collection scope must exist before scoped finding query");
-    let query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(parse_governance_state(&governance_state))
-        .with_min_severity(parse_severity(&min_severity))
-        .with_offset(offset)
-        .with_limit(limit);
+    let query =
+        apply_optional_governance_state(ScopedActiveFindingsQuery::new(), &governance_state)
+            .with_min_severity(parse_severity(&min_severity))
+            .with_offset(offset)
+            .with_limit(limit);
     let page = world
         .durable_state_ref()
         .read_model()
@@ -1600,6 +1656,9 @@ async fn venom_queries_the_release_dashboard(world: &mut AcceptanceWorld, now_un
     ));
 }
 
+#[then(
+    expr = "VENOM queries collection governance overview for {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
+)]
 #[when(
     expr = "VENOM queries collection governance overview for {string} with governance state {string}, minimum severity {string}, offset {int}, and limit {int}"
 )]
@@ -1616,8 +1675,7 @@ async fn venom_queries_collection_governance_overview(
         durable_state.ingestion().inventory(),
         durable_state.read_model(),
         &collection_key,
-        &ScopedActiveFindingsQuery::new()
-            .with_governance_state(parse_governance_state(&governance_state))
+        &apply_optional_governance_state(ScopedActiveFindingsQuery::new(), &governance_state)
             .with_min_severity(parse_severity(&min_severity))
             .with_offset(offset)
             .with_limit(limit),
@@ -2594,6 +2652,22 @@ async fn the_first_scoped_active_finding_governance_state_is(
     );
 }
 
+#[then(expr = "the second scoped active finding governance state is {string}")]
+async fn the_second_scoped_active_finding_governance_state_is(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        last_scoped_active_findings_page(world)
+            .findings
+            .get(1)
+            .expect("a second scoped active finding must exist before governance assertions")
+            .governance_state
+            .as_str(),
+        expected.as_str()
+    );
+}
+
 #[then(expr = "the first scoped active finding governance reason is {string}")]
 async fn the_first_scoped_active_finding_governance_reason_is(
     world: &mut AcceptanceWorld,
@@ -2664,6 +2738,66 @@ async fn the_first_contextual_active_finding_has_no_context_profile(world: &mut 
             .expect("a contextual active findings query must be performed before assertions")
             .context_profile_key
             .is_none()
+    );
+}
+
+#[then("the first contextual active finding has no singular context profile")]
+async fn the_first_contextual_active_finding_has_no_singular_context_profile(
+    world: &mut AcceptanceWorld,
+) {
+    assert!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .context_profile_key
+            .is_none()
+    );
+}
+
+#[then(expr = "the first contextual active finding uses component context profile {string}")]
+async fn the_first_contextual_active_finding_uses_component_context_profile(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .and_then(|finding| finding.component_context_profile.as_ref())
+            .map(|profile| profile.profile_key.as_ref()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(expr = "the first contextual active finding uses collection context profile {string}")]
+async fn the_first_contextual_active_finding_uses_collection_context_profile(
+    world: &mut AcceptanceWorld,
+    expected: String,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .and_then(|finding| finding.collection_context_profile.as_ref())
+            .map(|profile| profile.profile_key.as_ref()),
+        Some(expected.as_str())
+    );
+}
+
+#[then(expr = "the first contextual active finding uses {int} tag context profiles")]
+async fn the_first_contextual_active_finding_uses_tag_context_profiles(
+    world: &mut AcceptanceWorld,
+    expected: usize,
+) {
+    assert_eq!(
+        world
+            .last_contextual_active_findings
+            .first()
+            .expect("a contextual active findings query must be performed before assertions")
+            .tag_context_profiles
+            .len(),
+        expected
     );
 }
 
@@ -3127,6 +3261,17 @@ fn parse_governance_state(value: &str) -> FindingGovernanceState {
         "risk-accepted" => FindingGovernanceState::RiskAccepted,
         "suppressed" => FindingGovernanceState::Suppressed,
         _ => panic!("unsupported governance state in acceptance step: {value}"),
+    }
+}
+
+fn apply_optional_governance_state(
+    query: ScopedActiveFindingsQuery,
+    value: &str,
+) -> ScopedActiveFindingsQuery {
+    if value == "all" {
+        query
+    } else {
+        query.with_governance_state(parse_governance_state(value))
     }
 }
 

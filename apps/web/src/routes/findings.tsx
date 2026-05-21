@@ -71,7 +71,7 @@ const collectionColumns: ColumnDef<CollectionActiveFinding>[] = [
 	},
 	{
 		header: "Context",
-		cell: ({ row }) => row.original.context_profile_name ?? "unassigned",
+		cell: ({ row }) => contextLabel(row.original),
 	},
 ];
 
@@ -95,7 +95,7 @@ const artifactColumns: ColumnDef<ActiveFinding>[] = [
 	},
 	{
 		header: "Context",
-		cell: ({ row }) => row.original.context_profile_name ?? "unassigned",
+		cell: ({ row }) => contextLabel(row.original),
 	},
 ];
 
@@ -144,6 +144,45 @@ function bulkGovernanceTargetLabel(governanceState: string) {
 		default:
 			return "findings";
 	}
+}
+
+function contextSourceLabels(finding: {
+	context_profile_name: string | null;
+	component_context_profile?: { name: string } | null;
+	collection_context_profile?: { name: string } | null;
+	tag_context_profiles?: Array<{ name: string }>;
+}) {
+	if (finding.context_profile_name) {
+		return [finding.context_profile_name];
+	}
+
+	return [
+		...(finding.component_context_profile
+			? [`component:${finding.component_context_profile.name}`]
+			: []),
+		...(finding.tag_context_profiles ?? []).map(
+			(profile) => `tag:${profile.name}`,
+		),
+		...(finding.collection_context_profile
+			? [`collection:${finding.collection_context_profile.name}`]
+			: []),
+	];
+}
+
+function contextLabel(finding: {
+	context_profile_name: string | null;
+	component_context_profile?: { name: string } | null;
+	collection_context_profile?: { name: string } | null;
+	tag_context_profiles?: Array<{ name: string }>;
+}) {
+	const labels = contextSourceLabels(finding);
+	if (labels.length === 0) {
+		return "unassigned";
+	}
+	if (labels.length === 1) {
+		return labels[0];
+	}
+	return `composite (${labels.join(" + ")})`;
 }
 
 export function FindingsPage() {

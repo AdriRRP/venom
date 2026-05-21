@@ -8,8 +8,7 @@ fail() {
 }
 
 skip() {
-  echo "SKIP: $*"
-  exit 0
+  fail "$*"
 }
 
 require_cmd() {

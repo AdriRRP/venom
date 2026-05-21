@@ -52,7 +52,9 @@ flowchart LR
 | Source Materialization | process | The explicit durable act of applying one declared collection source into one collection's concrete membership. | silent background reconciliation with no observable operator outcome |
 | Component | entity | A software asset under management, such as a container image, package set, or other scan target. | "asset" as the primary domain term |
 | Context Profile | entity | A reusable template of execution-context information. | "preset" as the canonical domain name |
-| Contextual Risk | projection field | The deterministic operator-facing risk level produced by combining raw finding severity with one managed component context profile. | treating raw severity as the final operational priority |
+| Effective Context | value object | The merged execution context that actually applies to one component in one query scope after precedence rules are applied across component, tag, and collection overlays. | pretending one scope with multiple overlays still has a single profile identity |
+| Context Provenance | projection field | The truthful set of context-profile sources that contributed to one effective context, preserving whether the result came from component, tag, collection, or a composite of them. | collapsing multi-source context into one fake profile key |
+| Contextual Risk | projection field | The deterministic operator-facing risk level produced by combining raw finding severity with one effective context. | treating raw severity as the final operational priority |
 | Durable State | boundary | The append-only durable history and rebuildable in-memory state that preserves managed ownership and provider observations across reloads. | assuming current memory is enough for business truth |
 | Execution Context | value object | The runtime and business context that changes how a finding should be interpreted. | "environment" when the richer domain meaning is intended |
 | Finding | entity | A concrete observation of a vulnerability affecting a specific component and artifact. | "issue", "alert", "hit" |

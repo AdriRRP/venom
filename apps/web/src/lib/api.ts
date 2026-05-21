@@ -1,5 +1,10 @@
 export type ApiHealthState = "healthy" | "unhealthy";
 
+export type ContextProfileRef = {
+	profile_key: string;
+	name: string;
+};
+
 export type ActiveFinding = {
 	component_key: string;
 	artifact_kind: string;
@@ -12,6 +17,9 @@ export type ActiveFinding = {
 	contextual_risk: string;
 	context_profile_key: string | null;
 	context_profile_name: string | null;
+	component_context_profile?: ContextProfileRef | null;
+	collection_context_profile?: ContextProfileRef | null;
+	tag_context_profiles?: ContextProfileRef[];
 	governance_state: string;
 	governance_reason: string | null;
 	governance_until_unix_ms: number | null;
@@ -222,6 +230,9 @@ export type CollectionDetailResponse = {
 	members: Array<{
 		key: string;
 		context_profile_key: string | null;
+		component_context_profile?: ContextProfileRef | null;
+		collection_context_profile?: ContextProfileRef | null;
+		tag_context_profiles?: ContextProfileRef[];
 		tag_keys: string[];
 	}>;
 };

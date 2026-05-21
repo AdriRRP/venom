@@ -36,7 +36,7 @@ Feature: Manage component tags
       And VENOM durably assigns context profile "context:api-overlay" to tag "tag:api"
       And VENOM durably assigns context profile "context:public-edge" to component "component:payments-api"
       And VENOM reloads the durable state
-      Then the durable state shows component "component:payments-api" resolves context in collection "release:2026.05" as internet exposed, production, mission critical, and VPN restricted
+      Then the durable state shows component "component:payments-api" resolves context in collection "release:2026.05" as "internet exposed, production, mission critical, and vpn restricted"
 
     Scenario: reject one conflicting tag overlay on the same component
       Given no managed components

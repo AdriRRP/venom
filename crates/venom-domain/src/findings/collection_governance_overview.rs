@@ -1,7 +1,7 @@
 use crate::findings::{
-    CollectionHealthSummary, ContextualRiskLevel, FindingGovernanceState, FindingReadModel,
+    CollectionHealthSummary, ContextualRiskLevel, DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT,
+    FindingGovernanceState, FindingReadModel, MAX_ACTIVE_FINDINGS_PAGE_LIMIT, ScopedActiveFinding,
     ScopedActiveFindingsPage, ScopedActiveFindingsQuery, contextual_risk_level,
-    summarize_collection_health,
 };
 use crate::inventory::ComponentInventory;
 use std::collections::BTreeMap;
@@ -27,6 +27,13 @@ pub struct BulkGovernanceCohortSummary {
     pub high_risk: usize,
 }
 
+#[derive(Default)]
+struct CollectionGovernanceAccumulator {
+    health: CollectionHealthSummary,
+    bulk_governance: BulkGovernanceCohortSummary,
+    page_findings: Vec<ScopedActiveFinding>,
+}
+
 #[must_use]
 pub fn query_collection_governance_overview(
     inventory: &ComponentInventory,
@@ -35,65 +42,193 @@ pub fn query_collection_governance_overview(
     query: &ScopedActiveFindingsQuery,
 ) -> Option<CollectionGovernanceOverview> {
     let scope = inventory.collection_scoped_artifacts(collection_key)?;
-    Some(CollectionGovernanceOverview {
-        health: summarize_collection_health(inventory, read_model, collection_key, &scope),
-        bulk_governance: summarize_bulk_governance_cohort(
-            inventory,
-            read_model,
-            collection_key,
-            &scope,
-            query,
-        ),
-        page: read_model.query_scoped_active_findings(&scope, query),
-    })
-}
-
-fn summarize_bulk_governance_cohort(
-    inventory: &ComponentInventory,
-    read_model: &FindingReadModel,
-    collection_key: &str,
-    scope: &[crate::CollectionScopedArtifact],
-    query: &ScopedActiveFindingsQuery,
-) -> BulkGovernanceCohortSummary {
+    let mut accumulator = CollectionGovernanceAccumulator::default();
     let governance_state = query
         .governance_state
         .unwrap_or(FindingGovernanceState::Open);
-    let cohort_query = ScopedActiveFindingsQuery::new().with_governance_state(governance_state);
-    let cohort_query = if let Some(min_severity) = query.min_severity {
-        cohort_query.with_min_severity(min_severity)
-    } else {
-        cohort_query
-    };
-    let cohort_query = if let Some(package_name) = query.package_name.as_deref() {
-        cohort_query.with_package_name(package_name)
-    } else {
-        cohort_query
-    };
-
-    let mut summary = BulkGovernanceCohortSummary::default();
     let mut context_profiles = BTreeMap::new();
-
-    for finding in read_model.collect_scoped_active_findings(scope, &cohort_query) {
-        summary.targeted += 1;
+    read_model.visit_scoped_active_findings(&scope, |finding| {
         let context_profile = context_profiles
             .entry(finding.finding.component_key.clone())
             .or_insert_with(|| {
-                inventory.managed_component_context_profile_in_collection(
+                inventory.managed_component_effective_context_in_collection(
                     collection_key,
                     finding.finding.component_key.as_ref(),
                 )
             });
-        match contextual_risk_level(finding.severity, context_profile.as_ref()) {
-            ContextualRiskLevel::Critical => summary.critical_risk += 1,
-            ContextualRiskLevel::High => summary.high_risk += 1,
+        let risk = contextual_risk_level(
+            finding.severity,
+            context_profile.as_ref().map(|context| &context.values),
+        );
+        accumulator.observe(finding, query, governance_state, risk);
+    });
+
+    Some(CollectionGovernanceOverview {
+        health: accumulator.health,
+        bulk_governance: accumulator.bulk_governance,
+        page: build_scoped_page(accumulator.page_findings, query),
+    })
+}
+
+impl CollectionGovernanceAccumulator {
+    fn observe(
+        &mut self,
+        finding: ScopedActiveFinding,
+        query: &ScopedActiveFindingsQuery,
+        governance_state: FindingGovernanceState,
+        risk: ContextualRiskLevel,
+    ) {
+        match finding.governance_state {
+            FindingGovernanceState::Open => self.health.open += 1,
+            FindingGovernanceState::RiskAccepted => self.health.risk_accepted += 1,
+            FindingGovernanceState::Suppressed => self.health.suppressed += 1,
+        }
+        self.health.total += 1;
+        match risk {
+            ContextualRiskLevel::Critical => self.health.critical_risk += 1,
+            ContextualRiskLevel::High => self.health.high_risk += 1,
             ContextualRiskLevel::Unknown
             | ContextualRiskLevel::None
             | ContextualRiskLevel::Low
             | ContextualRiskLevel::Medium => {}
         }
-    }
 
-    summary
+        if matches_bulk_governance_filter(&finding, governance_state, query) {
+            self.bulk_governance.targeted += 1;
+            match risk {
+                ContextualRiskLevel::Critical => self.bulk_governance.critical_risk += 1,
+                ContextualRiskLevel::High => self.bulk_governance.high_risk += 1,
+                ContextualRiskLevel::Unknown
+                | ContextualRiskLevel::None
+                | ContextualRiskLevel::Low
+                | ContextualRiskLevel::Medium => {}
+            }
+        }
+
+        if matches_page_filter(&finding, query) {
+            self.page_findings.push(finding);
+        }
+    }
+}
+
+fn build_scoped_page(
+    mut findings: Vec<ScopedActiveFinding>,
+    query: &ScopedActiveFindingsQuery,
+) -> ScopedActiveFindingsPage {
+    findings.sort_unstable_by(compare_scoped_findings);
+    let limit = normalize_page_limit(query.limit);
+    let offset = query.offset;
+    let total = findings.len();
+    let findings = findings
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    ScopedActiveFindingsPage {
+        total,
+        returned: findings.len(),
+        offset,
+        limit,
+        findings,
+    }
+}
+
+fn compare_scoped_findings(
+    left: &ScopedActiveFinding,
+    right: &ScopedActiveFinding,
+) -> std::cmp::Ordering {
+    std::cmp::Reverse(severity_rank(left.severity))
+        .cmp(&std::cmp::Reverse(severity_rank(right.severity)))
+        .then_with(|| {
+            left.finding
+                .component_key
+                .as_ref()
+                .cmp(right.finding.component_key.as_ref())
+        })
+        .then_with(|| left.finding.artifact.kind.cmp(&right.finding.artifact.kind))
+        .then_with(|| {
+            left.finding
+                .artifact
+                .identity
+                .as_ref()
+                .cmp(right.finding.artifact.identity.as_ref())
+        })
+        .then_with(|| {
+            left.finding
+                .vulnerability_id
+                .as_ref()
+                .cmp(right.finding.vulnerability_id.as_ref())
+        })
+        .then_with(|| {
+            left.finding
+                .package
+                .name
+                .as_ref()
+                .cmp(right.finding.package.name.as_ref())
+        })
+        .then_with(|| {
+            left.finding
+                .package
+                .version
+                .as_ref()
+                .cmp(right.finding.package.version.as_ref())
+        })
+        .then_with(|| {
+            left.finding
+                .package
+                .purl
+                .as_deref()
+                .cmp(&right.finding.package.purl.as_deref())
+        })
+}
+
+fn matches_bulk_governance_filter(
+    finding: &ScopedActiveFinding,
+    governance_state: FindingGovernanceState,
+    query: &ScopedActiveFindingsQuery,
+) -> bool {
+    finding.governance_state == governance_state
+        && query
+            .min_severity
+            .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+        && query
+            .package_name
+            .as_deref()
+            .is_none_or(|package_name| finding.finding.package.name.as_ref() == package_name)
+}
+
+fn matches_page_filter(finding: &ScopedActiveFinding, query: &ScopedActiveFindingsQuery) -> bool {
+    query
+        .min_severity
+        .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+        && query
+            .governance_state
+            .is_none_or(|governance_state| finding.governance_state == governance_state)
+        && query
+            .package_name
+            .as_deref()
+            .is_none_or(|package_name| finding.finding.package.name.as_ref() == package_name)
+}
+
+const fn severity_rank(value: crate::Severity) -> u8 {
+    match value {
+        crate::Severity::Unknown => 0,
+        crate::Severity::None => 1,
+        crate::Severity::Low => 2,
+        crate::Severity::Medium => 3,
+        crate::Severity::High => 4,
+        crate::Severity::Critical => 5,
+    }
+}
+
+const fn normalize_page_limit(limit: usize) -> usize {
+    if limit == 0 {
+        DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT
+    } else if limit > MAX_ACTIVE_FINDINGS_PAGE_LIMIT {
+        MAX_ACTIVE_FINDINGS_PAGE_LIMIT
+    } else {
+        limit
+    }
 }
 
 #[cfg(test)]
