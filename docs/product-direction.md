@@ -13,12 +13,15 @@ The platform target is:
 
 - know which components and collections are under management
 - define closed release collections as canonical scan scope and schedule periodic scans over them
+- define transversal component tags as reusable cohorts across releases
 - derive one managed release collection from one declared source with explicit replace or reconcile semantics
 - apply one managed default context profile to one closed release collection and merge it with component-specific context without component-by-component operator fan-out
+- apply one managed context overlay to one component tag and merge it with collection defaults and explicit component context using specific-over-generic precedence
 - query active findings over one closed release collection without reconstructing scope by hand
 - work governed findings in one release-scoped workbench without losing the collection health context
 - see one explicit bulk-governance cohort summary before acting over one filtered open release scope
 - apply one explicit governance action to a filtered open cohort inside one release collection
+- apply one explicit governance action to a filtered open cohort across one reusable tag-scoped component cohort
 - see one executive release dashboard that compresses schedule state, collection health, governed findings, and elevated contextual risk
 - see one compact health summary for every managed release collection
 - see one deterministic contextual risk level derived from execution context on active findings views
@@ -38,13 +41,13 @@ The platform target is:
 
 | Capability | Why it exists | Typical canonical feature shape |
 |---|---|---|
-| Inventory | know what is under management and how release scope is grouped | `register-component.feature`, `manage-collections.feature` |
+| Inventory | know what is under management and how release scope or transversal cohorts are grouped | `register-component.feature`, `manage-collections.feature`, `manage-component-tags.feature` |
 | Scan orchestration | express canonical scan requests over managed ownership and closed collections | `request-scan.feature`, `request-collection-scan.feature`, `schedule-collection-scan.feature` |
 | Finding ingestion | import concrete provider observations over immutable artifacts | `report-finding.feature` |
 | Durable operations | rebuild active findings and durable scan command state after reload | `view-active-findings.feature`, `request-scan.feature` |
 | Integration publication | expose durable domain changes to external consumers safely | `tests/contracts/integration-events/**` |
-| Contextual risk | change meaning by runtime context | `classify-finding.feature` |
-| Governance | accept, suppress, reopen, explain | `accept-risk.feature`, `suppress-finding.feature`, `reopen-finding.feature` |
+| Contextual risk | change meaning by runtime context | `classify-finding.feature`, `manage-component-tags.feature` |
+| Governance | accept, suppress, reopen, explain | `accept-risk.feature`, `suppress-finding.feature`, `reopen-finding.feature`, `bulk-governance-by-tag.feature` |
 | Operations | answer what is active, changed, pending, and due now | `view-active-findings.feature`, `view-collection-schedules.feature` |
 | Reliability substrate | keep all of the above durable and rebuildable | usually verified by infra and acceptance gates rather than a standalone business feature |
 

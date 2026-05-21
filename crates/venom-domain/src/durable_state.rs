@@ -1,24 +1,26 @@
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
-    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
-    BulkAcceptRiskResult, BulkReopenFindingResult, BulkSuppressFindingResult,
-    CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentRegistration,
-    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
-    ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
-    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
-    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
-    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    AssignComponentTagChange, AssignComponentTagResult, AssignContextProfileChange,
+    AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
+    BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult,
+    BulkSuppressFindingResult, CollectionRegistration, CollectionSource, CollectionSourceMode,
+    ComponentRegistration, ComponentTagRegistration, ConfigureCollectionScanScheduleChange,
+    ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
+    ConfigureCollectionSourceResult, ConfigureIntegrationRuntimeChange,
+    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
+    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
+    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
     MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
-    RegisterComponentResult, RegisterContextProfileChange, RegisterContextProfileResult,
-    RemoveCollectionComponentChange, RemoveCollectionComponentResult, ReopenFindingChange,
-    ReopenFindingResult, ReportedFinding, RiskAcceptance, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingChange, SuppressFindingResult, Suppression, SystemEvent, SystemEventKind,
-    SystemEventsPage, SystemEventsQuery,
-    findings::finding_read_model::canonicalize_reported_findings,
+    RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
+    RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
+    RemoveCollectionComponentResult, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
+    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
+    SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
+    SystemEventsQuery, findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -229,6 +231,26 @@ impl DurableState {
         Ok(result)
     }
 
+    /// Durably register one managed transversal component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn register_component_tag(
+        &mut self,
+        registration: ComponentTagRegistration,
+    ) -> Result<RegisterComponentTagResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_component_tag(registration.clone());
+        if result.change == RegisterComponentTagChange::Registered {
+            self.append_event(&DurableEvent::ComponentTagRegistered {
+                registration: StoredComponentTagRegistration::from(registration),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
     /// Durably bind one immutable artifact to a managed component.
     ///
     /// # Errors
@@ -309,6 +331,50 @@ impl DurableState {
         if result.change == AssignContextProfileChange::Assigned {
             self.append_event(&DurableEvent::ComponentContextProfileAssigned {
                 component_key: component_key.into(),
+                profile_key: profile_key.into(),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one managed tag to one managed component.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn assign_component_tag(
+        &mut self,
+        tag_key: &str,
+        component_key: &str,
+    ) -> Result<AssignComponentTagResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_component_tag(tag_key, component_key);
+        if result.change == AssignComponentTagChange::Assigned {
+            self.append_event(&DurableEvent::ComponentTagged {
+                tag_key: tag_key.into(),
+                component_key: component_key.into(),
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one managed context profile to one managed tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the durable append fails.
+    pub fn assign_context_profile_for_tag(
+        &mut self,
+        tag_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignTagContextProfileResult, DurableStateError> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_context_profile_for_tag(tag_key, profile_key);
+        if result.change == AssignTagContextProfileChange::Assigned {
+            self.append_event(&DurableEvent::TagContextProfileAssigned {
+                tag_key: tag_key.into(),
                 profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
@@ -712,6 +778,77 @@ impl DurableState {
         })
     }
 
+    /// Durably accept risk for all open active findings matched inside one tag scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingTag`] when the tag is unknown, or
+    /// another [`DurableStateError`] when the durable append fails.
+    pub fn accept_risk_for_tag(
+        &mut self,
+        tag_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        acceptance: RiskAcceptance,
+    ) -> Result<BulkAcceptRiskResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .tag_scoped_artifacts(tag_key)
+            .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            if result.change == AcceptRiskChange::Accepted {
+                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
+                changed_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let accepted = changed_findings.len();
+        if accepted > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            self.append_event(&DurableEvent::TagFindingsRiskAccepted {
+                tag_key: tag_key.into(),
+                findings: changed_findings,
+                acceptance: acceptance.clone(),
+                occurred_at_unix_ms,
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-tag-risk-accepted-live-{tag_key}-{occurred_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsRiskAccepted,
+                collection_key: None,
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(accepted).ok(),
+                retryable: None,
+                detail: Some(format!("tag {tag_key}: {}", acceptance.reason).into_boxed_str()),
+            });
+        }
+
+        Ok(BulkAcceptRiskResult {
+            targeted,
+            accepted,
+            unchanged: targeted.saturating_sub(accepted),
+            acceptance,
+        })
+    }
+
     /// Durably reopen one governed active finding back to the canonical open state.
     ///
     /// # Errors
@@ -882,6 +1019,77 @@ impl DurableState {
         })
     }
 
+    /// Durably suppress all open active findings matched inside one tag scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError::MissingTag`] when the tag is unknown, or
+    /// another [`DurableStateError`] when the durable append fails.
+    pub fn suppress_findings_for_tag(
+        &mut self,
+        tag_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        suppression: Suppression,
+    ) -> Result<BulkSuppressFindingResult, DurableStateError> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .tag_scoped_artifacts(tag_key)
+            .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed_findings = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            if result.change == SuppressFindingChange::Suppressed {
+                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
+                changed_findings.push(StoredFindingRef::from(finding.finding));
+            }
+        }
+
+        let suppressed = changed_findings.len();
+        if suppressed > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            self.append_event(&DurableEvent::TagFindingsSuppressed {
+                tag_key: tag_key.into(),
+                findings: changed_findings,
+                suppression: suppression.clone(),
+                occurred_at_unix_ms,
+            })?;
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            self.push_system_event(SystemEvent {
+                event_id: format!(
+                    "durable-state-tag-suppressed-live-{tag_key}-{occurred_at_unix_ms}"
+                )
+                .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsSuppressed,
+                collection_key: None,
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(suppressed).ok(),
+                retryable: None,
+                detail: Some(format!("tag {tag_key}: {}", suppression.reason).into_boxed_str()),
+            });
+        }
+
+        Ok(BulkSuppressFindingResult {
+            targeted,
+            suppressed,
+            unchanged: targeted.saturating_sub(suppressed),
+            suppression,
+        })
+    }
+
     /// Durably reopen one filtered governed cohort of findings inside one collection.
     ///
     /// # Errors
@@ -979,10 +1187,13 @@ impl DurableState {
     fn apply_event(&mut self, event: DurableEvent, line: usize) -> Result<(), DurableStateError> {
         match event {
             DurableEvent::ComponentRegistered { .. }
+            | DurableEvent::ComponentTagRegistered { .. }
             | DurableEvent::ContextProfileRegistered { .. }
             | DurableEvent::ArtifactBound { .. }
             | DurableEvent::ComponentProviderConfigured { .. }
             | DurableEvent::ComponentContextProfileAssigned { .. }
+            | DurableEvent::ComponentTagged { .. }
+            | DurableEvent::TagContextProfileAssigned { .. }
             | DurableEvent::CollectionContextProfileAssigned { .. }
             | DurableEvent::CollectionRegistered { .. }
             | DurableEvent::CollectionComponentAdded { .. }
@@ -1003,9 +1214,11 @@ impl DurableState {
             } => self.apply_provider_scan_recorded(report, *pending_integration_event, line),
             DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::FindingsRiskAccepted { .. }
+            | DurableEvent::TagFindingsRiskAccepted { .. }
             | DurableEvent::FindingSuppressed { .. }
             | DurableEvent::FindingReopened { .. }
             | DurableEvent::FindingsSuppressed { .. }
+            | DurableEvent::TagFindingsSuppressed { .. }
             | DurableEvent::FindingsReopened { .. } => {
                 self.apply_governance_event(event, line);
                 Ok(())
@@ -1054,6 +1267,18 @@ impl DurableState {
                 occurred_at_unix_ms,
                 line,
             ),
+            DurableEvent::TagFindingsRiskAccepted {
+                tag_key,
+                findings,
+                acceptance,
+                occurred_at_unix_ms,
+            } => self.apply_tag_risk_accepted_many_event(
+                &tag_key,
+                findings,
+                &acceptance,
+                occurred_at_unix_ms,
+                line,
+            ),
             DurableEvent::FindingSuppressed {
                 finding,
                 suppression,
@@ -1072,6 +1297,18 @@ impl DurableState {
                 collection_key,
                 findings,
                 suppression,
+                occurred_at_unix_ms,
+                line,
+            ),
+            DurableEvent::TagFindingsSuppressed {
+                tag_key,
+                findings,
+                suppression,
+                occurred_at_unix_ms,
+            } => self.apply_tag_suppressed_many_event(
+                &tag_key,
+                findings,
+                &suppression,
                 occurred_at_unix_ms,
                 line,
             ),
@@ -1100,6 +1337,9 @@ impl DurableState {
             DurableEvent::ComponentRegistered { registration } => {
                 self.apply_component_registered(registration, line)
             }
+            DurableEvent::ComponentTagRegistered { registration } => {
+                self.apply_component_tag_registered(registration, line)
+            }
             DurableEvent::ArtifactBound {
                 component_key,
                 artifact,
@@ -1118,6 +1358,18 @@ impl DurableState {
                 profile_key,
             } => self.apply_context_profile_assigned(
                 component_key.as_ref(),
+                profile_key.as_ref(),
+                line,
+            ),
+            DurableEvent::ComponentTagged {
+                tag_key,
+                component_key,
+            } => self.apply_component_tagged(tag_key.as_ref(), component_key.as_ref(), line),
+            DurableEvent::TagContextProfileAssigned {
+                tag_key,
+                profile_key,
+            } => self.apply_tag_context_profile_assigned(
+                tag_key.as_ref(),
                 profile_key.as_ref(),
                 line,
             ),
@@ -1146,7 +1398,9 @@ impl DurableState {
             | DurableEvent::ProviderScanRecorded { .. }
             | DurableEvent::FindingRiskAccepted { .. }
             | DurableEvent::FindingsRiskAccepted { .. }
+            | DurableEvent::TagFindingsRiskAccepted { .. }
             | DurableEvent::FindingSuppressed { .. }
+            | DurableEvent::TagFindingsSuppressed { .. }
             | DurableEvent::FindingsSuppressed { .. }
             | DurableEvent::FindingReopened { .. }
             | DurableEvent::FindingsReopened { .. }
@@ -1366,6 +1620,58 @@ impl DurableState {
         });
     }
 
+    fn apply_tag_risk_accepted_many_event(
+        &mut self,
+        tag_key: &str,
+        findings: Vec<StoredFindingRef>,
+        acceptance: &RiskAcceptance,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) {
+        let finding_count = u32::try_from(findings.len()).ok();
+        for finding in findings {
+            self.apply_finding_risk_accepted(finding, acceptance.clone());
+        }
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-tag-risk-accepted-many-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingsRiskAccepted,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count,
+            retryable: None,
+            detail: Some(format!("tag {tag_key}: {}", acceptance.reason).into_boxed_str()),
+        });
+    }
+
+    fn apply_tag_suppressed_many_event(
+        &mut self,
+        tag_key: &str,
+        findings: Vec<StoredFindingRef>,
+        suppression: &Suppression,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) {
+        let finding_count = u32::try_from(findings.len()).ok();
+        for finding in findings {
+            self.apply_finding_suppressed(finding, suppression.clone());
+        }
+        self.push_system_event(SystemEvent {
+            event_id: format!("durable-state-tag-suppressed-many-{line}").into_boxed_str(),
+            occurred_at_unix_ms,
+            kind: SystemEventKind::FindingsSuppressed,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count,
+            retryable: None,
+            detail: Some(format!("tag {tag_key}: {}", suppression.reason).into_boxed_str()),
+        });
+    }
+
     fn apply_reopened_event(
         &mut self,
         finding: &StoredFindingRef,
@@ -1469,6 +1775,26 @@ impl DurableState {
         }
     }
 
+    fn apply_component_tag_registered(
+        &mut self,
+        registration: StoredComponentTagRegistration,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .register_component_tag(registration.into_domain());
+        match result.change {
+            RegisterComponentTagChange::Registered | RegisterComponentTagChange::Unchanged => {
+                Ok(())
+            }
+            RegisterComponentTagChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "conflicting component tag registration".into(),
+            }),
+        }
+    }
+
     fn apply_artifact_bound(
         &mut self,
         component_key: &str,
@@ -1560,6 +1886,46 @@ impl DurableState {
             AssignContextProfileChange::Rejected => Err(DurableStateError::CorruptHistory {
                 line,
                 reason: "invalid component context profile assignment".into(),
+            }),
+        }
+    }
+
+    fn apply_component_tagged(
+        &mut self,
+        tag_key: &str,
+        component_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .assign_component_tag(tag_key, component_key);
+        match result.change {
+            AssignComponentTagChange::Assigned | AssignComponentTagChange::Unchanged => Ok(()),
+            AssignComponentTagChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid component tag assignment".into(),
+            }),
+        }
+    }
+
+    fn apply_tag_context_profile_assigned(
+        &mut self,
+        tag_key: &str,
+        profile_key: &str,
+        line: usize,
+    ) -> Result<(), DurableStateError> {
+        let result = self
+            .ingestion
+            .inventory_mut()
+            .assign_context_profile_for_tag(tag_key, profile_key);
+        match result.change {
+            AssignTagContextProfileChange::Assigned | AssignTagContextProfileChange::Unchanged => {
+                Ok(())
+            }
+            AssignTagContextProfileChange::Rejected => Err(DurableStateError::CorruptHistory {
+                line,
+                reason: "invalid tag context profile assignment".into(),
             }),
         }
     }
@@ -1828,6 +2194,7 @@ pub enum DurableStateError {
     CorruptHistory { line: usize, reason: Box<str> },
     Ingestion(FindingIngestionError),
     MissingCollection(Box<str>),
+    MissingTag(Box<str>),
     MissingFinding(Box<str>),
     Time(String),
 }
@@ -1842,6 +2209,7 @@ impl DurableStateError {
             Self::Ingestion(FindingIngestionError::UnmanagedComponent) => "unmanaged-component",
             Self::Ingestion(FindingIngestionError::UnmanagedArtifact) => "unmanaged-artifact",
             Self::MissingCollection(_) => "missing-collection",
+            Self::MissingTag(_) => "missing-tag",
             Self::MissingFinding(_) => "missing-finding",
             Self::Time(_) => "invalid-time",
         }
@@ -1858,6 +2226,7 @@ impl core::fmt::Display for DurableStateError {
             }
             Self::Ingestion(error) => write!(f, "ingestion error: {}", error.as_str()),
             Self::MissingCollection(error) => write!(f, "missing collection: {error}"),
+            Self::MissingTag(error) => write!(f, "missing tag: {error}"),
             Self::MissingFinding(error) => write!(f, "missing finding: {error}"),
             Self::Time(error) => write!(f, "time error: {error}"),
         }
@@ -1871,6 +2240,9 @@ impl std::error::Error for DurableStateError {}
 enum DurableEvent {
     ComponentRegistered {
         registration: StoredComponentRegistration,
+    },
+    ComponentTagRegistered {
+        registration: StoredComponentTagRegistration,
     },
     ContextProfileRegistered {
         registration: StoredContextProfileRegistration,
@@ -1888,6 +2260,14 @@ enum DurableEvent {
     },
     ComponentContextProfileAssigned {
         component_key: Box<str>,
+        profile_key: Box<str>,
+    },
+    ComponentTagged {
+        tag_key: Box<str>,
+        component_key: Box<str>,
+    },
+    TagContextProfileAssigned {
+        tag_key: Box<str>,
         profile_key: Box<str>,
     },
     CollectionContextProfileAssigned {
@@ -1944,6 +2324,13 @@ enum DurableEvent {
         #[serde(default)]
         occurred_at_unix_ms: u64,
     },
+    TagFindingsRiskAccepted {
+        tag_key: Box<str>,
+        findings: Vec<StoredFindingRef>,
+        acceptance: RiskAcceptance,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+    },
     FindingSuppressed {
         finding: StoredFindingRef,
         suppression: Suppression,
@@ -1957,6 +2344,13 @@ enum DurableEvent {
     },
     FindingsSuppressed {
         collection_key: Box<str>,
+        findings: Vec<StoredFindingRef>,
+        suppression: Suppression,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+    },
+    TagFindingsSuppressed {
+        tag_key: Box<str>,
         findings: Vec<StoredFindingRef>,
         suppression: Suppression,
         #[serde(default)]
@@ -2000,6 +2394,27 @@ impl From<ComponentRegistration> for StoredComponentRegistration {
 impl StoredComponentRegistration {
     fn into_domain(self) -> ComponentRegistration {
         ComponentRegistration::new(self.component_key, self.name)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredComponentTagRegistration {
+    tag_key: Box<str>,
+    name: Box<str>,
+}
+
+impl From<ComponentTagRegistration> for StoredComponentTagRegistration {
+    fn from(value: ComponentTagRegistration) -> Self {
+        Self {
+            tag_key: value.tag_key,
+            name: value.name,
+        }
+    }
+}
+
+impl StoredComponentTagRegistration {
+    fn into_domain(self) -> ComponentTagRegistration {
+        ComponentTagRegistration::new(self.tag_key, self.name)
     }
 }
 

@@ -1,25 +1,28 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
     ApiReadSnapshot, AssignCollectionContextProfileRequest, AssignCollectionContextProfileResponse,
-    AssignContextProfileRequest, AssignContextProfileResponse, BindArtifactRequest,
-    BindArtifactResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse, BulkReopenFindingsRequest,
-    BulkReopenFindingsResponse, BulkSuppressFindingsRequest, BulkSuppressFindingsResponse,
-    CollectionActiveFindingsResponse, CollectionDetailResponse, CollectionMembershipRequest,
-    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    AssignContextProfileRequest, AssignContextProfileResponse, AssignTagContextProfileRequest,
+    AssignTagContextProfileResponse, BindArtifactRequest, BindArtifactResponse,
+    BulkAcceptRiskByTagResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
+    BulkReopenFindingsRequest, BulkReopenFindingsResponse, BulkSuppressFindingsByTagResponse,
+    BulkSuppressFindingsRequest, BulkSuppressFindingsResponse, CollectionActiveFindingsResponse,
+    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
+    CollectionRegistrationRequest, ComponentRegistrationRequest, ComponentTagMembershipRequest,
+    ComponentTagMembershipResponse, ComponentTagRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureCollectionSourceRequest, ConfigureCollectionSourceResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
     ConfigureProviderRequest, ConfigureProviderResponse, ContextProfileRegistrationRequest,
     DrainCollectionScanWorkerCommand, DrainCollectionScanWorkerResponse,
     DrainIntegrationWorkerCommand, DrainIntegrationWorkerResponse, DrainWorkerCommand,
-    DrainWorkerResponse, ListCollectionsResponse, ListContextProfilesResponse,
-    ListSystemEventsRequest, ListSystemEventsResponse, MaterializeCollectionSourceResponse,
-    ProviderScanReportRequest, RecordProviderReportResponse, RegisterCollectionResponse,
-    RegisterComponentResponse, RegisterContextProfileResponse, ReleaseDashboardResponse,
-    ReopenFindingRequest, ReopenFindingResponse, RequestCollectionScanCommand,
-    RequestCollectionScanResponse, RequestScanCommand, RequestScanResponse, RunNextScanCommand,
-    RunNextScanResponse, ScanCommandStatusResponse, SuppressFindingRequest,
-    SuppressFindingResponse,
+    DrainWorkerResponse, ListCollectionsResponse, ListComponentTagsResponse,
+    ListContextProfilesResponse, ListSystemEventsRequest, ListSystemEventsResponse,
+    MaterializeCollectionSourceResponse, ProviderScanReportRequest, RecordProviderReportResponse,
+    RegisterCollectionResponse, RegisterComponentResponse, RegisterComponentTagResponse,
+    RegisterContextProfileResponse, ReleaseDashboardResponse, ReopenFindingRequest,
+    ReopenFindingResponse, RequestCollectionScanCommand, RequestCollectionScanResponse,
+    RequestScanCommand, RequestScanResponse, RunNextScanCommand, RunNextScanResponse,
+    ScanCommandStatusResponse, SuppressFindingRequest, SuppressFindingResponse,
 };
 use axum::{
     Json, Router,
@@ -112,11 +115,53 @@ pub fn build_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/dashboard/releases", get(release_dashboard))
+        .merge(build_component_routes())
+        .merge(build_collection_routes())
+        .merge(build_governance_routes())
+        .merge(build_runtime_routes())
+        .with_state(state)
+}
+
+fn build_component_routes() -> Router<ApiState> {
+    Router::new()
         .route("/components", post(register_component))
+        .route(
+            "/component-tags",
+            post(register_component_tag).get(list_component_tags),
+        )
+        .route(
+            "/component-tags/{tag_key}/components",
+            post(add_component_to_tag),
+        )
+        .route(
+            "/component-tags/{tag_key}/context-profile",
+            post(assign_tag_context_profile),
+        )
+        .route(
+            "/component-tags/{tag_key}/findings/risk-acceptance",
+            post(accept_tag_risk),
+        )
+        .route(
+            "/component-tags/{tag_key}/findings/suppression",
+            post(suppress_tag_findings),
+        )
         .route(
             "/context-profiles",
             post(register_context_profile).get(list_context_profiles),
         )
+        .route("/components/{component_key}/artifacts", post(bind_artifact))
+        .route(
+            "/components/{component_key}/context-profile",
+            post(assign_context_profile),
+        )
+        .route(
+            "/components/{component_key}/provider-runtime",
+            post(configure_provider),
+        )
+}
+
+fn build_collection_routes() -> Router<ApiState> {
+    Router::new()
         .route(
             "/collections",
             post(register_collection).get(list_collections),
@@ -166,19 +211,20 @@ pub fn build_router(state: ApiState) -> Router {
             "/collections/{collection_key}/findings/reopen",
             post(reopen_collection_findings),
         )
-        .route("/components/{component_key}/artifacts", post(bind_artifact))
-        .route(
-            "/components/{component_key}/context-profile",
-            post(assign_context_profile),
-        )
-        .route(
-            "/components/{component_key}/provider-runtime",
-            post(configure_provider),
-        )
-        .route("/integration-runtime", post(configure_integration_runtime))
+}
+
+fn build_governance_routes() -> Router<ApiState> {
+    Router::new()
         .route("/findings/risk-acceptance", post(accept_risk))
         .route("/findings/suppression", post(suppress_finding))
         .route("/findings/reopen", post(reopen_finding))
+        .route("/findings/active", get(list_active_findings))
+        .route("/system-events", get(list_system_events))
+}
+
+fn build_runtime_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/integration-runtime", post(configure_integration_runtime))
         .route("/scan-requests", post(request_scan))
         .route("/scan-commands/{command_id}", get(scan_command_status))
         .route(
@@ -189,9 +235,6 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/scan-workers/drain", post(drain_worker))
         .route("/integration-workers/drain", post(drain_integration_worker))
         .route("/provider-reports", post(record_provider_report))
-        .route("/findings/active", get(list_active_findings))
-        .route("/system-events", get(list_system_events))
-        .with_state(state)
 }
 
 async fn health() -> &'static str {
@@ -240,6 +283,29 @@ async fn register_component(
     Ok(Json(response))
 }
 
+async fn register_component_tag(
+    State(state): State<ApiState>,
+    Json(request): Json<ComponentTagRegistrationRequest>,
+) -> Result<Json<RegisterComponentTagResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .register_component_tag(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn list_component_tags(
+    State(state): State<ApiState>,
+) -> Result<Json<ListComponentTagsResponse>, ApiError> {
+    Ok(Json(state.read_snapshot().list_component_tags()))
+}
+
 async fn register_context_profile(
     State(state): State<ApiState>,
     Json(request): Json<ContextProfileRegistrationRequest>,
@@ -248,6 +314,42 @@ async fn register_context_profile(
         let mut service = state.inner.service.lock().await;
         let response = service
             .register_context_profile(request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn add_component_to_tag(
+    State(state): State<ApiState>,
+    Path(tag_key): Path<String>,
+    Json(request): Json<ComponentTagMembershipRequest>,
+) -> Result<Json<ComponentTagMembershipResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .add_component_to_tag(&tag_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_inventory_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn assign_tag_context_profile(
+    State(state): State<ApiState>,
+    Path(tag_key): Path<String>,
+    Json(request): Json<AssignTagContextProfileRequest>,
+) -> Result<Json<AssignTagContextProfileResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .assign_context_profile_for_tag(&tag_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_inventory_snapshot(&service);
@@ -528,6 +630,25 @@ async fn accept_collection_risk(
     Ok(Json(response))
 }
 
+async fn accept_tag_risk(
+    State(state): State<ApiState>,
+    Path(tag_key): Path<String>,
+    Json(request): Json<BulkAcceptRiskRequest>,
+) -> Result<Json<BulkAcceptRiskByTagResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .accept_risk_for_tag(&tag_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
 async fn suppress_finding(
     State(state): State<ApiState>,
     Json(request): Json<SuppressFindingRequest>,
@@ -555,6 +676,25 @@ async fn suppress_collection_findings(
         let mut service = state.inner.service.lock().await;
         let response = service
             .suppress_findings_for_collection(&collection_key, request)
+            .await
+            .map_err(ApiError::from)?;
+        state.refresh_read_model_snapshot(&service);
+        state.refresh_system_events_snapshot(&service);
+        drop(service);
+        response
+    };
+    Ok(Json(response))
+}
+
+async fn suppress_tag_findings(
+    State(state): State<ApiState>,
+    Path(tag_key): Path<String>,
+    Json(request): Json<BulkSuppressFindingsRequest>,
+) -> Result<Json<BulkSuppressFindingsByTagResponse>, ApiError> {
+    let response = {
+        let mut service = state.inner.service.lock().await;
+        let response = service
+            .suppress_findings_for_tag(&tag_key, request)
             .await
             .map_err(ApiError::from)?;
         state.refresh_read_model_snapshot(&service);
@@ -1111,7 +1251,7 @@ mod tests {
             "context:internet-prod"
         );
         assert_eq!(
-            detail_payload["members"][0]["component_context_profile_key"],
+            detail_payload["members"][0]["context_profile_key"],
             serde_json::Value::Null
         );
     }
@@ -1808,10 +1948,7 @@ mod tests {
             .to_bytes();
         let payload: serde_json::Value =
             serde_json::from_slice(&body).expect("response should be valid json");
-        assert_eq!(
-            payload["members"][0]["component_key"],
-            "component:payments-api"
-        );
+        assert_eq!(payload["members"][0]["key"], "component:payments-api");
         assert_eq!(payload["source"], serde_json::Value::Null);
     }
 

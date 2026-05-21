@@ -220,9 +220,59 @@ export type CollectionDetailResponse = {
 	scan_schedule: CollectionScanSchedule | null;
 	health: CollectionHealth;
 	members: Array<{
-		component_key: string;
-		component_context_profile_key: string | null;
+		key: string;
+		context_profile_key: string | null;
+		tag_keys: string[];
 	}>;
+};
+
+export type ComponentTag = {
+	tag_key: string;
+	name: string;
+	component_keys: string[];
+	context_profile_key: string | null;
+};
+
+export type ListComponentTagsResponse = {
+	managed_component_tags: number;
+	tags: ComponentTag[];
+};
+
+export type ComponentTagRegistrationRequest = {
+	tagKey: string;
+	name: string;
+};
+
+export type RegisterComponentTagResponse = {
+	change: string;
+	managed_component_tags: number;
+};
+
+export type ComponentTagMembershipRequest = {
+	componentKey: string;
+};
+
+export type ComponentTagConflict = {
+	component_key: string;
+	field: string;
+	existing_profile_key: string;
+	conflicting_profile_key: string;
+};
+
+export type ComponentTagMembershipResponse = {
+	change: string;
+	members: number;
+	conflict: ComponentTagConflict | null;
+};
+
+export type AssignTagContextProfileRequest = {
+	profileKey: string;
+};
+
+export type AssignTagContextProfileResponse = {
+	change: string;
+	profile_key: string | null;
+	conflict: ComponentTagConflict | null;
 };
 
 export type AssignCollectionContextProfileRequest = {
@@ -232,6 +282,45 @@ export type AssignCollectionContextProfileRequest = {
 export type AssignCollectionContextProfileResponse = {
 	change: string;
 	profile_key: string | null;
+};
+
+export type BulkAcceptTagRiskPayload = {
+	tagKey: string;
+	minSeverity?: string;
+	packageName?: string;
+	reason: string;
+	untilUnixMs?: number;
+};
+
+export type BulkAcceptTagRiskResponse = {
+	tag_key: string;
+	min_severity: string | null;
+	package_name: string | null;
+	targeted: number;
+	accepted: number;
+	unchanged: number;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
+};
+
+export type BulkSuppressTagFindingsPayload = {
+	tagKey: string;
+	minSeverity?: string;
+	packageName?: string;
+	reason: string;
+};
+
+export type BulkSuppressTagFindingsResponse = {
+	tag_key: string;
+	min_severity: string | null;
+	package_name: string | null;
+	targeted: number;
+	suppressed: number;
+	unchanged: number;
+	governance_state: string;
+	governance_reason: string;
+	governance_until_unix_ms: number | null;
 };
 
 export type ConfigureCollectionSourcePayload = {
@@ -619,6 +708,34 @@ export async function acceptCollectionFindingRisk(
 	return (await response.json()) as BulkAcceptCollectionRiskResponse;
 }
 
+export async function acceptTagFindingRisk(
+	request: BulkAcceptTagRiskPayload,
+): Promise<BulkAcceptTagRiskResponse> {
+	const response = await fetch(
+		`/api/component-tags/${encodeURIComponent(request.tagKey)}/findings/risk-acceptance`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				min_severity:
+					request.minSeverity && request.minSeverity !== "all"
+						? request.minSeverity
+						: null,
+				package_name: request.packageName || null,
+				reason: request.reason,
+				until_unix_ms: request.untilUnixMs ?? null,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`tag risk acceptance failed with status ${response.status}`,
+		);
+	}
+
+	return (await response.json()) as BulkAcceptTagRiskResponse;
+}
+
 export async function suppressCollectionFindings(
 	request: BulkSuppressCollectionFindingsPayload,
 ): Promise<BulkSuppressCollectionFindingsResponse> {
@@ -644,6 +761,31 @@ export async function suppressCollectionFindings(
 	}
 
 	return (await response.json()) as BulkSuppressCollectionFindingsResponse;
+}
+
+export async function suppressTagFindings(
+	request: BulkSuppressTagFindingsPayload,
+): Promise<BulkSuppressTagFindingsResponse> {
+	const response = await fetch(
+		`/api/component-tags/${encodeURIComponent(request.tagKey)}/findings/suppression`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				min_severity:
+					request.minSeverity && request.minSeverity !== "all"
+						? request.minSeverity
+						: null,
+				package_name: request.packageName || null,
+				reason: request.reason,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(`tag suppression failed with status ${response.status}`);
+	}
+
+	return (await response.json()) as BulkSuppressTagFindingsResponse;
 }
 
 export async function suppressFinding(
@@ -778,6 +920,35 @@ export async function fetchContextProfiles(): Promise<ListContextProfilesRespons
 	return (await response.json()) as ListContextProfilesResponse;
 }
 
+export async function registerComponentTag(
+	request: ComponentTagRegistrationRequest,
+): Promise<RegisterComponentTagResponse> {
+	const response = await fetch("/api/component-tags", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			tag_key: request.tagKey,
+			name: request.name,
+		}),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`component tag registration failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as RegisterComponentTagResponse;
+}
+
+export async function fetchComponentTags(): Promise<ListComponentTagsResponse> {
+	const response = await fetch("/api/component-tags");
+	if (!response.ok) {
+		throw new Error(
+			`component tags query failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ListComponentTagsResponse;
+}
+
 export async function registerCollection(
 	request: CollectionRegistrationRequest,
 ): Promise<RegisterCollectionResponse> {
@@ -871,6 +1042,28 @@ export async function addCollectionComponent(
 		);
 	}
 	return (await response.json()) as CollectionMembershipResponse;
+}
+
+export async function addComponentTag(
+	tagKey: string,
+	request: ComponentTagMembershipRequest,
+): Promise<ComponentTagMembershipResponse> {
+	const response = await fetch(
+		`/api/component-tags/${encodeURIComponent(tagKey)}/components`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				component_key: request.componentKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`component tag membership creation failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as ComponentTagMembershipResponse;
 }
 
 export async function configureCollectionSource(
@@ -1059,6 +1252,28 @@ export async function assignCollectionContextProfile(
 		);
 	}
 	return (await response.json()) as AssignCollectionContextProfileResponse;
+}
+
+export async function assignTagContextProfile(
+	tagKey: string,
+	request: AssignTagContextProfileRequest,
+): Promise<AssignTagContextProfileResponse> {
+	const response = await fetch(
+		`/api/component-tags/${encodeURIComponent(tagKey)}/context-profile`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				profile_key: request.profileKey,
+			}),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			`tag context profile assignment failed with status ${response.status}`,
+		);
+	}
+	return (await response.json()) as AssignTagContextProfileResponse;
 }
 
 export async function requestScan(

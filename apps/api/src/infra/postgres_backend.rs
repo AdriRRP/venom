@@ -20,15 +20,17 @@ use venom_domain::integration::{
 };
 use venom_domain::inventory::{
     AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
-    AssignContextProfileChange, AssignContextProfileResult, BindArtifactChange, BindArtifactResult,
-    CollectionRegistration, CollectionSource, CollectionSourceMode, ComponentInventory,
-    ComponentListCollectionSource, ComponentRegistration, ConfigureCollectionScanScheduleChange,
+    AssignComponentTagChange, AssignComponentTagResult, AssignContextProfileChange,
+    AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
+    BindArtifactChange, BindArtifactResult, CollectionRegistration, CollectionSource,
+    CollectionSourceMode, ComponentInventory, ComponentListCollectionSource, ComponentRegistration,
+    ComponentTagRegistration, ConfigureCollectionScanScheduleChange,
     ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
     ConfigureCollectionSourceResult, ConfigureProviderChange, ConfigureProviderResult,
     ContextProfileRegistration, MaterializeCollectionSourceChange,
     MaterializeCollectionSourceResult, RegisterCollectionChange, RegisterCollectionResult,
-    RegisterComponentChange, RegisterComponentResult, RegisterContextProfileChange,
-    RegisterContextProfileResult,
+    RegisterComponentChange, RegisterComponentResult, RegisterComponentTagChange,
+    RegisterComponentTagResult, RegisterContextProfileChange, RegisterContextProfileResult,
 };
 use venom_domain::operations::{SystemEvent, SystemEventKind};
 use venom_domain::scanning::{
@@ -150,6 +152,32 @@ impl PostgresStore {
         Ok(result)
     }
 
+    /// Durably register one managed component tag in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn register_component_tag(
+        &mut self,
+        registration: ComponentTagRegistration,
+    ) -> Result<RegisterComponentTagResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.register_component_tag(registration.clone());
+        if result.change == RegisterComponentTagChange::Registered {
+            sqlx::query(&format!(
+                "INSERT INTO {} (tag_key, name) VALUES ($1, $2)",
+                self.names.component_tags
+            ))
+            .bind(registration.tag_key.as_ref())
+            .bind(registration.name.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres component tag insert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
     /// Durably create one closed release collection in Postgres.
     ///
     /// # Errors
@@ -226,6 +254,33 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably add one managed component to one managed component tag in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn assign_component_tag(
+        &mut self,
+        tag_key: &str,
+        component_key: &str,
+    ) -> Result<AssignComponentTagResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_component_tag(tag_key, component_key);
+        if result.change == AssignComponentTagChange::Assigned {
+            sqlx::query(&format!(
+                "INSERT INTO {} (tag_key, component_key) VALUES ($1, $2)",
+                self.names.component_tag_memberships
+            ))
+            .bind(tag_key)
+            .bind(component_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres component tag membership insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
         Ok(result)
@@ -469,6 +524,38 @@ impl PostgresStore {
             .await
             .map_err(|error| {
                 format!("postgres collection context profile update failed: {error}")
+            })?;
+            *self.ingestion.inventory_mut() = candidate_inventory;
+        }
+        Ok(result)
+    }
+
+    /// Durably assign one context profile to one managed component tag in Postgres.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the durable write fails.
+    pub async fn assign_context_profile_for_tag(
+        &mut self,
+        tag_key: &str,
+        profile_key: &str,
+    ) -> Result<AssignTagContextProfileResult, String> {
+        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let result = candidate_inventory.assign_context_profile_for_tag(tag_key, profile_key);
+        if result.change == AssignTagContextProfileChange::Assigned {
+            sqlx::query(&format!(
+                concat!(
+                    "UPDATE {} SET context_profile_key = $2, updated_at = NOW() ",
+                    "WHERE tag_key = $1"
+                ),
+                self.names.component_tags
+            ))
+            .bind(tag_key)
+            .bind(profile_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                format!("postgres component tag context profile update failed: {error}")
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
         }
@@ -762,6 +849,110 @@ impl PostgresStore {
         })
     }
 
+    /// Durably accept risk for all matched open findings inside one managed tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the tag is unknown or the durable write fails.
+    pub async fn accept_risk_for_tag(
+        &mut self,
+        tag_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        acceptance: RiskAcceptance,
+    ) -> Result<BulkAcceptRiskResult, String> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .tag_scoped_artifacts(tag_key)
+            .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            if result.change == AcceptRiskChange::Accepted {
+                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
+                changed.push(finding.finding);
+            }
+        }
+
+        let accepted = changed.len();
+        if accepted > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            let mut tx = self.pool.begin().await.map_err(|error| {
+                format!("postgres tag risk acceptance batch begin failed: {error}")
+            })?;
+
+            for finding in &changed {
+                sqlx::query(&format!(
+                    concat!(
+                        "INSERT INTO {} ",
+                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                        "DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()"
+                    ),
+                    self.names.finding_risk_acceptances
+                ))
+                .bind(finding.component_key.as_ref())
+                .bind(artifact_kind_name(finding.artifact.kind))
+                .bind(finding.artifact.identity.as_ref())
+                .bind(finding.vulnerability_id.as_ref())
+                .bind(finding.package.name.as_ref())
+                .bind(finding.package.version.as_ref())
+                .bind(finding.package.purl.as_deref().unwrap_or(""))
+                .bind(acceptance.reason.as_ref())
+                .bind(
+                    acceptance
+                        .until_unix_ms
+                        .map(i64::try_from)
+                        .transpose()
+                        .map_err(|_| "risk acceptance until overflow".to_owned())?,
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("postgres tag finding risk acceptance batch upsert failed: {error}")
+                })?;
+            }
+
+            tx.commit().await.map_err(|error| {
+                format!("postgres tag risk acceptance batch commit failed: {error}")
+            })?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("tag-findings-risk-accepted"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsRiskAccepted,
+                collection_key: None,
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(accepted).ok(),
+                retryable: None,
+                detail: Some(format!("tag {tag_key}: {}", acceptance.reason).into_boxed_str()),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+        }
+
+        Ok(BulkAcceptRiskResult {
+            targeted,
+            accepted,
+            unchanged: targeted.saturating_sub(accepted),
+            acceptance,
+        })
+    }
+
     /// Durably reopen one governed active finding in Postgres.
     ///
     /// # Errors
@@ -956,6 +1147,104 @@ impl PostgresStore {
                 finding_count: u32::try_from(suppressed).ok(),
                 retryable: None,
                 detail: Some(suppression.reason.clone()),
+            };
+            self.insert_system_event(&event).await?;
+            self.push_system_event(event);
+        }
+
+        Ok(BulkSuppressFindingResult {
+            targeted,
+            suppressed,
+            unchanged: targeted.saturating_sub(suppressed),
+            suppression,
+        })
+    }
+
+    /// Durably suppress all matched open findings inside one managed tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the tag is unknown or the durable write fails.
+    pub async fn suppress_findings_for_tag(
+        &mut self,
+        tag_key: &str,
+        query: &ScopedActiveFindingsQuery,
+        suppression: Suppression,
+    ) -> Result<BulkSuppressFindingResult, String> {
+        let scope = self
+            .ingestion
+            .inventory()
+            .tag_scoped_artifacts(tag_key)
+            .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
+        let findings = self
+            .read_model
+            .collect_scoped_active_findings(&scope, query);
+        let targeted = findings.len();
+
+        let mut candidate_governance = self.governance.clone();
+        let mut candidate_read_model = self.read_model.clone();
+        let mut changed = Vec::new();
+
+        for finding in findings {
+            let result =
+                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            if result.change == SuppressFindingChange::Suppressed {
+                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
+                changed.push(finding.finding);
+            }
+        }
+
+        let suppressed = changed.len();
+        if suppressed > 0 {
+            let occurred_at_unix_ms = current_unix_millis()?;
+            let mut tx =
+                self.pool.begin().await.map_err(|error| {
+                    format!("postgres tag suppression batch begin failed: {error}")
+                })?;
+
+            for finding in &changed {
+                sqlx::query(&format!(
+                    concat!(
+                        "INSERT INTO {} ",
+                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ",
+                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                        "DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()"
+                    ),
+                    self.names.finding_suppressions
+                ))
+                .bind(finding.component_key.as_ref())
+                .bind(artifact_kind_name(finding.artifact.kind))
+                .bind(finding.artifact.identity.as_ref())
+                .bind(finding.vulnerability_id.as_ref())
+                .bind(finding.package.name.as_ref())
+                .bind(finding.package.version.as_ref())
+                .bind(finding.package.purl.as_deref().unwrap_or(""))
+                .bind(suppression.reason.as_ref())
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    format!("postgres tag finding suppression batch upsert failed: {error}")
+                })?;
+            }
+
+            tx.commit().await.map_err(|error| {
+                format!("postgres tag suppression batch commit failed: {error}")
+            })?;
+
+            self.governance = candidate_governance;
+            self.read_model = candidate_read_model;
+            let event = SystemEvent {
+                event_id: next_system_event_id("tag-findings-suppressed"),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::FindingsSuppressed,
+                collection_key: None,
+                component_key: None,
+                command_id: None,
+                integration_event_id: None,
+                finding_count: u32::try_from(suppressed).ok(),
+                retryable: None,
+                detail: Some(format!("tag {tag_key}: {}", suppression.reason).into_boxed_str()),
             };
             self.insert_system_event(&event).await?;
             self.push_system_event(event);
@@ -2031,6 +2320,8 @@ impl PostgresStore {
         self.create_components_table().await?;
         self.create_context_profiles_table().await?;
         self.create_component_context_profiles_table().await?;
+        self.create_component_tags_table().await?;
+        self.create_component_tag_memberships_table().await?;
         self.create_collections_table().await?;
         self.create_collection_sources_table().await?;
         self.create_collection_memberships_table().await?;
@@ -2118,6 +2409,45 @@ impl PostgresStore {
         .await
         .map_err(|error| {
             format!("postgres component context profiles table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
+    async fn create_component_tags_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "tag_key TEXT PRIMARY KEY, ",
+                "name TEXT NOT NULL, ",
+                "context_profile_key TEXT NULL REFERENCES {}(profile_key) ON DELETE SET NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.component_tags, self.names.context_profiles
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component tags table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_component_tag_memberships_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "tag_key TEXT NOT NULL REFERENCES {}(tag_key) ON DELETE CASCADE, ",
+                "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "PRIMARY KEY (tag_key, component_key)",
+                ")"
+            ),
+            self.names.component_tag_memberships, self.names.component_tags, self.names.components
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres component tag memberships table create failed: {error}")
         })?;
         Ok(())
     }
@@ -2447,6 +2777,8 @@ impl PostgresStore {
         self.load_components().await?;
         self.load_context_profiles().await?;
         self.load_component_context_profiles().await?;
+        self.load_component_tags().await?;
+        self.load_component_tag_memberships().await?;
         self.load_collections().await?;
         self.load_collection_sources().await?;
         self.load_collection_memberships().await?;
@@ -2623,6 +2955,63 @@ impl PostgresStore {
             if result.change == AssignContextProfileChange::Rejected {
                 return Err(
                     "postgres component context profiles contain invalid assignment".to_owned(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_component_tags(&mut self) -> Result<(), String> {
+        let tags = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
+            "SELECT tag_key, name, context_profile_key FROM {} ORDER BY created_at, tag_key",
+            self.names.component_tags
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component tags load failed: {error}"))?;
+        for (tag_key, name, context_profile_key) in tags {
+            let tag_key_boxed = tag_key.clone();
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .register_component_tag(ComponentTagRegistration::new(tag_key, name));
+            if result.change == RegisterComponentTagChange::Rejected {
+                return Err("postgres component tags contain conflicting registration".to_owned());
+            }
+            if let Some(profile_key) = context_profile_key {
+                let result = self
+                    .ingestion
+                    .inventory_mut()
+                    .assign_context_profile_for_tag(&tag_key_boxed, &profile_key);
+                if result.change == AssignTagContextProfileChange::Rejected {
+                    return Err(
+                        "postgres component tags contain invalid context assignment".to_owned()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_component_tag_memberships(&mut self) -> Result<(), String> {
+        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT tag_key, component_key FROM {} ",
+                "ORDER BY created_at, tag_key, component_key"
+            ),
+            self.names.component_tag_memberships
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component tag memberships load failed: {error}"))?;
+        for (tag_key, component_key) in memberships {
+            let result = self
+                .ingestion
+                .inventory_mut()
+                .assign_component_tag(&tag_key, &component_key);
+            if result.change == AssignComponentTagChange::Rejected {
+                return Err(
+                    "postgres component tag memberships contain invalid ownership".to_owned(),
                 );
             }
         }
@@ -3133,6 +3522,8 @@ struct TableNames {
     components: Box<str>,
     context_profiles: Box<str>,
     component_context_profiles: Box<str>,
+    component_tags: Box<str>,
+    component_tag_memberships: Box<str>,
     collections: Box<str>,
     collection_sources: Box<str>,
     collection_memberships: Box<str>,
@@ -3155,6 +3546,9 @@ impl TableNames {
             components: format!("{schema}.components").into_boxed_str(),
             context_profiles: format!("{schema}.context_profiles").into_boxed_str(),
             component_context_profiles: format!("{schema}.component_context_profiles")
+                .into_boxed_str(),
+            component_tags: format!("{schema}.component_tags").into_boxed_str(),
+            component_tag_memberships: format!("{schema}.component_tag_memberships")
                 .into_boxed_str(),
             collections: format!("{schema}.collections").into_boxed_str(),
             collection_sources: format!("{schema}.collection_sources").into_boxed_str(),
