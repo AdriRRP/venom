@@ -19,12 +19,10 @@ Completed:
 6. `W94-local-collection-scan-materialization-atomicity`
 7. `W95-local-scan-outcome-atomicity`
 8. `W96-local-collection-scan-request-atomicity`
+9. `W97-postgres-post-commit-application-hardening`
 
 Remaining:
 
-9. `W97-postgres-post-commit-application-hardening`
-   Remove `commit-first, apply-later` gaps from the Postgres write paths that
-   still leave memory and observability behind durable truth until reload.
 10. `W98-api-lock-and-snapshot-topology`
     Reduce the global API mutex contention and the remaining full-snapshot
     refresh churn in read-heavy paths.
