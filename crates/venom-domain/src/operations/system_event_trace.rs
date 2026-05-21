@@ -158,21 +158,101 @@ pub fn query_system_events<'a>(
     query: &SystemEventsQuery,
 ) -> SystemEventsPage {
     let limit = query.normalized_limit();
-    let filtered = events
-        .into_iter()
-        .filter(|event| {
-            query
-                .category
-                .is_none_or(|category| event.category() == category)
-        })
-        .take(limit)
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut total = 0;
+    let mut returned_events = Vec::with_capacity(limit);
+
+    for event in events.into_iter().filter(|event| {
+        query
+            .category
+            .is_none_or(|category| event.category() == category)
+    }) {
+        total += 1;
+        if returned_events.len() < limit {
+            returned_events.push(event.clone());
+        }
+    }
 
     SystemEventsPage {
-        total: filtered.len(),
-        returned: filtered.len(),
+        total,
+        returned: returned_events.len(),
         limit,
-        events: filtered,
+        events: returned_events,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
+        SystemEventKind, SystemEventsQuery, query_system_events,
+    };
+
+    fn event(event_id: &str, kind: SystemEventKind) -> SystemEvent {
+        SystemEvent {
+            event_id: event_id.into(),
+            occurred_at_unix_ms: 1,
+            kind,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn system_events_query_reports_total_matches_not_only_returned_events() {
+        let events = [
+            event("event-001", SystemEventKind::ScanCommandCompleted),
+            event("event-002", SystemEventKind::ScanCommandCompleted),
+            event("event-003", SystemEventKind::ScanCommandCompleted),
+        ];
+
+        let page = query_system_events(events.iter(), &SystemEventsQuery::new().with_limit(2));
+
+        assert_eq!(page.total, 3);
+        assert_eq!(page.returned, 2);
+        assert_eq!(page.limit, 2);
+        assert_eq!(page.events.len(), 2);
+    }
+
+    #[test]
+    fn system_events_query_counts_filtered_matches_before_truncation() {
+        let events = [
+            event("event-001", SystemEventKind::FindingRiskAccepted),
+            event("event-002", SystemEventKind::FindingSuppressed),
+            event("event-003", SystemEventKind::ScanCommandCompleted),
+        ];
+
+        let page = query_system_events(
+            events.iter(),
+            &SystemEventsQuery::new()
+                .with_category(SystemEventCategory::Governance)
+                .with_limit(1),
+        );
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.returned, 1);
+        assert_eq!(page.events[0].category(), SystemEventCategory::Governance);
+    }
+
+    #[test]
+    fn system_events_query_normalizes_large_limits() {
+        let page = query_system_events(
+            [event("event-001", SystemEventKind::ScanCommandCompleted)].iter(),
+            &SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT + 500),
+        );
+
+        assert_eq!(page.limit, MAX_SYSTEM_EVENTS_LIMIT);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.returned, 1);
+    }
+
+    #[test]
+    fn system_events_query_uses_default_limit() {
+        let query = SystemEventsQuery::new();
+        assert_eq!(query.normalized_limit(), DEFAULT_SYSTEM_EVENTS_LIMIT);
     }
 }
