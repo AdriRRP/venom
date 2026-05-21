@@ -1935,22 +1935,6 @@ impl PostgresStore {
         attempted_at_micros: i64,
         occurred_at_unix_ms: u64,
     ) -> Result<(), String> {
-        sqlx::query(&format!(
-            concat!(
-                "UPDATE {} ",
-                "SET publication_status = 'published', last_error = NULL, ",
-                "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
-                "WHERE event_id = $1"
-            ),
-            self.names.integration_outbox
-        ))
-        .bind(event_id)
-        .bind(attempted_at_micros)
-        .bind(attempted_at_micros)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
-        self.remove_pending_integration_event(event_id);
         let system_event = SystemEvent {
             event_id: next_system_event_id("integration-event-published"),
             occurred_at_unix_ms,
@@ -1963,7 +1947,27 @@ impl PostgresStore {
             retryable: None,
             detail: None,
         };
-        self.insert_system_event(&system_event).await?;
+        let mut transaction = self.begin_transaction().await?;
+        sqlx::query(&format!(
+            concat!(
+                "UPDATE {} ",
+                "SET publication_status = 'published', last_error = NULL, ",
+                "last_attempted_at_micros = $2, published_at_micros = $3, attempt_count = attempt_count + 1 ",
+                "WHERE event_id = $1"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(event_id)
+        .bind(attempted_at_micros)
+        .bind(attempted_at_micros)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
+        self.insert_system_event_in_transaction(&mut transaction, &system_event)
+            .await?;
+        self.commit_transaction(transaction).await?;
+
+        self.remove_pending_integration_event(event_id);
         self.push_system_event(system_event);
         Ok(())
     }
@@ -1975,23 +1979,6 @@ impl PostgresStore {
         occurred_at_unix_ms: u64,
         error: IntegrationEventPublishError,
     ) -> Result<IntegrationEventPublicationFailure, String> {
-        sqlx::query(&format!(
-            concat!(
-                "UPDATE {} ",
-                "SET publication_status = 'pending', last_error = $2, ",
-                "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
-                "WHERE event_id = $1"
-            ),
-            self.names.integration_outbox
-        ))
-        .bind(event_id)
-        .bind(error.message.as_ref())
-        .bind(attempted_at_micros)
-        .execute(&self.pool)
-        .await
-        .map_err(|sql_error| {
-            format!("postgres integration outbox failure update failed: {sql_error}")
-        })?;
         let failure = IntegrationEventPublicationFailure {
             event_id: event_id.into(),
             retryable: error.retryable,
@@ -2009,7 +1996,28 @@ impl PostgresStore {
             retryable: Some(failure.retryable),
             detail: Some(failure.message.clone()),
         };
-        self.insert_system_event(&system_event).await?;
+        let mut transaction = self.begin_transaction().await?;
+        sqlx::query(&format!(
+            concat!(
+                "UPDATE {} ",
+                "SET publication_status = 'pending', last_error = $2, ",
+                "last_attempted_at_micros = $3, attempt_count = attempt_count + 1 ",
+                "WHERE event_id = $1"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(event_id)
+        .bind(failure.message.as_ref())
+        .bind(attempted_at_micros)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|sql_error| {
+            format!("postgres integration outbox failure update failed: {sql_error}")
+        })?;
+        self.insert_system_event_in_transaction(&mut transaction, &system_event)
+            .await?;
+        self.commit_transaction(transaction).await?;
+
         self.push_system_event(system_event);
         Ok(failure)
     }
@@ -4289,6 +4297,12 @@ mod tests {
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 0);
+        assert!(
+            reopened
+                .system_events_snapshot()
+                .iter()
+                .any(|event| event.kind == SystemEventKind::IntegrationEventPublished)
+        );
     }
 
     #[tokio::test]
@@ -4339,6 +4353,12 @@ mod tests {
             .await
             .expect("postgres backend should reopen");
         assert_eq!(reopened.pending_integration_events().len(), 1);
+        assert!(
+            reopened
+                .system_events_snapshot()
+                .iter()
+                .any(|event| event.kind == SystemEventKind::IntegrationEventPublicationFailed)
+        );
     }
 
     #[tokio::test]

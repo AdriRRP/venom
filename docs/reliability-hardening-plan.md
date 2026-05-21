@@ -31,6 +31,9 @@ Completed:
 14. `W102-api-read-snapshot-arc-sharing`
     Reuse unchanged HTTP read-snapshot lanes through `Arc` when refreshing one
     lane at a time.
+15. `W103-postgres-integration-publication-event-atomicity`
+    Persist integration publication outcome updates and their operator-facing
+    system events in one Postgres transaction.
 
 ## Exit condition
 
