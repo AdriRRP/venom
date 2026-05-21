@@ -2,9 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { AppShell } from "../app/app-shell";
 import {
+	acceptTagFindingRisk,
 	addCollectionComponent,
+	addComponentTag,
 	assignCollectionContextProfile,
 	assignContextProfile,
+	assignTagContextProfile,
 	bindArtifact,
 	configureCollectionScanSchedule,
 	configureCollectionSource,
@@ -14,14 +17,17 @@ import {
 	fetchApiHealth,
 	fetchCollectionDetail,
 	fetchCollections,
+	fetchComponentTags,
 	fetchContextProfiles,
 	fetchScanCommandStatus,
 	materializeCollectionSource,
 	registerCollection,
 	registerComponent,
+	registerComponentTag,
 	registerContextProfile,
 	requestCollectionScan,
 	requestScan,
+	suppressTagFindings,
 } from "../lib/api";
 import { describeCollectionHealth } from "../lib/collection-health";
 
@@ -63,6 +69,12 @@ export function OperationsPage() {
 		contextMissionCritical: true,
 		contextVpnRestricted: false,
 		contextNonPrivilegedUser: false,
+		tagKey: "tag:api",
+		tagName: "API",
+		tagComponentKey: "component:payments-api",
+		tagBulkMinSeverity: "all",
+		tagBulkPackageName: "",
+		tagBulkReason: "Accepted for shared API cohort",
 		collectionKey: "release:2026.05",
 		collectionName: "May Release",
 		collectionComponentKey: "component:payments-api",
@@ -122,6 +134,16 @@ export function OperationsPage() {
 		},
 	});
 
+	const registerComponentTagMutation = useMutation({
+		mutationFn: registerComponentTag,
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["component-tags"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
 	const assignContextProfileMutation = useMutation({
 		mutationFn: (request: { componentKey: string; profileKey: string }) =>
 			assignContextProfile(request.componentKey, {
@@ -139,6 +161,29 @@ export function OperationsPage() {
 			void queryClient.invalidateQueries({
 				queryKey: ["collection-detail", operatorState.collectionKey],
 			});
+		},
+	});
+
+	const addComponentTagMutation = useMutation({
+		mutationFn: (request: { tagKey: string; componentKey: string }) =>
+			addComponentTag(request.tagKey, {
+				componentKey: request.componentKey,
+			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["component-tags"] });
+			void queryClient.invalidateQueries({
+				queryKey: ["collection-detail", operatorState.collectionKey],
+			});
+		},
+	});
+
+	const assignTagContextProfileMutation = useMutation({
+		mutationFn: (request: { tagKey: string; profileKey: string }) =>
+			assignTagContextProfile(request.tagKey, {
+				profileKey: request.profileKey,
+			}),
+		onSuccess: () => {
+			void queryClient.invalidateQueries({ queryKey: ["component-tags"] });
 		},
 	});
 
@@ -260,6 +305,14 @@ export function OperationsPage() {
 		},
 	});
 
+	const acceptTagRiskMutation = useMutation({
+		mutationFn: acceptTagFindingRisk,
+	});
+
+	const suppressTagFindingsMutation = useMutation({
+		mutationFn: suppressTagFindings,
+	});
+
 	const collectionsQuery = useQuery({
 		queryKey: ["collections"],
 		queryFn: fetchCollections,
@@ -276,6 +329,12 @@ export function OperationsPage() {
 	const contextProfilesQuery = useQuery({
 		queryKey: ["context-profiles"],
 		queryFn: fetchContextProfiles,
+		refetchInterval: 15_000,
+	});
+
+	const componentTagsQuery = useQuery({
+		queryKey: ["component-tags"],
+		queryFn: fetchComponentTags,
 		refetchInterval: 15_000,
 	});
 
@@ -304,6 +363,14 @@ export function OperationsPage() {
 			profiles,
 		};
 	}, [contextProfilesQuery.data]);
+
+	const componentTagsSummary = useMemo(() => {
+		const tags = componentTagsQuery.data?.tags ?? [];
+		return {
+			total: componentTagsQuery.data?.managed_component_tags ?? 0,
+			tags,
+		};
+	}, [componentTagsQuery.data]);
 
 	return (
 		<AppShell apiHealth={healthLabel} currentView="operations">
@@ -377,6 +444,77 @@ export function OperationsPage() {
 							</p>
 						</div>
 					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Cohorts</p>
+							<h2>Register Component Tag</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void registerComponentTagMutation.mutateAsync({
+								tagKey: operatorState.tagKey,
+								name: operatorState.tagName,
+							});
+						}}
+					>
+						<label>
+							Tag key
+							<input
+								name="tagKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagKey: event.target.value,
+									}))
+								}
+								value={operatorState.tagKey}
+							/>
+						</label>
+						<label>
+							Name
+							<input
+								name="tagName"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagName: event.target.value,
+									}))
+								}
+								value={operatorState.tagName}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Register Tag
+						</button>
+					</form>
+					{registerComponentTagMutation.data ? (
+						<div className="result-card">
+							<strong>Last tag registration</strong>
+							<p>
+								Change: {registerComponentTagMutation.data.change}. Managed
+								component tags:{" "}
+								{registerComponentTagMutation.data.managed_component_tags}.
+							</p>
+						</div>
+					) : null}
+					<div className="result-card">
+						<strong>Component tags</strong>
+						<p>Total: {componentTagsSummary.total}.</p>
+						<ul>
+							{componentTagsSummary.tags.map((tag) => (
+								<li key={tag.tag_key}>
+									{tag.tag_key}: {tag.name} ({tag.component_keys.length}{" "}
+									members, context {tag.context_profile_key ?? "none"})
+								</li>
+							))}
+						</ul>
+					</div>
 				</section>
 
 				<section className="panel">
@@ -597,6 +735,180 @@ export function OperationsPage() {
 				<section className="panel">
 					<div className="panel-header">
 						<div>
+							<p className="eyebrow">Governance</p>
+							<h2>Bulk Governance By Tag</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void acceptTagRiskMutation.mutateAsync({
+								tagKey: operatorState.tagKey,
+								minSeverity: operatorState.tagBulkMinSeverity,
+								packageName: operatorState.tagBulkPackageName,
+								reason: operatorState.tagBulkReason,
+							});
+						}}
+					>
+						<label>
+							Tag key
+							<input readOnly value={operatorState.tagKey} />
+						</label>
+						<label>
+							Min severity
+							<select
+								name="tagBulkMinSeverity"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagBulkMinSeverity: event.target.value,
+									}))
+								}
+								value={operatorState.tagBulkMinSeverity}
+							>
+								<option value="all">all</option>
+								<option value="low">low</option>
+								<option value="medium">medium</option>
+								<option value="high">high</option>
+								<option value="critical">critical</option>
+							</select>
+						</label>
+						<label>
+							Package name
+							<input
+								name="tagBulkPackageName"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagBulkPackageName: event.target.value,
+									}))
+								}
+								value={operatorState.tagBulkPackageName}
+							/>
+						</label>
+						<label>
+							Reason
+							<input
+								name="tagBulkReason"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagBulkReason: event.target.value,
+									}))
+								}
+								value={operatorState.tagBulkReason}
+							/>
+						</label>
+						<div className="button-row">
+							<button className="primary-button" type="submit">
+								Bulk Accept Risk
+							</button>
+							<button
+								className="secondary-button"
+								onClick={(event) => {
+									event.preventDefault();
+									void suppressTagFindingsMutation.mutateAsync({
+										tagKey: operatorState.tagKey,
+										minSeverity: operatorState.tagBulkMinSeverity,
+										packageName: operatorState.tagBulkPackageName,
+										reason: operatorState.tagBulkReason,
+									});
+								}}
+								type="button"
+							>
+								Bulk Suppress
+							</button>
+						</div>
+					</form>
+					{acceptTagRiskMutation.data ? (
+						<div className="result-card">
+							<strong>Last tag risk acceptance</strong>
+							<p>
+								Targeted: {acceptTagRiskMutation.data.targeted}. Accepted:{" "}
+								{acceptTagRiskMutation.data.accepted}. Unchanged:{" "}
+								{acceptTagRiskMutation.data.unchanged}.
+							</p>
+						</div>
+					) : null}
+					{suppressTagFindingsMutation.data ? (
+						<div className="result-card">
+							<strong>Last tag suppression</strong>
+							<p>
+								Targeted: {suppressTagFindingsMutation.data.targeted}.
+								Suppressed: {suppressTagFindingsMutation.data.suppressed}.
+								Unchanged: {suppressTagFindingsMutation.data.unchanged}.
+							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Cohorts</p>
+							<h2>Assign Component To Tag</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void addComponentTagMutation.mutateAsync({
+								tagKey: operatorState.tagKey,
+								componentKey: operatorState.tagComponentKey,
+							});
+						}}
+					>
+						<label>
+							Tag key
+							<input readOnly value={operatorState.tagKey} />
+						</label>
+						<label>
+							Component key
+							<input
+								name="tagComponentKey"
+								onChange={(event) =>
+									setOperatorState((current) => ({
+										...current,
+										tagComponentKey: event.target.value,
+									}))
+								}
+								value={operatorState.tagComponentKey}
+							/>
+						</label>
+						<button className="primary-button" type="submit">
+							Assign Tag
+						</button>
+					</form>
+					{addComponentTagMutation.data ? (
+						<div className="result-card">
+							<strong>Last tag membership</strong>
+							<p>
+								Change: {addComponentTagMutation.data.change}. Members:{" "}
+								{addComponentTagMutation.data.members}.
+							</p>
+							{addComponentTagMutation.data.conflict ? (
+								<p>
+									Conflict on{" "}
+									{addComponentTagMutation.data.conflict.component_key}:{" "}
+									{addComponentTagMutation.data.conflict.field} between{" "}
+									{addComponentTagMutation.data.conflict.existing_profile_key}{" "}
+									and{" "}
+									{
+										addComponentTagMutation.data.conflict
+											.conflicting_profile_key
+									}
+									.
+								</p>
+							) : null}
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
 							<p className="eyebrow">Release Scope</p>
 							<h2>Set Collection Default Context Profile</h2>
 						</div>
@@ -631,6 +943,63 @@ export function OperationsPage() {
 								Profile:{" "}
 								{assignCollectionContextProfileMutation.data.profile_key}.
 							</p>
+						</div>
+					) : null}
+				</section>
+
+				<section className="panel">
+					<div className="panel-header">
+						<div>
+							<p className="eyebrow">Context</p>
+							<h2>Assign Tag Context Overlay</h2>
+						</div>
+					</div>
+					<form
+						className="filters mutation-grid"
+						onSubmit={(event) => {
+							event.preventDefault();
+							void assignTagContextProfileMutation.mutateAsync({
+								tagKey: operatorState.tagKey,
+								profileKey: operatorState.contextProfileKey,
+							});
+						}}
+					>
+						<label>
+							Tag key
+							<input readOnly value={operatorState.tagKey} />
+						</label>
+						<label>
+							Profile key
+							<input readOnly value={operatorState.contextProfileKey} />
+						</label>
+						<button className="primary-button" type="submit">
+							Assign Tag Context
+						</button>
+					</form>
+					{assignTagContextProfileMutation.data ? (
+						<div className="result-card">
+							<strong>Last tag context assignment</strong>
+							<p>
+								Change: {assignTagContextProfileMutation.data.change}. Profile:{" "}
+								{assignTagContextProfileMutation.data.profile_key ?? "none"}.
+							</p>
+							{assignTagContextProfileMutation.data.conflict ? (
+								<p>
+									Conflict on{" "}
+									{assignTagContextProfileMutation.data.conflict.component_key}:{" "}
+									{assignTagContextProfileMutation.data.conflict.field} between{" "}
+									{
+										assignTagContextProfileMutation.data.conflict
+											.existing_profile_key
+									}{" "}
+									and{" "}
+									{
+										assignTagContextProfileMutation.data.conflict
+											.conflicting_profile_key
+									}
+									.
+								</p>
+							) : null}
 						</div>
 					) : null}
 				</section>
@@ -836,10 +1205,13 @@ export function OperationsPage() {
 								</p>
 								<ul>
 									{collectionDetailQuery.data.members.map((member) => (
-										<li key={member.component_key}>
-											{member.component_key}
-											{member.component_context_profile_key
-												? ` (${member.component_context_profile_key})`
+										<li key={member.key}>
+											{member.key}
+											{member.context_profile_key
+												? ` (${member.context_profile_key})`
+												: ""}
+											{member.tag_keys.length > 0
+												? ` [${member.tag_keys.join(", ")}]`
 												: ""}
 										</li>
 									))}

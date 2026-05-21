@@ -331,6 +331,158 @@ pub struct AssignCollectionContextProfileResult {
     pub profile_key: Option<Box<str>>,
 }
 
+/// Canonical registration request for one reusable transversal component tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentTagRegistration {
+    /// Stable tag identity inside VENOM.
+    pub tag_key: Box<str>,
+    /// Human-readable tag name.
+    pub name: Box<str>,
+}
+
+impl ComponentTagRegistration {
+    #[must_use]
+    pub fn new(tag_key: impl Into<Box<str>>, name: impl Into<Box<str>>) -> Self {
+        Self {
+            tag_key: tag_key.into(),
+            name: name.into(),
+        }
+    }
+}
+
+/// Observable outcome of one component-tag registration attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterComponentTagChange {
+    /// The tag key was new and is now managed.
+    Registered,
+    /// The same tag was registered again with the same canonical data.
+    Unchanged,
+    /// The tag key already exists with conflicting canonical data.
+    Rejected,
+}
+
+impl RegisterComponentTagChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of one component-tag registration command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterComponentTagResult {
+    /// Observable state change caused by the tag registration attempt.
+    pub change: RegisterComponentTagChange,
+    /// Total number of managed component tags after the operation.
+    pub managed_component_tags: usize,
+}
+
+/// Context field that may conflict across tag overlays on one component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagContextField {
+    InternetExposed,
+    Production,
+    MissionCritical,
+    VpnRestricted,
+    NonPrivilegedUser,
+}
+
+impl TagContextField {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InternetExposed => "internet_exposed",
+            Self::Production => "production",
+            Self::MissionCritical => "mission_critical",
+            Self::VpnRestricted => "vpn_restricted",
+            Self::NonPrivilegedUser => "non_privileged_user",
+        }
+    }
+}
+
+/// Explicit operator-facing reason why one tag overlay assignment was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagContextConflict {
+    /// Managed component whose effective tag overlay would become ambiguous.
+    pub component_key: Box<str>,
+    /// Context field with incompatible definitions across tags.
+    pub field: TagContextField,
+    /// Already-applied profile key for the conflicting field.
+    pub existing_profile_key: Box<str>,
+    /// Newly conflicting profile key for the same field.
+    pub conflicting_profile_key: Box<str>,
+}
+
+/// Observable outcome of assigning one managed tag to one managed component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignComponentTagChange {
+    /// The component now belongs to the tag cohort.
+    Assigned,
+    /// The exact same component-tag membership already existed.
+    Unchanged,
+    /// The membership was rejected because the component, tag, or overlay merge is invalid.
+    Rejected,
+}
+
+impl AssignComponentTagChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of assigning one managed tag to one managed component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignComponentTagResult {
+    /// Observable state change caused by the membership attempt.
+    pub change: AssignComponentTagChange,
+    /// Total number of members currently in the tag after the operation.
+    pub members: usize,
+    /// Optional explicit conflict when the assignment was rejected.
+    pub conflict: Option<TagContextConflict>,
+}
+
+/// Observable outcome of assigning one context profile to one managed tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssignTagContextProfileChange {
+    /// The tag now uses the context profile as its overlay.
+    Assigned,
+    /// The exact same tag-context assignment already existed.
+    Unchanged,
+    /// The assignment was rejected because the tag, profile, or overlay merge is invalid.
+    Rejected,
+}
+
+impl AssignTagContextProfileChange {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Unchanged => "unchanged",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Result of assigning one managed context profile to one managed tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignTagContextProfileResult {
+    /// Observable state change caused by the assignment attempt.
+    pub change: AssignTagContextProfileChange,
+    /// Assigned profile key after the operation when the tag exists.
+    pub profile_key: Option<Box<str>>,
+    /// Optional explicit conflict when the assignment was rejected.
+    pub conflict: Option<TagContextConflict>,
+}
+
 /// Canonical registration request for one managed collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionRegistration {
@@ -685,6 +837,19 @@ pub struct ManagedCollection {
     pub scan_schedule: Option<CollectionScanSchedule>,
 }
 
+/// Operator-facing snapshot of one managed transversal component tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedComponentTag {
+    /// Stable tag identity inside VENOM.
+    pub tag_key: Box<str>,
+    /// Human-readable tag name.
+    pub name: Box<str>,
+    /// Canonical managed component keys currently attached to the tag.
+    pub component_keys: Vec<Box<str>>,
+    /// Optional managed context profile used as one tag overlay.
+    pub context_profile_key: Option<Box<str>>,
+}
+
 /// One immutable artifact that belongs to one managed collection through one
 /// managed component membership.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -718,6 +883,7 @@ struct ComponentRecord {
     artifacts: BTreeSet<ArtifactRef>,
     provider_key: Option<Box<str>>,
     context_profile_key: Option<Box<str>>,
+    tag_keys: BTreeSet<Box<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -734,6 +900,13 @@ struct ContextProfileRecord {
     registration: ContextProfileRegistration,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComponentTagRecord {
+    registration: ComponentTagRegistration,
+    component_keys: BTreeSet<Box<str>>,
+    context_profile_key: Option<Box<str>>,
+}
+
 /// Minimal in-memory inventory of managed components and their immutable artifacts.
 ///
 /// This inventory is intentionally small and deterministic. It gives the
@@ -744,6 +917,7 @@ struct ContextProfileRecord {
 pub struct ComponentInventory {
     components: BTreeMap<Box<str>, ComponentRecord>,
     collections: BTreeMap<Box<str>, CollectionRecord>,
+    component_tags: BTreeMap<Box<str>, ComponentTagRecord>,
     context_profiles: BTreeMap<Box<str>, ContextProfileRecord>,
 }
 
@@ -765,6 +939,7 @@ impl ComponentInventory {
                         artifacts: BTreeSet::new(),
                         provider_key: None,
                         context_profile_key: None,
+                        tag_keys: BTreeSet::new(),
                     },
                 );
                 RegisterComponentChange::Registered
@@ -774,6 +949,37 @@ impl ComponentInventory {
         RegisterComponentResult {
             change,
             managed_components: self.components.len(),
+        }
+    }
+
+    /// Register one reusable transversal component tag.
+    #[must_use]
+    pub fn register_component_tag(
+        &mut self,
+        registration: ComponentTagRegistration,
+    ) -> RegisterComponentTagResult {
+        let change = match self.component_tags.get(registration.tag_key.as_ref()) {
+            Some(existing) if existing.registration == registration => {
+                RegisterComponentTagChange::Unchanged
+            }
+            Some(_) => RegisterComponentTagChange::Rejected,
+            None => {
+                let key = registration.tag_key.clone();
+                self.component_tags.insert(
+                    key,
+                    ComponentTagRecord {
+                        registration,
+                        component_keys: BTreeSet::new(),
+                        context_profile_key: None,
+                    },
+                );
+                RegisterComponentTagChange::Registered
+            }
+        };
+
+        RegisterComponentTagResult {
+            change,
+            managed_component_tags: self.component_tags.len(),
         }
     }
 
@@ -896,6 +1102,149 @@ impl ComponentInventory {
         AssignContextProfileResult {
             change,
             profile_key: record.context_profile_key.clone(),
+        }
+    }
+
+    /// Assign one managed tag to one managed component.
+    #[must_use]
+    pub fn assign_component_tag(
+        &mut self,
+        tag_key: &str,
+        component_key: &str,
+    ) -> AssignComponentTagResult {
+        let Some(existing_tag) = self.component_tags.get(tag_key) else {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Rejected,
+                members: 0,
+                conflict: None,
+            };
+        };
+
+        let Some(component) = self.components.get(component_key) else {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Rejected,
+                members: existing_tag.component_keys.len(),
+                conflict: None,
+            };
+        };
+
+        if existing_tag.component_keys.contains(component_key)
+            && component.tag_keys.contains(tag_key)
+        {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Unchanged,
+                members: existing_tag.component_keys.len(),
+                conflict: None,
+            };
+        }
+
+        let mut candidate = self.clone();
+        if let Some(tag_record) = candidate.component_tags.get_mut(tag_key) {
+            tag_record.component_keys.insert(component_key.into());
+        } else {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Rejected,
+                members: existing_tag.component_keys.len(),
+                conflict: None,
+            };
+        }
+        if let Some(component_record) = candidate.components.get_mut(component_key) {
+            component_record.tag_keys.insert(tag_key.into());
+        } else {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Rejected,
+                members: existing_tag.component_keys.len(),
+                conflict: None,
+            };
+        }
+
+        if let Some(conflict) = candidate.first_tag_context_conflict_for_component(component_key) {
+            return AssignComponentTagResult {
+                change: AssignComponentTagChange::Rejected,
+                members: existing_tag.component_keys.len(),
+                conflict: Some(conflict),
+            };
+        }
+
+        *self = candidate;
+        AssignComponentTagResult {
+            change: AssignComponentTagChange::Assigned,
+            members: self
+                .component_tags
+                .get(tag_key)
+                .map_or(0, |record| record.component_keys.len()),
+            conflict: None,
+        }
+    }
+
+    /// Assign one managed context profile to one managed component tag.
+    #[must_use]
+    pub fn assign_context_profile_for_tag(
+        &mut self,
+        tag_key: &str,
+        profile_key: &str,
+    ) -> AssignTagContextProfileResult {
+        if !self.context_profiles.contains_key(profile_key) {
+            return AssignTagContextProfileResult {
+                change: AssignTagContextProfileChange::Rejected,
+                profile_key: None,
+                conflict: None,
+            };
+        }
+
+        let Some(existing_tag) = self.component_tags.get(tag_key) else {
+            return AssignTagContextProfileResult {
+                change: AssignTagContextProfileChange::Rejected,
+                profile_key: None,
+                conflict: None,
+            };
+        };
+
+        if existing_tag.context_profile_key.as_deref() == Some(profile_key) {
+            return AssignTagContextProfileResult {
+                change: AssignTagContextProfileChange::Unchanged,
+                profile_key: existing_tag.context_profile_key.clone(),
+                conflict: None,
+            };
+        }
+
+        let mut candidate = self.clone();
+        let Some(tag_record) = candidate.component_tags.get_mut(tag_key) else {
+            return AssignTagContextProfileResult {
+                change: AssignTagContextProfileChange::Rejected,
+                profile_key: existing_tag.context_profile_key.clone(),
+                conflict: None,
+            };
+        };
+        tag_record.context_profile_key = Some(profile_key.into());
+
+        let Some(tag_record) = candidate.component_tags.get(tag_key) else {
+            return AssignTagContextProfileResult {
+                change: AssignTagContextProfileChange::Rejected,
+                profile_key: existing_tag.context_profile_key.clone(),
+                conflict: None,
+            };
+        };
+        for component_key in &tag_record.component_keys {
+            if let Some(conflict) =
+                candidate.first_tag_context_conflict_for_component(component_key.as_ref())
+            {
+                return AssignTagContextProfileResult {
+                    change: AssignTagContextProfileChange::Rejected,
+                    profile_key: existing_tag.context_profile_key.clone(),
+                    conflict: Some(conflict),
+                };
+            }
+        }
+
+        *self = candidate;
+        AssignTagContextProfileResult {
+            change: AssignTagContextProfileChange::Assigned,
+            profile_key: self
+                .component_tags
+                .get(tag_key)
+                .and_then(|record| record.context_profile_key.clone()),
+            conflict: None,
         }
     }
 
@@ -1297,6 +1646,27 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn assigned_tag_context_profile(&self, tag_key: &str) -> Option<&str> {
+        self.component_tags
+            .get(tag_key)
+            .and_then(|record| record.context_profile_key.as_deref())
+    }
+
+    #[must_use]
+    pub fn component_tag_keys(&self, component_key: &str) -> Option<Vec<Box<str>>> {
+        self.components
+            .get(component_key)
+            .map(|record| record.tag_keys.iter().cloned().collect())
+    }
+
+    #[must_use]
+    pub fn tag_component_keys(&self, tag_key: &str) -> Option<Vec<Box<str>>> {
+        self.component_tags
+            .get(tag_key)
+            .map(|record| record.component_keys.iter().cloned().collect())
+    }
+
+    #[must_use]
     pub fn collection_component_keys(&self, collection_key: &str) -> Option<Vec<Box<str>>> {
         self.collections
             .get(collection_key)
@@ -1308,8 +1678,11 @@ impl ComponentInventory {
         &self,
         component_key: &str,
     ) -> Option<ManagedContextProfile> {
-        self.assigned_context_profile(component_key)
-            .and_then(|profile_key| self.context_profile(profile_key))
+        ManagedContextProfile::merge(
+            self.tag_overlay_context_profile(component_key),
+            self.assigned_context_profile(component_key)
+                .and_then(|profile_key| self.context_profile(profile_key)),
+        )
     }
 
     #[must_use]
@@ -1321,8 +1694,7 @@ impl ComponentInventory {
         ManagedContextProfile::merge(
             self.assigned_collection_context_profile(collection_key)
                 .and_then(|profile_key| self.context_profile(profile_key)),
-            self.assigned_context_profile(component_key)
-                .and_then(|profile_key| self.context_profile(profile_key)),
+            self.managed_component_context_profile(component_key),
         )
     }
 
@@ -1428,6 +1800,29 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn tag_scoped_artifacts(&self, tag_key: &str) -> Option<Vec<CollectionScopedArtifact>> {
+        self.component_tags.get(tag_key).map(|record| {
+            record
+                .component_keys
+                .iter()
+                .flat_map(|component_key| {
+                    self.components
+                        .get(component_key.as_ref())
+                        .into_iter()
+                        .flat_map(move |component| {
+                            component.artifacts.iter().cloned().map(move |artifact| {
+                                CollectionScopedArtifact {
+                                    component_key: component_key.clone(),
+                                    artifact,
+                                }
+                            })
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[must_use]
     pub fn collection_scan_schedule(&self, collection_key: &str) -> Option<CollectionScanSchedule> {
         self.collections
             .get(collection_key)
@@ -1484,6 +1879,108 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn managed_component_tags(&self) -> usize {
+        self.component_tags.len()
+    }
+
+    #[must_use]
+    pub fn component_tags(&self) -> Vec<ManagedComponentTag> {
+        self.component_tags
+            .values()
+            .map(|record| ManagedComponentTag {
+                tag_key: record.registration.tag_key.clone(),
+                name: record.registration.name.clone(),
+                component_keys: record.component_keys.iter().cloned().collect(),
+                context_profile_key: record.context_profile_key.clone(),
+            })
+            .collect()
+    }
+
+    fn tag_overlay_context_profile(&self, component_key: &str) -> Option<ManagedContextProfile> {
+        self.components.get(component_key).and_then(|record| {
+            record
+                .tag_keys
+                .iter()
+                .filter_map(|tag_key| {
+                    self.assigned_tag_context_profile(tag_key.as_ref())
+                        .and_then(|profile_key| self.context_profile(profile_key))
+                })
+                .fold(None, |merged, profile| {
+                    ManagedContextProfile::merge(merged, Some(profile))
+                })
+        })
+    }
+
+    fn first_tag_context_conflict_for_component(
+        &self,
+        component_key: &str,
+    ) -> Option<TagContextConflict> {
+        let record = self.components.get(component_key)?;
+        let mut internet_exposed = None;
+        let mut production = None;
+        let mut mission_critical = None;
+        let mut vpn_restricted = None;
+        let mut non_privileged_user = None;
+
+        for tag_key in &record.tag_keys {
+            let Some(profile_key) = self.assigned_tag_context_profile(tag_key.as_ref()) else {
+                continue;
+            };
+            let Some(profile) = self.context_profile(profile_key) else {
+                continue;
+            };
+
+            if let Some(conflict) = detect_tag_field_conflict(
+                component_key,
+                profile.internet_exposed,
+                profile_key,
+                TagContextField::InternetExposed,
+                &mut internet_exposed,
+            ) {
+                return Some(conflict);
+            }
+            if let Some(conflict) = detect_tag_field_conflict(
+                component_key,
+                profile.production,
+                profile_key,
+                TagContextField::Production,
+                &mut production,
+            ) {
+                return Some(conflict);
+            }
+            if let Some(conflict) = detect_tag_field_conflict(
+                component_key,
+                profile.mission_critical,
+                profile_key,
+                TagContextField::MissionCritical,
+                &mut mission_critical,
+            ) {
+                return Some(conflict);
+            }
+            if let Some(conflict) = detect_tag_field_conflict(
+                component_key,
+                profile.vpn_restricted,
+                profile_key,
+                TagContextField::VpnRestricted,
+                &mut vpn_restricted,
+            ) {
+                return Some(conflict);
+            }
+            if let Some(conflict) = detect_tag_field_conflict(
+                component_key,
+                profile.non_privileged_user,
+                profile_key,
+                TagContextField::NonPrivilegedUser,
+                &mut non_privileged_user,
+            ) {
+                return Some(conflict);
+            }
+        }
+
+        None
+    }
+
+    #[must_use]
     pub fn collection_operations_summaries(
         &self,
         now_unix_ms: u64,
@@ -1530,6 +2027,32 @@ impl ComponentInventory {
         });
 
         summaries
+    }
+}
+
+fn detect_tag_field_conflict(
+    component_key: &str,
+    candidate: Option<bool>,
+    candidate_profile_key: &str,
+    field: TagContextField,
+    slot: &mut Option<(bool, Box<str>)>,
+) -> Option<TagContextConflict> {
+    let candidate = candidate?;
+
+    match slot {
+        Some((existing, existing_profile_key)) if *existing != candidate => {
+            Some(TagContextConflict {
+                component_key: component_key.into(),
+                field,
+                existing_profile_key: existing_profile_key.clone(),
+                conflicting_profile_key: candidate_profile_key.into(),
+            })
+        }
+        Some(_) => None,
+        None => {
+            *slot = Some((candidate, candidate_profile_key.into()));
+            None
+        }
     }
 }
 

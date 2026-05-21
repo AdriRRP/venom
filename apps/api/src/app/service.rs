@@ -23,7 +23,8 @@ use venom_domain::integration::{
 use venom_domain::inventory::{
     CollectionRegistration, CollectionSource, CollectionSourceKind, CollectionSourceMode,
     CollectionSourceSummary, ComponentInventory, ComponentListCollectionSource,
-    ComponentRegistration, ContextProfileRegistration, ManagedContextProfile,
+    ComponentRegistration, ComponentTagRegistration, ContextProfileRegistration,
+    ManagedComponentTag, ManagedContextProfile,
 };
 use venom_domain::operations::{
     SystemEvent, SystemEventCategory, SystemEventsPage, SystemEventsQuery,
@@ -225,11 +226,18 @@ impl ApiReadSnapshot {
                 .component_keys
                 .into_iter()
                 .map(|component_key| CollectionMemberItem {
-                    component_context_profile_key: self
+                    context_profile_key: self
                         .inventory
                         .assigned_context_profile(component_key.as_ref())
                         .map(str::to_owned),
-                    component_key: component_key.into(),
+                    tag_keys: self
+                        .inventory
+                        .component_tag_keys(component_key.as_ref())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    key: component_key.into(),
                 })
                 .collect(),
         })
@@ -247,6 +255,21 @@ impl ApiReadSnapshot {
         ListContextProfilesResponse {
             managed_context_profiles: profiles.len(),
             profiles,
+        }
+    }
+
+    /// Query the operator-facing catalog of managed component tags.
+    #[must_use]
+    pub fn list_component_tags(&self) -> ListComponentTagsResponse {
+        let tags = self
+            .inventory
+            .component_tags()
+            .into_iter()
+            .map(ComponentTagItem::from)
+            .collect::<Vec<_>>();
+        ListComponentTagsResponse {
+            managed_component_tags: tags.len(),
+            tags,
         }
     }
 
@@ -495,6 +518,33 @@ impl ApiApplication {
         })
     }
 
+    /// Register one reusable transversal component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
+    pub async fn register_component_tag(
+        &mut self,
+        request: ComponentTagRegistrationRequest,
+    ) -> Result<RegisterComponentTagResponse, ApiApplicationError> {
+        let registration = ComponentTagRegistration::new(request.tag_key, request.name);
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .register_component_tag(registration)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .register_component_tag(registration)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(RegisterComponentTagResponse {
+            change: result.change.as_str().to_owned(),
+            managed_component_tags: result.managed_component_tags,
+        })
+    }
+
     /// Bind one immutable artifact to one managed component.
     ///
     /// # Errors
@@ -580,6 +630,34 @@ impl ApiApplication {
         })
     }
 
+    /// Add one managed component to one managed component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
+    pub async fn add_component_to_tag(
+        &mut self,
+        tag_key: &str,
+        request: ComponentTagMembershipRequest,
+    ) -> Result<ComponentTagMembershipResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_component_tag(tag_key, &request.component_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_component_tag(tag_key, &request.component_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(ComponentTagMembershipResponse {
+            change: result.change.as_str().to_owned(),
+            members: result.members,
+            conflict: result.conflict.map(ComponentTagConflictItem::from),
+        })
+    }
+
     /// Remove one managed component from one closed collection.
     ///
     /// # Errors
@@ -604,6 +682,34 @@ impl ApiApplication {
         Ok(CollectionMembershipResponse {
             change: result.change.as_str().to_owned(),
             members: result.members,
+        })
+    }
+
+    /// Assign one managed context profile to one managed component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the durable state write fails.
+    pub async fn assign_context_profile_for_tag(
+        &mut self,
+        tag_key: &str,
+        request: AssignTagContextProfileRequest,
+    ) -> Result<AssignTagContextProfileResponse, ApiApplicationError> {
+        let result = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .assign_context_profile_for_tag(tag_key, &request.profile_key)
+                .map_err(|error| ApiApplicationError::State(error.to_string()))?,
+            ApiStore::Postgres(postgres) => postgres
+                .assign_context_profile_for_tag(tag_key, &request.profile_key)
+                .await
+                .map_err(ApiApplicationError::State)?,
+        };
+
+        Ok(AssignTagContextProfileResponse {
+            change: result.change.as_str().to_owned(),
+            profile_key: result.profile_key.map(Into::into),
+            conflict: result.conflict.map(ComponentTagConflictItem::from),
         })
     }
 
@@ -994,6 +1100,68 @@ impl ApiApplication {
         })
     }
 
+    /// Accept risk for one filtered open cohort inside one managed component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the tag is
+    /// unknown, or the durable write fails.
+    pub async fn accept_risk_for_tag(
+        &mut self,
+        tag_key: &str,
+        request: BulkAcceptRiskRequest,
+    ) -> Result<BulkAcceptRiskByTagResponse, ApiApplicationError> {
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "risk acceptance reason must not be empty".to_owned(),
+            ));
+        }
+        let acceptance = request.until_unix_ms.map_or_else(
+            || RiskAcceptance::new(request.reason.clone()),
+            |until_unix_ms| {
+                RiskAcceptance::new(request.reason.clone()).until_unix_ms(until_unix_ms)
+            },
+        );
+        let query = build_bulk_collection_governance_query(
+            request.min_severity.as_deref(),
+            request.package_name.as_deref(),
+        )?;
+
+        let result: BulkAcceptRiskResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .accept_risk_for_tag(tag_key, &query, acceptance.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingTag(reason) => {
+                        ApiApplicationError::NotFound(reason.into())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .accept_risk_for_tag(tag_key, &query, acceptance.clone())
+                .await
+                .map_err(|error| {
+                    if error.starts_with("unknown tag:") {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(BulkAcceptRiskByTagResponse {
+            tag_key: tag_key.to_owned(),
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            targeted: result.targeted,
+            accepted: result.accepted,
+            unchanged: result.unchanged,
+            governance_state: "risk-accepted".to_owned(),
+            governance_reason: result.acceptance.reason.into(),
+            governance_until_unix_ms: result.acceptance.until_unix_ms,
+        })
+    }
+
     /// Suppress one filtered open cohort of findings inside one managed collection.
     ///
     /// # Errors
@@ -1040,6 +1208,63 @@ impl ApiApplication {
 
         Ok(BulkSuppressFindingsResponse {
             collection_key: collection_key.to_owned(),
+            min_severity: request.min_severity,
+            package_name: request.package_name,
+            targeted: result.targeted,
+            suppressed: result.suppressed,
+            unchanged: result.unchanged,
+            governance_state: "suppressed".to_owned(),
+            governance_reason: result.suppression.reason.into(),
+            governance_until_unix_ms: None,
+        })
+    }
+
+    /// Suppress one filtered open cohort of findings inside one managed component tag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid, the tag is
+    /// unknown, or the durable write fails.
+    pub async fn suppress_findings_for_tag(
+        &mut self,
+        tag_key: &str,
+        request: BulkSuppressFindingsRequest,
+    ) -> Result<BulkSuppressFindingsByTagResponse, ApiApplicationError> {
+        if request.reason.trim().is_empty() {
+            return Err(ApiApplicationError::InvalidRequest(
+                "suppression reason must not be empty".to_owned(),
+            ));
+        }
+        let query = build_bulk_collection_governance_query(
+            request.min_severity.as_deref(),
+            request.package_name.as_deref(),
+        )?;
+        let suppression = Suppression::new(request.reason.clone());
+
+        let result: BulkSuppressFindingResult = match &mut self.backend {
+            ApiStore::Local(local) => local
+                .state
+                .suppress_findings_for_tag(tag_key, &query, suppression.clone())
+                .map_err(|error| match error {
+                    venom_domain::DurableStateError::MissingTag(reason) => {
+                        ApiApplicationError::NotFound(reason.into())
+                    }
+                    _ => ApiApplicationError::State(error.to_string()),
+                })?,
+            ApiStore::Postgres(postgres) => postgres
+                .suppress_findings_for_tag(tag_key, &query, suppression.clone())
+                .await
+                .map_err(|error| {
+                    if error.starts_with("unknown tag:") {
+                        ApiApplicationError::NotFound(error)
+                    } else {
+                        ApiApplicationError::State(error)
+                    }
+                })?,
+        };
+
+        Ok(BulkSuppressFindingsByTagResponse {
+            tag_key: tag_key.to_owned(),
             min_severity: request.min_severity,
             package_name: request.package_name,
             targeted: result.targeted,
@@ -1934,8 +2159,89 @@ impl From<CollectionHealthSummary> for CollectionHealthItem {
 
 #[derive(Debug, Serialize)]
 pub struct CollectionMemberItem {
+    pub key: String,
+    pub context_profile_key: Option<String>,
+    pub tag_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentTagItem {
+    pub tag_key: String,
+    pub name: String,
+    pub component_keys: Vec<String>,
+    pub context_profile_key: Option<String>,
+}
+
+impl From<ManagedComponentTag> for ComponentTagItem {
+    fn from(value: ManagedComponentTag) -> Self {
+        Self {
+            tag_key: value.tag_key.into(),
+            name: value.name.into(),
+            component_keys: value.component_keys.into_iter().map(Into::into).collect(),
+            context_profile_key: value.context_profile_key.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListComponentTagsResponse {
+    pub managed_component_tags: usize,
+    pub tags: Vec<ComponentTagItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComponentTagRegistrationRequest {
+    pub tag_key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterComponentTagResponse {
+    pub change: String,
+    pub managed_component_tags: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ComponentTagMembershipRequest {
     pub component_key: String,
-    pub component_context_profile_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentTagConflictItem {
+    pub component_key: String,
+    pub field: &'static str,
+    pub existing_profile_key: String,
+    pub conflicting_profile_key: String,
+}
+
+impl From<venom_domain::TagContextConflict> for ComponentTagConflictItem {
+    fn from(value: venom_domain::TagContextConflict) -> Self {
+        Self {
+            component_key: value.component_key.into(),
+            field: value.field.as_str(),
+            existing_profile_key: value.existing_profile_key.into(),
+            conflicting_profile_key: value.conflicting_profile_key.into(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ComponentTagMembershipResponse {
+    pub change: String,
+    pub members: usize,
+    pub conflict: Option<ComponentTagConflictItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignTagContextProfileRequest {
+    pub profile_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssignTagContextProfileResponse {
+    pub change: String,
+    pub profile_key: Option<String>,
+    pub conflict: Option<ComponentTagConflictItem>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -2124,6 +2430,19 @@ pub struct BulkAcceptRiskResponse {
     pub governance_until_unix_ms: Option<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct BulkAcceptRiskByTagResponse {
+    pub tag_key: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub targeted: usize,
+    pub accepted: usize,
+    pub unchanged: usize,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BulkSuppressFindingsRequest {
     pub min_severity: Option<String>,
@@ -2134,6 +2453,19 @@ pub struct BulkSuppressFindingsRequest {
 #[derive(Debug, Serialize)]
 pub struct BulkSuppressFindingsResponse {
     pub collection_key: String,
+    pub min_severity: Option<String>,
+    pub package_name: Option<String>,
+    pub targeted: usize,
+    pub suppressed: usize,
+    pub unchanged: usize,
+    pub governance_state: String,
+    pub governance_reason: String,
+    pub governance_until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkSuppressFindingsByTagResponse {
+    pub tag_key: String,
     pub min_severity: Option<String>,
     pub package_name: Option<String>,
     pub targeted: usize,

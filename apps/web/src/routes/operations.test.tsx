@@ -182,8 +182,9 @@ describe("OperationsPage", () => {
 						},
 						members: [
 							{
-								component_key: "component:payments-api",
-								component_context_profile_key: null,
+								key: "component:payments-api",
+								context_profile_key: null,
+								tag_keys: [],
 							},
 						],
 					}),
@@ -284,8 +285,9 @@ describe("OperationsPage", () => {
 						},
 						members: [
 							{
-								component_key: "component:payments-api",
-								component_context_profile_key: null,
+								key: "component:payments-api",
+								context_profile_key: null,
+								tag_keys: [],
 							},
 						],
 					}),
@@ -407,8 +409,9 @@ describe("OperationsPage", () => {
 						},
 						members: [
 							{
-								component_key: "component:payments-api",
-								component_context_profile_key: null,
+								key: "component:payments-api",
+								context_profile_key: null,
+								tag_keys: [],
 							},
 						],
 					}),
@@ -520,8 +523,9 @@ describe("OperationsPage", () => {
 						},
 						members: [
 							{
-								component_key: "component:payments-api",
-								component_context_profile_key: null,
+								key: "component:payments-api",
+								context_profile_key: null,
+								tag_keys: [],
 							},
 						],
 					}),
@@ -704,8 +708,9 @@ describe("OperationsPage", () => {
 						},
 						members: [
 							{
-								component_key: "component:payments-api",
-								component_context_profile_key: null,
+								key: "component:payments-api",
+								context_profile_key: null,
+								tag_keys: [],
 							},
 						],
 					}),

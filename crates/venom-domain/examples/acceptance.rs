@@ -17,11 +17,13 @@ use venom_domain::findings::{
     query_collection_governance_overview, summarize_collection_health,
 };
 use venom_domain::inventory::{
-    AddCollectionComponentResult, BindArtifactResult, CollectionRegistration, CollectionSource,
-    CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
+    AddCollectionComponentResult, AssignComponentTagResult, AssignTagContextProfileResult,
+    BindArtifactResult, CollectionRegistration, CollectionSource, CollectionSourceMode,
+    ComponentListCollectionSource, ComponentRegistration, ComponentTagRegistration,
     ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceResult,
     ContextProfileRegistration, ManagedCollectionOperationsSummary,
     MaterializeCollectionSourceResult, RegisterCollectionResult, RegisterComponentResult,
+    RegisterComponentTagResult,
 };
 use venom_domain::scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler, DueCollectionScan,
@@ -36,6 +38,9 @@ struct AcceptanceWorld {
     pending_report: Option<ProviderScanReport>,
     ingestion: FindingIngestion,
     last_registration: Option<RegisterComponentResult>,
+    last_tag_registration: Option<RegisterComponentTagResult>,
+    last_tag_membership: Option<AssignComponentTagResult>,
+    last_tag_context_assignment: Option<AssignTagContextProfileResult>,
     last_collection_registration: Option<RegisterCollectionResult>,
     last_collection_membership: Option<AddCollectionComponentResult>,
     last_collection_source: Option<ConfigureCollectionSourceResult>,
@@ -73,6 +78,9 @@ struct AcceptanceWorld {
 async fn no_managed_components(world: &mut AcceptanceWorld) {
     world.ingestion = FindingIngestion::default();
     world.last_registration = None;
+    world.last_tag_registration = None;
+    world.last_tag_membership = None;
+    world.last_tag_context_assignment = None;
     world.last_collection_registration = None;
     world.last_collection_membership = None;
     world.last_collection_source = None;
@@ -374,6 +382,16 @@ async fn venom_registers_component(
     );
 }
 
+#[when(expr = "VENOM registers component tag {string} named {string}")]
+async fn venom_registers_component_tag(world: &mut AcceptanceWorld, tag_key: String, name: String) {
+    world.last_tag_registration = Some(
+        world
+            .ingestion
+            .inventory_mut()
+            .register_component_tag(ComponentTagRegistration::new(tag_key, name)),
+    );
+}
+
 #[given(expr = "VENOM creates collection {string} named {string}")]
 #[when(expr = "VENOM creates collection {string} named {string}")]
 async fn venom_creates_collection(
@@ -406,6 +424,28 @@ async fn venom_durably_registers_component(
         }
         Err(error) => {
             world.last_registration = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[given(expr = "VENOM durably registers component tag {string} named {string}")]
+#[when(expr = "VENOM durably registers component tag {string} named {string}")]
+async fn venom_durably_registers_component_tag(
+    world: &mut AcceptanceWorld,
+    tag_key: String,
+    name: String,
+) {
+    let result = world
+        .durable_state_mut()
+        .register_component_tag(ComponentTagRegistration::new(tag_key, name));
+    match result {
+        Ok(result) => {
+            world.last_tag_registration = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_tag_registration = None;
             world.last_durable_error = Some(error.as_str().to_owned());
         }
     }
@@ -451,6 +491,21 @@ async fn venom_durably_registers_production_context_profile(
     }
 }
 
+#[given(expr = "VENOM durably registers context profile {string} named {string} marked internal")]
+#[when(expr = "VENOM durably registers context profile {string} named {string} marked internal")]
+async fn venom_durably_registers_internal_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name).with_internet_exposed(false),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
 #[given(
     expr = "VENOM durably registers context profile {string} named {string} marked internet exposed and mission critical"
 )]
@@ -485,6 +540,50 @@ async fn venom_durably_assigns_context_profile(
     {
         Ok(_) => world.last_durable_error = None,
         Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(expr = "VENOM durably assigns component {string} to tag {string}")]
+#[when(expr = "VENOM durably assigns component {string} to tag {string}")]
+async fn venom_durably_assigns_component_to_tag(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    tag_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .assign_component_tag(&tag_key, &component_key)
+    {
+        Ok(result) => {
+            world.last_tag_membership = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_tag_membership = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
+    }
+}
+
+#[given(expr = "VENOM durably assigns context profile {string} to tag {string}")]
+#[when(expr = "VENOM durably assigns context profile {string} to tag {string}")]
+async fn venom_durably_assigns_context_profile_to_tag(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    tag_key: String,
+) {
+    match world
+        .durable_state_mut()
+        .assign_context_profile_for_tag(&tag_key, &profile_key)
+    {
+        Ok(result) => {
+            world.last_tag_context_assignment = Some(result);
+            world.last_durable_error = None;
+        }
+        Err(error) => {
+            world.last_tag_context_assignment = None;
+            world.last_durable_error = Some(error.as_str().to_owned());
+        }
     }
 }
 
@@ -882,6 +981,44 @@ async fn the_durable_state_shows_component_context_profile(
 }
 
 #[then(
+    expr = "the durable state shows component {string} resolves context in collection {string} as {string}"
+)]
+async fn the_durable_state_shows_component_resolves_context_in_collection(
+    world: &mut AcceptanceWorld,
+    component_key: String,
+    collection_key: String,
+    expected: String,
+) {
+    let profile = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .managed_component_context_profile_in_collection(&collection_key, &component_key)
+        .expect("resolved collection-scoped context profile should exist");
+    let expected_flags = parse_context_flag_list(&expected);
+    assert_eq!(
+        profile.internet_exposed == Some(true),
+        expected_flags.contains("internet exposed")
+    );
+    assert_eq!(
+        profile.production == Some(true),
+        expected_flags.contains("production")
+    );
+    assert_eq!(
+        profile.mission_critical == Some(true),
+        expected_flags.contains("mission critical")
+    );
+    assert_eq!(
+        profile.vpn_restricted == Some(true),
+        expected_flags.contains("vpn restricted")
+    );
+    assert_eq!(
+        profile.non_privileged_user == Some(true),
+        expected_flags.contains("non-privileged user")
+    );
+}
+
+#[then(
     expr = "the durable state shows context profile {string} is internet exposed, production, and mission critical"
 )]
 async fn the_durable_state_shows_context_profile_flags(
@@ -1060,6 +1197,28 @@ async fn venom_durably_accepts_risk_for_open_collection_findings(
 }
 
 #[when(
+    expr = "VENOM durably accepts risk for open findings in tag {string} with minimum severity {string} and reason {string}"
+)]
+async fn venom_durably_accepts_risk_for_open_tag_findings(
+    world: &mut AcceptanceWorld,
+    tag_key: String,
+    min_severity: String,
+    reason: String,
+) {
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(FindingGovernanceState::Open)
+        .with_min_severity(parse_severity(&min_severity));
+    match world.durable_state_mut().accept_risk_for_tag(
+        &tag_key,
+        &query,
+        RiskAcceptance::new(reason),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
     expr = "VENOM durably accepts risk for open findings in collection {string} with minimum severity {string} and reason {string} until unix ms {int}"
 )]
 async fn venom_durably_accepts_risk_for_open_collection_findings_until(
@@ -1097,6 +1256,28 @@ async fn venom_durably_suppresses_open_collection_findings(
         .with_min_severity(parse_severity(&min_severity));
     match world.durable_state_mut().suppress_findings_for_collection(
         &collection_key,
+        &query,
+        Suppression::new(reason),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[when(
+    expr = "VENOM durably suppresses open findings in tag {string} with minimum severity {string} and reason {string}"
+)]
+async fn venom_durably_suppresses_open_tag_findings(
+    world: &mut AcceptanceWorld,
+    tag_key: String,
+    min_severity: String,
+    reason: String,
+) {
+    let query = ScopedActiveFindingsQuery::new()
+        .with_governance_state(FindingGovernanceState::Open)
+        .with_min_severity(parse_severity(&min_severity));
+    match world.durable_state_mut().suppress_findings_for_tag(
+        &tag_key,
         &query,
         Suppression::new(reason),
     ) {
@@ -1463,6 +1644,18 @@ async fn the_durable_state_manages_component(world: &mut AcceptanceWorld, compon
     );
 }
 
+#[then(expr = "the durable state manages component tag {string}")]
+async fn the_durable_state_manages_component_tag(world: &mut AcceptanceWorld, tag_key: String) {
+    assert!(
+        world
+            .durable_state_ref()
+            .ingestion()
+            .inventory()
+            .tag_component_keys(&tag_key)
+            .is_some()
+    );
+}
+
 #[then(expr = "{int} component is under management")]
 #[then(expr = "{int} components are under management")]
 async fn components_are_under_management(world: &mut AcceptanceWorld, expected: usize) {
@@ -1489,6 +1682,40 @@ async fn the_collection_result_is(world: &mut AcceptanceWorld, expected: String)
             .change
             .as_str(),
         expected
+    );
+}
+
+#[then(expr = "the component tag result is {string}")]
+async fn the_component_tag_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_tag_registration
+            .as_ref()
+            .expect("a component-tag registration must be attempted before assertions")
+            .change
+            .as_str(),
+        expected.as_str()
+    );
+}
+
+#[then(expr = "managed component tags are {int}")]
+async fn managed_component_tags_are(world: &mut AcceptanceWorld, expected: usize) {
+    assert_eq!(
+        world.ingestion.inventory().managed_component_tags(),
+        expected
+    );
+}
+
+#[then(expr = "the tag context assignment result is {string}")]
+async fn the_tag_context_assignment_result_is(world: &mut AcceptanceWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_tag_context_assignment
+            .as_ref()
+            .expect("a tag-context assignment must be attempted before assertions")
+            .change
+            .as_str(),
+        expected.as_str()
     );
 }
 
@@ -1581,6 +1808,25 @@ async fn collection_contains_component(
             })
         })
         .expect("the collection must exist before membership assertions");
+    assert!(
+        members
+            .iter()
+            .any(|member| member.as_ref() == component_key)
+    );
+}
+
+#[then(expr = "component tag {string} contains component {string}")]
+async fn component_tag_contains_component(
+    world: &mut AcceptanceWorld,
+    tag_key: String,
+    component_key: String,
+) {
+    let members = world
+        .durable_state_ref()
+        .ingestion()
+        .inventory()
+        .tag_component_keys(&tag_key)
+        .expect("the component tag must exist before membership assertions");
     assert!(
         members
             .iter()
@@ -2901,6 +3147,17 @@ fn parse_component_keys(value: &str) -> Vec<Box<str>> {
         .collect()
 }
 
+fn parse_context_flag_list(value: &str) -> std::collections::BTreeSet<String> {
+    value
+        .replace(", and ", ",")
+        .replace(" and ", ",")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 const fn severity_name(value: Severity) -> &'static str {
     match value {
         Severity::Unknown => "unknown",
@@ -2929,7 +3186,9 @@ async fn main() {
         "filter-governed-findings.feature",
         "classify-finding.feature",
         "manage-context-profiles.feature",
+        "manage-component-tags.feature",
         "reopen-finding.feature",
+        "bulk-governance-by-tag.feature",
         "view-bulk-governance-workbench.feature",
         "view-collection-governance.feature",
         "view-collection-health.feature",
