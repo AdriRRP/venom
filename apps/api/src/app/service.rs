@@ -158,10 +158,7 @@ impl ApiReadSnapshot {
                 collection_key: collection.collection_key.to_string(),
                 name: collection.name.to_string(),
                 members: collection.members,
-                source: collection
-                    .source
-                    .clone()
-                    .map(CollectionSourceSummaryItem::from),
+                source: collection.source.map(CollectionSourceSummaryItem::from),
                 scan_schedule: collection
                     .scan_schedule
                     .map(CollectionScanScheduleItem::from),

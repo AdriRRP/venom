@@ -136,7 +136,7 @@ pub fn build_release_dashboard(board: &ReleaseBoard, now_unix_ms: u64) -> Releas
 
 #[cfg(test)]
 mod tests {
-    use super::{build_release_board, build_release_dashboard};
+    use super::{ReleaseBoard, build_release_board, build_release_dashboard};
     use crate::findings::{
         FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
         Severity, Suppression,
@@ -147,8 +147,7 @@ mod tests {
     };
     use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
-    #[test]
-    fn release_dashboard_aggregates_managed_collection_health() {
+    fn sample_release_board() -> ReleaseBoard {
         let mut inventory = ComponentInventory::default();
         let _ = inventory.register(ComponentRegistration::new(
             "component:payments-api",
@@ -229,7 +228,12 @@ mod tests {
             Suppression::new("Known upstream false alarm"),
         );
 
-        let board = build_release_board(&inventory, &read_model);
+        build_release_board(&inventory, &read_model)
+    }
+
+    #[test]
+    fn release_dashboard_aggregates_managed_collection_health() {
+        let board = sample_release_board();
         let dashboard = build_release_dashboard(&board, 1_500);
 
         assert_eq!(dashboard.summary.managed_collections, 2);
