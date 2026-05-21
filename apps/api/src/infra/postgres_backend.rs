@@ -2142,7 +2142,7 @@ impl PostgresStore {
             &mut transaction,
             std::slice::from_ref(system_event),
         )
-            .await?;
+        .await?;
         self.commit_transaction(transaction).await
     }
 
