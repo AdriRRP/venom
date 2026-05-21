@@ -3414,9 +3414,10 @@ impl PostgresStore {
             concat!(
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                 "command_id, integration_event_id, finding_count, retryable, detail ",
-                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT 512"
+                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT {}"
             ),
-            self.names.system_events
+            self.names.system_events,
+            venom_domain::MAX_SYSTEM_EVENTS_LIMIT
         ))
         .fetch_all(&self.pool)
         .await
