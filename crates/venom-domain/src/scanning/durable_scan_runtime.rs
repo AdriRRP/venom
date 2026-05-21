@@ -69,8 +69,28 @@ impl ScanCommandQueue {
         &mut self,
         request: ScanRequest,
     ) -> Result<EnqueueScanResult, ScanCommandQueueError> {
-        let command_id = self.enqueue_with_origin(request, None)?;
+        let command_id = self
+            .enqueue_batch_with_origin(vec![request], None)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ScanCommandQueueError::CorruptHistory {
+                line: 0,
+                reason: "batch enqueue did not return a command id".into(),
+            })?;
         Ok(EnqueueScanResult { command_id })
+    }
+
+    /// Durably enqueue one canonical scan batch in one append-only queue write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanCommandQueueError`] when the queue cannot durably append
+    /// the batch event.
+    pub fn enqueue_batch(
+        &mut self,
+        requests: Vec<ScanRequest>,
+    ) -> Result<Vec<Box<str>>, ScanCommandQueueError> {
+        self.enqueue_batch_with_origin(requests, None)
     }
 
     /// Durably enqueue one collection-scheduled batch keyed by the due time that triggered it.
@@ -96,53 +116,33 @@ impl ScanCommandQueue {
             collection_key: collection_key.into(),
             due_at_unix_ms,
         };
-        let mut command_ids = Vec::with_capacity(requests.len());
-        for request in requests {
-            command_ids.push(self.enqueue_with_origin(request, Some(&origin))?);
-        }
-        Ok(command_ids)
+        self.enqueue_batch_with_origin(requests, Some(&origin))
     }
 
-    fn enqueue_with_origin(
+    fn enqueue_batch_with_origin(
         &mut self,
-        request: ScanRequest,
+        requests: Vec<ScanRequest>,
         collection_schedule_origin: Option<&CollectionScheduleOrigin>,
-    ) -> Result<Box<str>, ScanCommandQueueError> {
-        let command_id = next_command_id();
+    ) -> Result<Vec<Box<str>>, ScanCommandQueueError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let occurred_at_unix_ms = current_unix_millis()?;
-        self.append_event(&DurableScanEvent::Enqueued {
-            command_id: command_id.clone(),
-            request: request.clone(),
-            occurred_at_unix_ms,
-            collection_schedule_origin: collection_schedule_origin.cloned(),
-        })?;
-        self.order.push(command_id.clone());
-        self.commands.insert(
-            command_id.clone(),
-            ScanCommandRecord {
+        let enqueued = requests
+            .into_iter()
+            .map(|request| DurableEnqueuedCommand {
+                command_id: next_command_id(),
                 request,
-                status: ScanCommandStatus::Pending,
                 collection_schedule_origin: collection_schedule_origin.cloned(),
-                captured_report: None,
-            },
-        );
-        let collection_key = collection_schedule_origin.map(|origin| origin.collection_key.clone());
-        self.push_system_event(SystemEvent {
-            event_id: format!("scan-command-enqueued-live-{command_id}").into_boxed_str(),
+            })
+            .collect::<Vec<_>>();
+        self.append_event(&DurableScanEvent::BatchEnqueued {
+            commands: enqueued.clone(),
             occurred_at_unix_ms,
-            kind: SystemEventKind::ScanCommandEnqueued,
-            collection_key,
-            component_key: self
-                .commands
-                .get(command_id.as_ref())
-                .map(|record| record.request.component_key.clone()),
-            command_id: Some(command_id.clone()),
-            integration_event_id: None,
-            finding_count: None,
-            retryable: None,
-            detail: None,
-        });
-        Ok(command_id)
+        })?;
+        self.apply_enqueued_batch(&enqueued, occurred_at_unix_ms);
+        Ok(enqueued.into_iter().map(|entry| entry.command_id).collect())
     }
 
     #[must_use]
@@ -580,6 +580,10 @@ impl ScanCommandQueue {
         line: usize,
     ) -> Result<(), ScanCommandQueueError> {
         match event {
+            DurableScanEvent::BatchEnqueued {
+                commands,
+                occurred_at_unix_ms,
+            } => self.apply_batch_enqueued_event(commands, occurred_at_unix_ms, line),
             DurableScanEvent::Enqueued {
                 command_id,
                 request,
@@ -647,6 +651,51 @@ impl ScanCommandQueue {
                 ..
             } => self.apply_failed_event(command_id, occurred_at_unix_ms, retryable, detail, line),
         }
+    }
+
+    fn apply_batch_enqueued_event(
+        &mut self,
+        commands: Vec<DurableEnqueuedCommand>,
+        occurred_at_unix_ms: u64,
+        line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        for command in &commands {
+            if self.commands.contains_key(command.command_id.as_ref()) {
+                return Err(ScanCommandQueueError::CorruptHistory {
+                    line,
+                    reason: "duplicate scan command id".into(),
+                });
+            }
+        }
+        for (index, command) in commands.iter().enumerate() {
+            self.order.push(command.command_id.clone());
+            self.commands.insert(
+                command.command_id.clone(),
+                ScanCommandRecord {
+                    request: command.request.clone(),
+                    status: ScanCommandStatus::Pending,
+                    collection_schedule_origin: command.collection_schedule_origin.clone(),
+                    captured_report: None,
+                },
+            );
+            let collection_key = command
+                .collection_schedule_origin
+                .as_ref()
+                .map(|origin| origin.collection_key.clone());
+            self.push_system_event(SystemEvent {
+                event_id: format!("scan-command-enqueued-{line}-{index}").into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::ScanCommandEnqueued,
+                collection_key,
+                component_key: Some(command.request.component_key.clone()),
+                command_id: Some(command.command_id.clone()),
+                integration_event_id: None,
+                finding_count: None,
+                retryable: None,
+                detail: None,
+            });
+        }
+        Ok(())
     }
 
     fn apply_report_captured_event(
@@ -893,6 +942,42 @@ impl ScanCommandQueue {
             self.system_events.pop_back();
         }
     }
+
+    fn apply_enqueued_batch(
+        &mut self,
+        commands: &[DurableEnqueuedCommand],
+        occurred_at_unix_ms: u64,
+    ) {
+        for command in commands {
+            self.order.push(command.command_id.clone());
+            self.commands.insert(
+                command.command_id.clone(),
+                ScanCommandRecord {
+                    request: command.request.clone(),
+                    status: ScanCommandStatus::Pending,
+                    collection_schedule_origin: command.collection_schedule_origin.clone(),
+                    captured_report: None,
+                },
+            );
+            let collection_key = command
+                .collection_schedule_origin
+                .as_ref()
+                .map(|origin| origin.collection_key.clone());
+            self.push_system_event(SystemEvent {
+                event_id: format!("scan-command-enqueued-live-{}", command.command_id)
+                    .into_boxed_str(),
+                occurred_at_unix_ms,
+                kind: SystemEventKind::ScanCommandEnqueued,
+                collection_key,
+                component_key: Some(command.request.component_key.clone()),
+                command_id: Some(command.command_id.clone()),
+                integration_event_id: None,
+                finding_count: None,
+                retryable: None,
+                detail: None,
+            });
+        }
+    }
 }
 
 fn current_unix_millis() -> Result<u64, ScanCommandQueueError> {
@@ -946,6 +1031,14 @@ struct ScanCommandRecord {
 struct CollectionScheduleOrigin {
     collection_key: Box<str>,
     due_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DurableEnqueuedCommand {
+    command_id: Box<str>,
+    request: ScanRequest,
+    #[serde(default)]
+    collection_schedule_origin: Option<CollectionScheduleOrigin>,
 }
 
 /// Observable result of enqueuing one durable scan command.
@@ -1019,6 +1112,11 @@ impl std::error::Error for ScanCommandQueueError {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum DurableScanEvent {
+    BatchEnqueued {
+        commands: Vec<DurableEnqueuedCommand>,
+        #[serde(default)]
+        occurred_at_unix_ms: u64,
+    },
     Enqueued {
         command_id: Box<str>,
         request: ScanRequest,
@@ -1084,6 +1182,7 @@ mod tests {
         IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
         PendingIntegrationEvent, ProviderScanReport, ReportedFinding, ScanPlanner, ScanRequest,
     };
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1236,6 +1335,24 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(runtime.pending_commands(), 1);
+    }
+
+    #[test]
+    fn enqueue_batch_persists_multiple_commands_in_one_history_event() {
+        let queue_path = temp_path("durable-runtime-batch-event");
+        let (_state, request) = durable_inventory();
+        let mut runtime = ScanCommandQueue::open(&queue_path).expect("runtime should open");
+
+        let command_ids = runtime
+            .enqueue_batch(vec![request.clone(), request])
+            .expect("batch enqueue should persist");
+
+        assert_eq!(command_ids.len(), 2);
+        assert_eq!(runtime.pending_commands(), 2);
+
+        let history = fs::read_to_string(&queue_path).expect("history should be readable");
+        assert_eq!(history.lines().count(), 1);
+        assert!(history.contains("\"event\":\"batch_enqueued\""));
     }
 
     #[tokio::test]

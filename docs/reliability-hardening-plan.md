@@ -18,6 +18,22 @@ Completed:
 5. `W93-bulk-governance-cohort-veracity`
 6. `W94-local-collection-scan-materialization-atomicity`
 7. `W95-local-scan-outcome-atomicity`
+8. `W96-local-collection-scan-request-atomicity`
+
+Remaining:
+
+9. `W97-postgres-post-commit-application-hardening`
+   Remove `commit-first, apply-later` gaps from the Postgres write paths that
+   still leave memory and observability behind durable truth until reload.
+10. `W98-api-lock-and-snapshot-topology`
+    Reduce the global API mutex contention and the remaining full-snapshot
+    refresh churn in read-heavy paths.
+11. `W99-contextual-risk-semantic-completion`
+    Make the richer execution context model affect deterministic risk
+    classification instead of stopping at three context dimensions.
+12. `W100-bulk-cohort-streaming`
+    Remove avoidable full-vector materialization and ordering from large
+    bulk-governance cohorts.
 
 ## Exit condition
 
