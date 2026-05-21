@@ -583,7 +583,7 @@ impl ScanCommandQueue {
             DurableScanEvent::BatchEnqueued {
                 commands,
                 occurred_at_unix_ms,
-            } => self.apply_batch_enqueued_event(commands, occurred_at_unix_ms, line),
+            } => self.apply_batch_enqueued_event(&commands, occurred_at_unix_ms, line),
             DurableScanEvent::Enqueued {
                 command_id,
                 request,
@@ -655,11 +655,11 @@ impl ScanCommandQueue {
 
     fn apply_batch_enqueued_event(
         &mut self,
-        commands: Vec<DurableEnqueuedCommand>,
+        commands: &[DurableEnqueuedCommand],
         occurred_at_unix_ms: u64,
         line: usize,
     ) -> Result<(), ScanCommandQueueError> {
-        for command in &commands {
+        for command in commands {
             if self.commands.contains_key(command.command_id.as_ref()) {
                 return Err(ScanCommandQueueError::CorruptHistory {
                     line,
