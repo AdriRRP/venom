@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/check-wave.sh --wave WXX-<slug> [--lane unit|integration|infra|acceptance|e2e|contract|full]
+  scripts/check-wave.sh --wave WNN-<slug> [--lane unit|integration|infra|acceptance|e2e|contract|full]
 EOF
 }
 
@@ -15,7 +15,7 @@ fail() {
 }
 
 validate_wave() {
-  [[ "$1" =~ ^W[0-9]{2}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "invalid wave id: $1"
+  [[ "$1" =~ ^W[0-9]{2,3}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "invalid wave id: $1"
 }
 
 validate_active_wave() {

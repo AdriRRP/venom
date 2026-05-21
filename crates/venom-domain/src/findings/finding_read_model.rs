@@ -395,25 +395,16 @@ impl FindingReadModel {
     }
 
     #[must_use]
-    pub fn collect_bulk_governance_cohort(
+    pub fn collect_bulk_governance_finding_refs(
         &self,
         scope: &[CollectionScopedArtifact],
         query: &BulkGovernanceQuery,
-    ) -> Vec<ScopedActiveFinding> {
-        self.collect_filtered_scoped_active_findings(scope, |scope_item, finding| {
-            self.finding_governance_state(
-                scope_item.component_key.as_ref(),
-                &scope_item.artifact,
-                finding,
-            ) == query.governance_state
-                && query
-                    .min_severity
-                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
-                && query
-                    .package_name
-                    .as_deref()
-                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
-        })
+    ) -> Vec<FindingRef> {
+        let mut findings = Vec::new();
+        self.visit_bulk_governance_finding_refs(scope, query, |finding| {
+            findings.push(finding);
+        });
+        findings
     }
 
     fn collect_filtered_scoped_active_findings(
@@ -473,6 +464,40 @@ impl FindingReadModel {
                         scope_item.artifact.clone(),
                         finding,
                     ));
+                }
+            }
+        }
+    }
+
+    pub fn visit_bulk_governance_finding_refs(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        query: &BulkGovernanceQuery,
+        mut visit: impl FnMut(FindingRef),
+    ) {
+        for scope_item in scope {
+            if let Some(findings) = self.active.get(&TrackedArtifactKey::new(
+                scope_item.component_key.clone(),
+                scope_item.artifact.clone(),
+            )) {
+                for finding in findings {
+                    if self.finding_governance_state(
+                        scope_item.component_key.as_ref(),
+                        &scope_item.artifact,
+                        finding,
+                    ) == query.governance_state
+                        && query
+                            .min_severity
+                            .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+                        && query.package_name.as_deref().is_none_or(|package_name| {
+                            finding.package_name.as_ref() == package_name
+                        })
+                    {
+                        visit(finding.finding_ref(
+                            scope_item.component_key.clone(),
+                            scope_item.artifact.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -833,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_governance_cohort_is_not_capped_by_page_limit() {
+    fn bulk_governance_finding_refs_are_not_capped_by_page_limit() {
         let mut read_model = FindingReadModel::new();
         let findings = (0..205)
             .map(|index| {
@@ -851,7 +876,7 @@ mod tests {
             artifact: artifact(),
         }];
 
-        let cohort = read_model.collect_bulk_governance_cohort(
+        let cohort = read_model.collect_bulk_governance_finding_refs(
             &scope,
             &BulkGovernanceQuery::new(crate::FindingGovernanceState::Open)
                 .with_min_severity(Severity::Unknown),
