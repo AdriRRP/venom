@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/check-slice.sh --wave WXX-<slug> --slice WXX-SYY [--lane unit|integration|infra|acceptance|e2e|contract] [--path <repo-path>...]
+  scripts/check-slice.sh --wave WNN-<slug> --slice WNN-SYY [--lane unit|integration|infra|acceptance|e2e|contract] [--path <repo-path>...]
 EOF
 }
 
@@ -15,11 +15,11 @@ fail() {
 }
 
 validate_wave() {
-  [[ "$1" =~ ^W[0-9]{2}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "invalid wave id: $1"
+  [[ "$1" =~ ^W[0-9]{2,3}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "invalid wave id: $1"
 }
 
 validate_slice() {
-  [[ "$1" =~ ^W[0-9]{2}-S[0-9]{2}$ ]] || fail "invalid slice id: $1"
+  [[ "$1" =~ ^W[0-9]{2,3}-S[0-9]{2}$ ]] || fail "invalid slice id: $1"
 }
 
 validate_active_wave() {

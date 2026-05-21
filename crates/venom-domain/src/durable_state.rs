@@ -761,7 +761,7 @@ impl DurableState {
             })?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -769,11 +769,10 @@ impl DurableState {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
             if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
-                changed_findings.push(StoredFindingRef::from(finding.finding));
+                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
+                changed_findings.push(StoredFindingRef::from(finding));
             }
         }
 
@@ -832,7 +831,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -840,11 +839,10 @@ impl DurableState {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
             if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
-                changed_findings.push(StoredFindingRef::from(finding.finding));
+                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
+                changed_findings.push(StoredFindingRef::from(finding));
             }
         }
 
@@ -1002,7 +1000,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1010,11 +1008,10 @@ impl DurableState {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
-                changed_findings.push(StoredFindingRef::from(finding.finding));
+                candidate_read_model.suppress(finding.clone(), suppression.clone());
+                changed_findings.push(StoredFindingRef::from(finding));
             }
         }
 
@@ -1073,7 +1070,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1081,11 +1078,10 @@ impl DurableState {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
-                changed_findings.push(StoredFindingRef::from(finding.finding));
+                candidate_read_model.suppress(finding.clone(), suppression.clone());
+                changed_findings.push(StoredFindingRef::from(finding));
             }
         }
 
@@ -1143,7 +1139,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1151,10 +1147,10 @@ impl DurableState {
         let mut reopened_findings = Vec::new();
 
         for finding in findings {
-            let result = candidate_governance.reopen(&finding.finding);
+            let result = candidate_governance.reopen(&finding);
             if result.change == ReopenFindingChange::Reopened {
-                candidate_read_model.reopen(&finding.finding);
-                reopened_findings.push(StoredFindingRef::from(finding.finding));
+                candidate_read_model.reopen(&finding);
+                reopened_findings.push(StoredFindingRef::from(finding));
             }
         }
 

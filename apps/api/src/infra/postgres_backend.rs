@@ -762,7 +762,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -770,11 +770,10 @@ impl PostgresStore {
         let mut changed = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
             if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
-                changed.push(finding.finding);
+                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
+                changed.push(finding);
             }
         }
 
@@ -867,7 +866,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -875,11 +874,10 @@ impl PostgresStore {
         let mut changed = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.accept_risk(finding.finding.clone(), acceptance.clone());
+            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
             if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.finding.clone(), acceptance.clone());
-                changed.push(finding.finding);
+                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
+                changed.push(finding);
             }
         }
 
@@ -1081,7 +1079,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1089,11 +1087,10 @@ impl PostgresStore {
         let mut changed_findings = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
-                changed_findings.push(finding.finding);
+                candidate_read_model.suppress(finding.clone(), suppression.clone());
+                changed_findings.push(finding);
             }
         }
 
@@ -1178,7 +1175,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1186,11 +1183,10 @@ impl PostgresStore {
         let mut changed = Vec::new();
 
         for finding in findings {
-            let result =
-                candidate_governance.suppress(finding.finding.clone(), suppression.clone());
+            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
             if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.finding.clone(), suppression.clone());
-                changed.push(finding.finding);
+                candidate_read_model.suppress(finding.clone(), suppression.clone());
+                changed.push(finding);
             }
         }
 
@@ -1276,7 +1272,7 @@ impl PostgresStore {
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
         let findings = self
             .read_model
-            .collect_bulk_governance_cohort(&scope, query);
+            .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1284,10 +1280,10 @@ impl PostgresStore {
         let mut reopened_findings = Vec::new();
 
         for finding in findings {
-            let result = candidate_governance.reopen(&finding.finding);
+            let result = candidate_governance.reopen(&finding);
             if result.change == ReopenFindingChange::Reopened {
-                candidate_read_model.reopen(&finding.finding);
-                reopened_findings.push(finding.finding);
+                candidate_read_model.reopen(&finding);
+                reopened_findings.push(finding);
             }
         }
 
