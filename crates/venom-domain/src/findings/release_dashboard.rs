@@ -1,6 +1,23 @@
 use crate::FindingReadModel;
 use crate::findings::{CollectionHealthSummary, summarize_collection_health};
-use crate::inventory::{CollectionScanSchedule, ComponentInventory};
+use crate::inventory::{CollectionScanSchedule, CollectionSourceSummary, ComponentInventory};
+
+/// One compact reusable release-scoped read projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseBoard {
+    pub collections: Vec<ReleaseBoardCollection>,
+}
+
+/// One release row reusable across operator-facing release views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseBoardCollection {
+    pub collection_key: Box<str>,
+    pub name: Box<str>,
+    pub members: usize,
+    pub source: Option<CollectionSourceSummary>,
+    pub scan_schedule: Option<CollectionScanSchedule>,
+    pub health: CollectionHealthSummary,
+}
 
 /// One operator-facing executive dashboard over managed release collections.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,13 +54,12 @@ pub struct ReleaseDashboardCollection {
 /// Build one read-side release dashboard from managed collection summaries and
 /// collection-scoped health projections.
 #[must_use]
-pub fn build_release_dashboard(
+pub fn build_release_board(
     inventory: &ComponentInventory,
     read_model: &FindingReadModel,
-    now_unix_ms: u64,
-) -> ReleaseDashboard {
+) -> ReleaseBoard {
     let collections = inventory
-        .collection_operations_summaries(now_unix_ms)
+        .collection_operations_summaries(0)
         .into_iter()
         .map(|collection| {
             let health = inventory
@@ -58,14 +74,35 @@ pub fn build_release_dashboard(
                 })
                 .unwrap_or_default();
 
-            ReleaseDashboardCollection {
+            ReleaseBoardCollection {
                 collection_key: collection.collection_key,
                 name: collection.name,
                 members: collection.members,
-                due_now: collection.due_now,
+                source: collection.source,
                 scan_schedule: collection.scan_schedule,
                 health,
             }
+        })
+        .collect::<Vec<_>>();
+
+    ReleaseBoard { collections }
+}
+
+/// Build one read-side release dashboard from one reusable release board.
+#[must_use]
+pub fn build_release_dashboard(board: &ReleaseBoard, now_unix_ms: u64) -> ReleaseDashboard {
+    let collections = board
+        .collections
+        .iter()
+        .map(|collection| ReleaseDashboardCollection {
+            collection_key: collection.collection_key.clone(),
+            name: collection.name.clone(),
+            members: collection.members,
+            due_now: collection
+                .scan_schedule
+                .is_some_and(|schedule| schedule.next_due_at_unix_ms <= now_unix_ms),
+            scan_schedule: collection.scan_schedule,
+            health: collection.health,
         })
         .collect::<Vec<_>>();
 
@@ -99,7 +136,7 @@ pub fn build_release_dashboard(
 
 #[cfg(test)]
 mod tests {
-    use super::build_release_dashboard;
+    use super::{ReleaseBoard, build_release_board, build_release_dashboard};
     use crate::findings::{
         FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReportedFinding,
         Severity, Suppression,
@@ -110,8 +147,7 @@ mod tests {
     };
     use crate::{ArtifactKind, ArtifactRef, EvidenceFreshness};
 
-    #[test]
-    fn release_dashboard_aggregates_managed_collection_health() {
+    fn sample_release_board() -> ReleaseBoard {
         let mut inventory = ComponentInventory::default();
         let _ = inventory.register(ComponentRegistration::new(
             "component:payments-api",
@@ -192,7 +228,13 @@ mod tests {
             Suppression::new("Known upstream false alarm"),
         );
 
-        let dashboard = build_release_dashboard(&inventory, &read_model, 1_500);
+        build_release_board(&inventory, &read_model)
+    }
+
+    #[test]
+    fn release_dashboard_aggregates_managed_collection_health() {
+        let board = sample_release_board();
+        let dashboard = build_release_dashboard(&board, 1_500);
 
         assert_eq!(dashboard.summary.managed_collections, 2);
         assert_eq!(dashboard.summary.scheduled_collections, 1);
@@ -214,5 +256,7 @@ mod tests {
             "release:2026.06"
         );
         assert_eq!(dashboard.collections[1].health.total, 0);
+        assert_eq!(board.collections[0].health.total, 2);
+        assert!(board.collections[0].source.is_none());
     }
 }

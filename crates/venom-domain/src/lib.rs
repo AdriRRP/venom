@@ -15,12 +15,13 @@ pub use findings::{
     FindingDecision, FindingGovernance, FindingGovernanceState, FindingIngestion,
     FindingIngestionError, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, FindingRef, FindingTracker, MAX_ACTIVE_FINDINGS_PAGE_LIMIT,
-    PackageCoordinate, ProviderScanReport, ReleaseDashboard, ReleaseDashboardCollection,
-    ReleaseDashboardSummary, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
-    RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
+    PackageCoordinate, ProviderScanReport, ReleaseBoard, ReleaseBoardCollection, ReleaseDashboard,
+    ReleaseDashboardCollection, ReleaseDashboardSummary, ReopenFindingChange, ReopenFindingResult,
+    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFinding, ScopedActiveFindingsPage,
     ScopedActiveFindingsQuery, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
-    build_release_dashboard, contextual_risk_level, contextualize_active_findings,
-    query_collection_governance_overview, summarize_collection_health,
+    build_release_board, build_release_dashboard, contextual_risk_level,
+    contextualize_active_findings, query_collection_governance_overview,
+    summarize_collection_health,
 };
 pub use integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, IntegrationEvent,

@@ -12,7 +12,7 @@ use venom_domain::findings::{
     FindingIngestion, FindingIngestionError, FindingProvider, FindingProviderError,
     FindingProviderErrorKind, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseDashboard,
     ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsPage,
-    ScopedActiveFindingsQuery, Severity, Suppression, build_release_dashboard,
+    ScopedActiveFindingsQuery, Severity, Suppression, build_release_board, build_release_dashboard,
     contextualize_active_findings, contextualize_collection_active_findings,
     query_collection_governance_overview, summarize_collection_health,
 };
@@ -1649,9 +1649,12 @@ async fn venom_queries_collection_health(world: &mut AcceptanceWorld, collection
 
 #[when(expr = "VENOM queries the release dashboard at unix ms {int}")]
 async fn venom_queries_the_release_dashboard(world: &mut AcceptanceWorld, now_unix_ms: usize) {
-    world.last_release_dashboard = Some(build_release_dashboard(
+    let board = build_release_board(
         world.durable_state_ref().ingestion().inventory(),
         world.durable_state_ref().read_model(),
+    );
+    world.last_release_dashboard = Some(build_release_dashboard(
+        &board,
         u64::try_from(now_unix_ms).expect("unix millis should fit u64"),
     ));
 }
