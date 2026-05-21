@@ -2160,6 +2160,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_contextual_risk_reflects_vpn_restricted_non_privileged_context() {
+        let router = build_router(
+            ApiState::open(
+                temp_path("contextual-risk-mitigated", "state"),
+                temp_path("contextual-risk-mitigated", "runtime"),
+            )
+            .expect("api state should open"),
+        );
+
+        let response = register_payments_component(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = bind_owned_artifact(router.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/context-profiles")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:corp-api-private",
+                            "name": "Corporate Private API",
+                            "vpn_restricted": true,
+                            "non_privileged_user": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("context profile request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/components/component:payments-api/context-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:corp-api-private"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("assign context profile request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/provider-reports")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "provider_key": "fixture-provider",
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "observed_at_unix_ms": 1_763_232_000_000u64,
+                            "freshness": "deterministic",
+                            "knowledge_revision": "fixture-db:2026-05-16",
+                            "findings": [
+                                {
+                                    "vulnerability_id": "CVE-2026-0001",
+                                    "package_name": "openssl",
+                                    "package_version": "3.0.0",
+                                    "severity": "high"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("provider report request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = router
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("contextual active findings request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"][0]["severity"], "high");
+        assert_eq!(payload["active_findings"][0]["contextual_risk"], "medium");
+        assert_eq!(
+            payload["active_findings"][0]["context_profile_key"],
+            "context:corp-api-private"
+        );
+    }
+
+    #[tokio::test]
     async fn api_requests_collection_scan_batch_for_multiple_members() {
         let router = build_router(
             ApiState::open(
