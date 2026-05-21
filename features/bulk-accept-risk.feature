@@ -22,7 +22,7 @@ Feature: Bulk accept risk
       And the first scoped active finding vulnerability is "CVE-2026-0001"
       And the first scoped active finding governance state is "risk-accepted"
       And the first scoped active finding governance reason is "Accepted for this release"
-      And VENOM queries collection governance overview for "release:2026.05" with governance state "all", minimum severity "unknown", offset 0, and limit 10
+      And VENOM queries collection governance overview for "release:2026.05" with governance state "open", minimum severity "unknown", offset 0, and limit 10
       And the collection health open findings is 1
       And the collection health risk accepted findings is 1
 

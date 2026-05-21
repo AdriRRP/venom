@@ -225,19 +225,44 @@ impl ApiReadSnapshot {
             members: collection
                 .component_keys
                 .into_iter()
-                .map(|component_key| CollectionMemberItem {
-                    context_profile_key: self
+                .map(|component_key| {
+                    let effective_context = self
                         .inventory
-                        .assigned_context_profile(component_key.as_ref())
-                        .map(str::to_owned),
-                    tag_keys: self
-                        .inventory
-                        .component_tag_keys(component_key.as_ref())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                    key: component_key.into(),
+                        .managed_component_effective_context_in_collection(
+                            collection_key,
+                            component_key.as_ref(),
+                        );
+                    CollectionMemberItem {
+                        context_profile_key: effective_context
+                            .as_ref()
+                            .and_then(|context| context.singular_profile())
+                            .map(|profile| profile.profile_key.to_string()),
+                        component_context_profile: effective_context
+                            .as_ref()
+                            .and_then(|context| context.component_profile.clone())
+                            .map(ContextProfileRefItem::from),
+                        collection_context_profile: effective_context
+                            .as_ref()
+                            .and_then(|context| context.collection_profile.clone())
+                            .map(ContextProfileRefItem::from),
+                        tag_context_profiles: effective_context
+                            .map(|context| {
+                                context
+                                    .tag_profiles
+                                    .into_iter()
+                                    .map(ContextProfileRefItem::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        tag_keys: self
+                            .inventory
+                            .component_tag_keys(component_key.as_ref())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
+                        key: component_key.into(),
+                    }
                 })
                 .collect(),
         })
@@ -2161,7 +2186,25 @@ impl From<CollectionHealthSummary> for CollectionHealthItem {
 pub struct CollectionMemberItem {
     pub key: String,
     pub context_profile_key: Option<String>,
+    pub component_context_profile: Option<ContextProfileRefItem>,
+    pub collection_context_profile: Option<ContextProfileRefItem>,
+    pub tag_context_profiles: Vec<ContextProfileRefItem>,
     pub tag_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextProfileRefItem {
+    pub profile_key: String,
+    pub name: String,
+}
+
+impl From<venom_domain::ContextProfileRef> for ContextProfileRefItem {
+    fn from(value: venom_domain::ContextProfileRef) -> Self {
+        Self {
+            profile_key: value.profile_key.into(),
+            name: value.name.into(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2636,6 +2679,9 @@ pub struct ActiveFindingItem {
     pub contextual_risk: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
+    pub component_context_profile: Option<ContextProfileRefItem>,
+    pub collection_context_profile: Option<ContextProfileRefItem>,
+    pub tag_context_profiles: Vec<ContextProfileRefItem>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
@@ -2655,6 +2701,17 @@ impl ActiveFindingItem {
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
+            component_context_profile: value
+                .component_context_profile
+                .map(ContextProfileRefItem::from),
+            collection_context_profile: value
+                .collection_context_profile
+                .map(ContextProfileRefItem::from),
+            tag_context_profiles: value
+                .tag_context_profiles
+                .into_iter()
+                .map(ContextProfileRefItem::from)
+                .collect(),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,
@@ -2716,6 +2773,9 @@ pub struct CollectionActiveFindingItem {
     pub contextual_risk: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
+    pub component_context_profile: Option<ContextProfileRefItem>,
+    pub collection_context_profile: Option<ContextProfileRefItem>,
+    pub tag_context_profiles: Vec<ContextProfileRefItem>,
     pub governance_state: String,
     pub governance_reason: Option<String>,
     pub governance_until_unix_ms: Option<u64>,
@@ -2735,6 +2795,17 @@ impl CollectionActiveFindingItem {
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
+            component_context_profile: value
+                .component_context_profile
+                .map(ContextProfileRefItem::from),
+            collection_context_profile: value
+                .collection_context_profile
+                .map(ContextProfileRefItem::from),
+            tag_context_profiles: value
+                .tag_context_profiles
+                .into_iter()
+                .map(ContextProfileRefItem::from)
+                .collect(),
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,

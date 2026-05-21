@@ -1252,7 +1252,11 @@ mod tests {
         );
         assert_eq!(
             detail_payload["members"][0]["context_profile_key"],
-            serde_json::Value::Null
+            "context:internet-prod"
+        );
+        assert_eq!(
+            detail_payload["members"][0]["collection_context_profile"]["profile_key"],
+            "context:internet-prod"
         );
     }
 

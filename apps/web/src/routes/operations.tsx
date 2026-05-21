@@ -57,6 +57,35 @@ function describeCollectionSource(
 	return `${mode} - ${componentCount} declared components`;
 }
 
+function memberContextLabel(member: {
+	context_profile_key: string | null;
+	component_context_profile?: { profile_key: string } | null;
+	collection_context_profile?: { profile_key: string } | null;
+	tag_context_profiles?: Array<{ profile_key: string }>;
+}) {
+	if (member.context_profile_key) {
+		return member.context_profile_key;
+	}
+
+	const labels = [
+		...(member.component_context_profile
+			? [`component:${member.component_context_profile.profile_key}`]
+			: []),
+		...(member.tag_context_profiles ?? []).map(
+			(profile) => `tag:${profile.profile_key}`,
+		),
+		...(member.collection_context_profile
+			? [`collection:${member.collection_context_profile.profile_key}`]
+			: []),
+	];
+
+	if (labels.length === 0) {
+		return null;
+	}
+
+	return `composite (${labels.join(" + ")})`;
+}
+
 export function OperationsPage() {
 	const queryClient = useQueryClient();
 	const [operatorState, setOperatorState] = useState({
@@ -1207,8 +1236,8 @@ export function OperationsPage() {
 									{collectionDetailQuery.data.members.map((member) => (
 										<li key={member.key}>
 											{member.key}
-											{member.context_profile_key
-												? ` (${member.context_profile_key})`
+											{memberContextLabel(member)
+												? ` (${memberContextLabel(member)})`
 												: ""}
 											{member.tag_keys.length > 0
 												? ` [${member.tag_keys.join(", ")}]`

@@ -71,6 +71,7 @@ Apply these rules:
 - UI and API views should be served from dedicated rebuildable read models or explicit read snapshots rather than walking mutable write state ad hoc
 - when a new operator view needs a different shape, prefer a new or refined projection over widening the write model payload indiscriminately
 - rebuildability and compactness matter together: projections should be specific enough for the view they serve and cheap enough to refresh or replay predictably
+- projections must preserve truthful provenance for effective business meaning; if a view depends on merged context, governance, or other composed semantics, the read side must expose that composition honestly instead of collapsing it into a misleading singular identity
 
 ## Update rule
 

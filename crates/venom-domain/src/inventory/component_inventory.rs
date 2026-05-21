@@ -247,7 +247,101 @@ pub struct ManagedContextProfile {
     pub non_privileged_user: Option<bool>,
 }
 
+/// Stable identity of one managed context profile without duplicating its
+/// runtime traits.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContextProfileRef {
+    /// Stable profile identity inside VENOM.
+    pub profile_key: Box<str>,
+    /// Human-readable profile name.
+    pub name: Box<str>,
+}
+
+/// Effective context traits after one or more overlays have been merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextProfileValues {
+    /// Whether the workload is exposed to untrusted network paths.
+    pub internet_exposed: Option<bool>,
+    /// Whether the workload is part of production runtime.
+    pub production: Option<bool>,
+    /// Whether the workload is mission-critical for the operator.
+    pub mission_critical: Option<bool>,
+    /// Whether the workload is reachable only through restricted VPN paths.
+    pub vpn_restricted: Option<bool>,
+    /// Whether the workload runs under a non-privileged user.
+    pub non_privileged_user: Option<bool>,
+}
+
+impl ContextProfileValues {
+    #[must_use]
+    pub fn merge(base: Option<Self>, override_values: Option<Self>) -> Option<Self> {
+        match (base, override_values) {
+            (None, None) => None,
+            (Some(base), None) => Some(base),
+            (None, Some(override_values)) => Some(override_values),
+            (Some(base), Some(override_values)) => Some(Self {
+                internet_exposed: override_values.internet_exposed.or(base.internet_exposed),
+                production: override_values.production.or(base.production),
+                mission_critical: override_values.mission_critical.or(base.mission_critical),
+                vpn_restricted: override_values.vpn_restricted.or(base.vpn_restricted),
+                non_privileged_user: override_values
+                    .non_privileged_user
+                    .or(base.non_privileged_user),
+            }),
+        }
+    }
+}
+
+/// Truthful effective execution context for one managed component scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveContextProfile {
+    /// Effective runtime traits after precedence rules are applied.
+    pub values: ContextProfileValues,
+    /// Most specific component profile when present.
+    pub component_profile: Option<ContextProfileRef>,
+    /// Release-scoped default profile when present.
+    pub collection_profile: Option<ContextProfileRef>,
+    /// Ordered tag overlays that contributed to the effective context.
+    pub tag_profiles: Vec<ContextProfileRef>,
+}
+
+impl EffectiveContextProfile {
+    #[must_use]
+    pub fn singular_profile(&self) -> Option<&ContextProfileRef> {
+        let mut profiles = self
+            .component_profile
+            .iter()
+            .chain(self.collection_profile.iter())
+            .chain(self.tag_profiles.iter());
+        let first = profiles.next()?;
+        if profiles.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+}
+
 impl ManagedContextProfile {
+    #[must_use]
+    pub fn reference(&self) -> ContextProfileRef {
+        ContextProfileRef {
+            profile_key: self.profile_key.clone(),
+            name: self.name.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn values(&self) -> ContextProfileValues {
+        ContextProfileValues {
+            internet_exposed: self.internet_exposed,
+            production: self.production,
+            mission_critical: self.mission_critical,
+            vpn_restricted: self.vpn_restricted,
+            non_privileged_user: self.non_privileged_user,
+        }
+    }
+
     #[must_use]
     pub fn merge(base: Option<Self>, override_profile: Option<Self>) -> Option<Self> {
         match (base, override_profile) {
@@ -1686,6 +1780,32 @@ impl ComponentInventory {
     }
 
     #[must_use]
+    pub fn managed_component_effective_context(
+        &self,
+        component_key: &str,
+    ) -> Option<EffectiveContextProfile> {
+        let component_profile = self
+            .assigned_context_profile(component_key)
+            .and_then(|profile_key| self.context_profile(profile_key));
+        let (tag_values, tag_profiles) = self.tag_overlay_effective_context(component_key);
+        let values = ContextProfileValues::merge(
+            tag_values,
+            component_profile
+                .as_ref()
+                .map(ManagedContextProfile::values),
+        )?;
+
+        Some(EffectiveContextProfile {
+            values,
+            component_profile: component_profile
+                .as_ref()
+                .map(ManagedContextProfile::reference),
+            collection_profile: None,
+            tag_profiles,
+        })
+    }
+
+    #[must_use]
     pub fn managed_component_context_profile_in_collection(
         &self,
         collection_key: &str,
@@ -1696,6 +1816,39 @@ impl ComponentInventory {
                 .and_then(|profile_key| self.context_profile(profile_key)),
             self.managed_component_context_profile(component_key),
         )
+    }
+
+    #[must_use]
+    pub fn managed_component_effective_context_in_collection(
+        &self,
+        collection_key: &str,
+        component_key: &str,
+    ) -> Option<EffectiveContextProfile> {
+        let collection_profile = self
+            .assigned_collection_context_profile(collection_key)
+            .and_then(|profile_key| self.context_profile(profile_key));
+        let component_effective_context = self.managed_component_effective_context(component_key);
+        let values = ContextProfileValues::merge(
+            collection_profile
+                .as_ref()
+                .map(ManagedContextProfile::values),
+            component_effective_context
+                .as_ref()
+                .map(|effective_context| effective_context.values),
+        )?;
+
+        Some(EffectiveContextProfile {
+            values,
+            component_profile: component_effective_context
+                .as_ref()
+                .and_then(|effective_context| effective_context.component_profile.clone()),
+            collection_profile: collection_profile
+                .as_ref()
+                .map(ManagedContextProfile::reference),
+            tag_profiles: component_effective_context
+                .map(|effective_context| effective_context.tag_profiles)
+                .unwrap_or_default(),
+        })
     }
 
     #[must_use]
@@ -1897,18 +2050,45 @@ impl ComponentInventory {
     }
 
     fn tag_overlay_context_profile(&self, component_key: &str) -> Option<ManagedContextProfile> {
-        self.components.get(component_key).and_then(|record| {
-            record
-                .tag_keys
-                .iter()
-                .filter_map(|tag_key| {
-                    self.assigned_tag_context_profile(tag_key.as_ref())
-                        .and_then(|profile_key| self.context_profile(profile_key))
-                })
-                .fold(None, |merged, profile| {
-                    ManagedContextProfile::merge(merged, Some(profile))
-                })
+        let (values, profiles) = self.tag_overlay_effective_context(component_key);
+        if let [profile] = profiles.as_slice() {
+            return self.context_profile(profile.profile_key.as_ref());
+        }
+
+        values.map(|values| ManagedContextProfile {
+            profile_key: "context:composite-tag-overlay".into(),
+            name: "Composite Tag Overlay".into(),
+            internet_exposed: values.internet_exposed,
+            production: values.production,
+            mission_critical: values.mission_critical,
+            vpn_restricted: values.vpn_restricted,
+            non_privileged_user: values.non_privileged_user,
         })
+    }
+
+    fn tag_overlay_effective_context(
+        &self,
+        component_key: &str,
+    ) -> (Option<ContextProfileValues>, Vec<ContextProfileRef>) {
+        let Some(record) = self.components.get(component_key) else {
+            return (None, Vec::new());
+        };
+
+        let mut values = None;
+        let mut profiles = Vec::new();
+
+        for tag_key in &record.tag_keys {
+            let Some(profile_key) = self.assigned_tag_context_profile(tag_key.as_ref()) else {
+                continue;
+            };
+            let Some(profile) = self.context_profile(profile_key) else {
+                continue;
+            };
+            values = ContextProfileValues::merge(values, Some(profile.values()));
+            profiles.push(profile.reference());
+        }
+
+        (values, profiles)
     }
 
     fn first_tag_context_conflict_for_component(

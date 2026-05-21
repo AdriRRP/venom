@@ -50,4 +50,7 @@ Feature: Classify finding
       And VENOM queries contextual active findings for collection "release:2026.05" with minimum severity "unknown", offset 0, and limit 10
       Then the first contextual active finding raw severity is "medium"
       And the first contextual active finding risk is "critical"
-      And the first contextual active finding context profile is "context:payments-edge"
+      And the first contextual active finding has no singular context profile
+      And the first contextual active finding uses component context profile "context:payments-edge"
+      And the first contextual active finding uses collection context profile "context:corp-api-baseline"
+      And the first contextual active finding uses 0 tag context profiles

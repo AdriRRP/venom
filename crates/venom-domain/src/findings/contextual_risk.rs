@@ -1,5 +1,7 @@
 use crate::findings::{ActiveFindingProjection, Severity};
-use crate::inventory::{ComponentInventory, ManagedContextProfile};
+use crate::inventory::{
+    ComponentInventory, ContextProfileRef, ContextProfileValues, EffectiveContextProfile,
+};
 use std::collections::BTreeMap;
 
 /// Deterministic operator-facing risk level after execution context is applied.
@@ -35,6 +37,9 @@ pub struct ContextualActiveFindingProjection {
     pub contextual_risk: ContextualRiskLevel,
     pub context_profile_key: Option<Box<str>>,
     pub context_profile_name: Option<Box<str>>,
+    pub component_context_profile: Option<ContextProfileRef>,
+    pub collection_context_profile: Option<ContextProfileRef>,
+    pub tag_context_profiles: Vec<ContextProfileRef>,
     pub governance_state: crate::FindingGovernanceState,
     pub governance_reason: Option<Box<str>>,
     pub governance_until_unix_ms: Option<u64>,
@@ -44,17 +49,33 @@ impl ContextualActiveFindingProjection {
     #[must_use]
     pub fn from_active_finding(
         finding: ActiveFindingProjection,
-        context_profile: Option<ManagedContextProfile>,
+        effective_context: Option<EffectiveContextProfile>,
     ) -> Self {
-        let contextual_risk = contextual_risk_level(finding.severity, context_profile.as_ref());
+        let contextual_risk = contextual_risk_level(
+            finding.severity,
+            effective_context.as_ref().map(|context| &context.values),
+        );
+        let singular_profile = effective_context
+            .as_ref()
+            .and_then(EffectiveContextProfile::singular_profile)
+            .cloned();
         Self {
             finding: finding.finding,
             severity: finding.severity,
             contextual_risk,
-            context_profile_key: context_profile
+            context_profile_key: singular_profile
                 .as_ref()
                 .map(|profile| profile.profile_key.clone()),
-            context_profile_name: context_profile.map(|profile| profile.name),
+            context_profile_name: singular_profile.map(|profile| profile.name),
+            component_context_profile: effective_context
+                .as_ref()
+                .and_then(|context| context.component_profile.clone()),
+            collection_context_profile: effective_context
+                .as_ref()
+                .and_then(|context| context.collection_profile.clone()),
+            tag_context_profiles: effective_context
+                .map(|context| context.tag_profiles)
+                .unwrap_or_default(),
             governance_state: finding.governance_state,
             governance_reason: finding.governance_reason,
             governance_until_unix_ms: finding.governance_until_unix_ms,
@@ -67,7 +88,7 @@ pub fn contextualize_active_findings(
     inventory: &ComponentInventory,
     findings: Vec<ActiveFindingProjection>,
 ) -> Vec<ContextualActiveFindingProjection> {
-    let mut context_cache: BTreeMap<Box<str>, Option<ManagedContextProfile>> = BTreeMap::new();
+    let mut context_cache: BTreeMap<Box<str>, Option<EffectiveContextProfile>> = BTreeMap::new();
     findings
         .into_iter()
         .map(|finding| {
@@ -75,7 +96,7 @@ pub fn contextualize_active_findings(
             let context_profile = context_cache
                 .entry(component_key.clone())
                 .or_insert_with(|| {
-                    inventory.managed_component_context_profile(component_key.as_ref())
+                    inventory.managed_component_effective_context(component_key.as_ref())
                 })
                 .clone();
             ContextualActiveFindingProjection::from_active_finding(finding, context_profile)
@@ -89,7 +110,7 @@ pub fn contextualize_collection_active_findings(
     collection_key: &str,
     findings: Vec<ActiveFindingProjection>,
 ) -> Vec<ContextualActiveFindingProjection> {
-    let mut context_cache: BTreeMap<Box<str>, Option<ManagedContextProfile>> = BTreeMap::new();
+    let mut context_cache: BTreeMap<Box<str>, Option<EffectiveContextProfile>> = BTreeMap::new();
     findings
         .into_iter()
         .map(|finding| {
@@ -97,7 +118,7 @@ pub fn contextualize_collection_active_findings(
             let context_profile = context_cache
                 .entry(component_key.clone())
                 .or_insert_with(|| {
-                    inventory.managed_component_context_profile_in_collection(
+                    inventory.managed_component_effective_context_in_collection(
                         collection_key,
                         component_key.as_ref(),
                     )
@@ -111,7 +132,7 @@ pub fn contextualize_collection_active_findings(
 #[must_use]
 pub fn contextual_risk_level(
     severity: Severity,
-    context_profile: Option<&ManagedContextProfile>,
+    context_profile: Option<&ContextProfileValues>,
 ) -> ContextualRiskLevel {
     let Some(context_profile) = context_profile else {
         return match severity {
@@ -163,7 +184,8 @@ pub fn contextual_risk_level(
 mod tests {
     use super::{ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level};
     use crate::{
-        ActiveFindingProjection, ArtifactKind, ArtifactRef, FindingGovernanceState, FindingRef,
+        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextProfileRef,
+        ContextProfileValues, EffectiveContextProfile, FindingGovernanceState, FindingRef,
         ManagedContextProfile, PackageCoordinate, Severity,
     };
 
@@ -180,7 +202,7 @@ mod tests {
         };
 
         assert_eq!(
-            contextual_risk_level(Severity::Medium, Some(&profile)),
+            contextual_risk_level(Severity::Medium, Some(&profile.values())),
             ContextualRiskLevel::Critical
         );
     }
@@ -220,8 +242,15 @@ mod tests {
             non_privileged_user: None,
         };
 
-        let contextual =
-            ContextualActiveFindingProjection::from_active_finding(projection, Some(profile));
+        let contextual = ContextualActiveFindingProjection::from_active_finding(
+            projection,
+            Some(EffectiveContextProfile {
+                values: profile.values(),
+                component_profile: Some(profile.reference()),
+                collection_profile: None,
+                tag_profiles: Vec::new(),
+            }),
+        );
 
         assert_eq!(contextual.contextual_risk, ContextualRiskLevel::Critical);
         assert_eq!(
@@ -231,6 +260,64 @@ mod tests {
         assert_eq!(
             contextual.context_profile_name.as_deref(),
             Some("Internet Production")
+        );
+    }
+
+    #[test]
+    fn contextual_projection_drops_singular_identity_for_composite_provenance() {
+        let projection = ActiveFindingProjection {
+            finding: FindingRef::new(
+                "component:payments-api",
+                ArtifactRef::new(
+                    ArtifactKind::ContainerImage,
+                    "registry.example/payments@sha256:111",
+                ),
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            ),
+            severity: Severity::Medium,
+            governance_state: FindingGovernanceState::Open,
+            governance_reason: None,
+            governance_until_unix_ms: None,
+        };
+
+        let contextual = ContextualActiveFindingProjection::from_active_finding(
+            projection,
+            Some(EffectiveContextProfile {
+                values: ContextProfileValues {
+                    internet_exposed: Some(true),
+                    production: Some(true),
+                    mission_critical: Some(true),
+                    vpn_restricted: None,
+                    non_privileged_user: None,
+                },
+                component_profile: Some(ContextProfileRef {
+                    profile_key: "context:payments-edge".into(),
+                    name: "Payments Edge".into(),
+                }),
+                collection_profile: Some(ContextProfileRef {
+                    profile_key: "context:corp-api-baseline".into(),
+                    name: "Corporate API Baseline".into(),
+                }),
+                tag_profiles: Vec::new(),
+            }),
+        );
+
+        assert!(contextual.context_profile_key.is_none());
+        assert!(contextual.context_profile_name.is_none());
+        assert_eq!(
+            contextual
+                .component_context_profile
+                .as_ref()
+                .map(|profile| profile.profile_key.as_ref()),
+            Some("context:payments-edge")
+        );
+        assert_eq!(
+            contextual
+                .collection_context_profile
+                .as_ref()
+                .map(|profile| profile.profile_key.as_ref()),
+            Some("context:corp-api-baseline")
         );
     }
 }
