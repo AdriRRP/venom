@@ -57,6 +57,11 @@ e2e_log="${tmp_dir}/e2e.log"
 
 cleanup() {
   local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    [[ -f "${api_log}" ]] && cat "${api_log}" >&2
+    [[ -f "${web_log}" ]] && cat "${web_log}" >&2
+    [[ -f "${e2e_log}" ]] && cat "${e2e_log}" >&2
+  fi
   if [[ -n "${web_pid:-}" ]]; then
     kill "${web_pid}" >/dev/null 2>&1 || true
     wait "${web_pid}" >/dev/null 2>&1 || true
@@ -66,10 +71,6 @@ cleanup() {
     wait "${api_pid}" >/dev/null 2>&1 || true
   fi
   rm -rf "${tmp_dir}"
-  if [[ $exit_code -ne 0 ]]; then
-    [[ -f "${api_log}" ]] && cat "${api_log}" >&2
-    [[ -f "${web_log}" ]] && cat "${web_log}" >&2
-  fi
   exit $exit_code
 }
 
@@ -126,7 +127,6 @@ if ! (
   PLAYWRIGHT_BASE_URL="${web_url}" npm run e2e >"${e2e_log}" 2>&1
 ); then
   skip_if_browser_forbidden "${e2e_log}"
-  cat "${e2e_log}" >&2
   fail "web e2e failed"
 fi
 

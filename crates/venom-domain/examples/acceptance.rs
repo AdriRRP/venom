@@ -3343,6 +3343,9 @@ async fn main() {
         "view-collection-schedules.feature",
         "view-active-findings.feature",
     ] {
-        AcceptanceWorld::run(format!("{base}/{feature}")).await;
+        AcceptanceWorld::cucumber()
+            .fail_on_skipped_with(|_, _, _| true)
+            .run_and_exit(format!("{base}/{feature}"))
+            .await;
     }
 }
