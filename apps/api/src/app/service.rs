@@ -1,6 +1,7 @@
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,6 +58,7 @@ pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     system_events: Arc<Vec<SystemEvent>>,
+    command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     release_board: Arc<ReleaseBoard>,
 }
 
@@ -66,12 +68,14 @@ impl ApiReadSnapshot {
         inventory: ComponentInventory,
         read_model: FindingReadModel,
         system_events: Vec<SystemEvent>,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
     ) -> Self {
         let release_board = Arc::new(build_release_board(&inventory, &read_model));
         Self {
             inventory: Arc::new(inventory),
             read_model: Arc::new(read_model),
             system_events: Arc::new(system_events),
+            command_statuses: Arc::new(command_statuses),
             release_board,
         }
     }
@@ -83,6 +87,7 @@ impl ApiReadSnapshot {
             inventory: Arc::new(inventory),
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::clone(&self.system_events),
+            command_statuses: Arc::clone(&self.command_statuses),
             release_board,
         }
     }
@@ -94,6 +99,7 @@ impl ApiReadSnapshot {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::new(read_model),
             system_events: Arc::clone(&self.system_events),
+            command_statuses: Arc::clone(&self.command_statuses),
             release_board,
         }
     }
@@ -104,6 +110,21 @@ impl ApiReadSnapshot {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             system_events: Arc::new(system_events),
+            command_statuses: Arc::clone(&self.command_statuses),
+            release_board: Arc::clone(&self.release_board),
+        }
+    }
+
+    #[must_use]
+    pub fn with_command_statuses(
+        &self,
+        command_statuses: BTreeMap<Box<str>, ScanCommandStatus>,
+    ) -> Self {
+        Self {
+            inventory: Arc::clone(&self.inventory),
+            read_model: Arc::clone(&self.read_model),
+            system_events: Arc::clone(&self.system_events),
+            command_statuses: Arc::new(command_statuses),
             release_board: Arc::clone(&self.release_board),
         }
     }
@@ -200,6 +221,29 @@ impl ApiReadSnapshot {
         let mut response = ListSystemEventsResponse::from_page(page);
         response.category = category;
         Ok(response)
+    }
+
+    /// Query one durable scan command status from the compact read-side snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError::NotFound`] when the command is unknown.
+    pub fn scan_command_status(
+        &self,
+        command_id: &str,
+    ) -> Result<ScanCommandStatusResponse, ApiApplicationError> {
+        let status = self
+            .command_statuses
+            .get(command_id)
+            .copied()
+            .ok_or_else(|| {
+                ApiApplicationError::NotFound(format!("unknown scan command: {command_id}"))
+            })?;
+
+        Ok(ScanCommandStatusResponse {
+            command_id: command_id.to_owned(),
+            status: status.as_str().to_owned(),
+        })
     }
 
     /// Query one managed collection detail by key.
@@ -418,11 +462,13 @@ impl ApiApplication {
                 local.state.ingestion().inventory().clone(),
                 local.state.read_model().clone(),
                 merge_system_events(local.state.system_events(), local.runtime.system_events()),
+                local.runtime.command_statuses_snapshot(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot(),
                 postgres.read_model_snapshot(),
                 postgres.system_events_snapshot(),
+                postgres.command_statuses_snapshot(),
             ),
         }
     }
@@ -454,26 +500,12 @@ impl ApiApplication {
     }
 
     /// Query the durable status of one scan command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiApplicationError::NotFound`] when the command is unknown.
-    pub fn scan_command_status(
-        &self,
-        command_id: &str,
-    ) -> Result<ScanCommandStatusResponse, ApiApplicationError> {
-        let status = match &self.backend {
-            ApiStore::Local(local) => local.runtime.command_status(command_id),
-            ApiStore::Postgres(postgres) => postgres.command_status(command_id),
+    #[must_use]
+    pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
+        match &self.backend {
+            ApiStore::Local(local) => local.runtime.command_statuses_snapshot(),
+            ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot(),
         }
-        .ok_or_else(|| {
-            ApiApplicationError::NotFound(format!("unknown scan command: {command_id}"))
-        })?;
-
-        Ok(ScanCommandStatusResponse {
-            command_id: command_id.to_owned(),
-            status: status.as_str().to_owned(),
-        })
     }
 
     /// Register one managed component through the application boundary.

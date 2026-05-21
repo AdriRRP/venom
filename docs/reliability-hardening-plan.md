@@ -20,12 +20,10 @@ Completed:
 7. `W95-local-scan-outcome-atomicity`
 8. `W96-local-collection-scan-request-atomicity`
 9. `W97-postgres-post-commit-application-hardening`
+10. `W98-api-lock-and-snapshot-topology`
 
 Remaining:
 
-10. `W98-api-lock-and-snapshot-topology`
-    Reduce the global API mutex contention and the remaining full-snapshot
-    refresh churn in read-heavy paths.
 11. `W99-contextual-risk-semantic-completion`
     Make the richer execution context model affect deterministic risk
     classification instead of stopping at three context dimensions.
