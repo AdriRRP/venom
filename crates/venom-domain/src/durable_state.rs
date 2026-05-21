@@ -3,14 +3,14 @@ use crate::{
     ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
     AssignComponentTagChange, AssignComponentTagResult, AssignContextProfileChange,
     AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
-    BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkReopenFindingResult,
-    BulkSuppressFindingResult, CollectionRegistration, CollectionSource, CollectionSourceMode,
-    ComponentRegistration, ComponentTagRegistration, ConfigureCollectionScanScheduleChange,
-    ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
-    ConfigureCollectionSourceResult, ConfigureIntegrationRuntimeChange,
-    ConfigureIntegrationRuntimeResult, ConfigureProviderChange, ConfigureProviderResult,
-    ContextProfileRegistration, EvidenceFreshness, FindingChangeSet, FindingGovernance,
-    FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
+    BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkGovernanceQuery,
+    BulkReopenFindingResult, BulkSuppressFindingResult, CollectionRegistration, CollectionSource,
+    CollectionSourceMode, ComponentRegistration, ComponentTagRegistration,
+    ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
+    ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
+    ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
+    ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
+    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
     MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
     PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
@@ -18,9 +18,9 @@ use crate::{
     RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
     RemoveCollectionComponentResult, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
-    RiskAcceptance, ScopedActiveFindingsQuery, Severity, SuppressFindingChange,
-    SuppressFindingResult, Suppression, SystemEvent, SystemEventKind, SystemEventsPage,
-    SystemEventsQuery, findings::finding_read_model::canonicalize_reported_findings,
+    RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
+    SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery,
+    findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -712,7 +712,7 @@ impl DurableState {
     pub fn accept_risk_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, DurableStateError> {
         let scope = self
@@ -726,7 +726,7 @@ impl DurableState {
             })?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -787,7 +787,7 @@ impl DurableState {
     pub fn accept_risk_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, DurableStateError> {
         let scope = self
@@ -797,7 +797,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -957,7 +957,7 @@ impl DurableState {
     pub fn suppress_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, DurableStateError> {
         let scope = self
@@ -967,7 +967,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1028,7 +1028,7 @@ impl DurableState {
     pub fn suppress_findings_for_tag(
         &mut self,
         tag_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, DurableStateError> {
         let scope = self
@@ -1038,7 +1038,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -1099,7 +1099,7 @@ impl DurableState {
     pub fn reopen_findings_for_collection(
         &mut self,
         collection_key: &str,
-        query: &ScopedActiveFindingsQuery,
+        query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, DurableStateError> {
         let scope = self
             .ingestion
@@ -1108,7 +1108,7 @@ impl DurableState {
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
         let findings = self
             .read_model
-            .collect_scoped_active_findings(&scope, query);
+            .collect_bulk_governance_cohort(&scope, query);
         let targeted = findings.len();
 
         let mut candidate_governance = self.governance.clone();
@@ -2721,10 +2721,11 @@ impl StoredPackageCoordinate {
 mod tests {
     use super::DurableState;
     use crate::{
-        ArtifactKind, ArtifactRef, CollectionRegistration, ComponentRegistration,
-        ConfigureProviderChange, EvidenceFreshness, IntegrationEvent, IntegrationEventPublishError,
-        IntegrationEventPublisher, IntegrationRuntimeConfig, PackageCoordinate,
-        PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
+        ArtifactKind, ArtifactRef, BulkGovernanceQuery, CollectionRegistration,
+        ComponentRegistration, ConfigureProviderChange, EvidenceFreshness, FindingGovernanceState,
+        IntegrationEvent, IntegrationEventPublishError, IntegrationEventPublisher,
+        IntegrationRuntimeConfig, PackageCoordinate, PendingIntegrationEvent, ProviderScanReport,
+        ReportedFinding, RiskAcceptance,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -3100,6 +3101,54 @@ mod tests {
             rebuilt.pending_integration_events()[0].event,
             IntegrationEvent::FindingChangesObserved { .. }
         ));
+    }
+
+    #[test]
+    fn bulk_collection_risk_acceptance_targets_the_full_matching_cohort() {
+        let path = temp_path("durable-state-bulk-cohort");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        let _ = state
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .expect("collection should persist");
+        let _ = state
+            .add_component_to_collection("release:2026.05", "component:payments-api")
+            .expect("collection membership should persist");
+        let findings = (0..205)
+            .map(|index| {
+                ReportedFinding::new(
+                    format!("CVE-2026-{index:04}"),
+                    PackageCoordinate::new(format!("pkg-{index:04}"), "1.0.0"),
+                )
+                .with_severity(crate::Severity::High)
+            })
+            .collect::<Vec<_>>();
+        let _ = state
+            .record_scan_report(&report(findings))
+            .expect("scan report should persist");
+
+        let result = state
+            .accept_risk_for_collection(
+                "release:2026.05",
+                &BulkGovernanceQuery::new(FindingGovernanceState::Open),
+                RiskAcceptance::new("Accepted whole release"),
+            )
+            .expect("bulk risk acceptance should persist");
+
+        assert_eq!(result.targeted, 205);
+        assert_eq!(result.accepted, 205);
+        assert_eq!(result.unchanged, 0);
     }
 
     #[derive(Debug)]

@@ -7,14 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
     AcceptRiskResult, ActiveFindingsQuery, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
-    BulkReopenFindingResult, BulkSuppressFindingResult, CollectionHealthSummary,
-    ContextualActiveFindingProjection, EvidenceFreshness, FindingGovernanceState, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    PackageCoordinate, ProviderScanReport, ReleaseBoard, ReleaseDashboard, ReopenFindingResult,
-    ReportedFinding, RiskAcceptance, ScanRequest, ScopedActiveFindingsQuery, Severity,
-    SuppressFindingResult, Suppression, build_release_board, build_release_dashboard,
-    contextualize_active_findings, contextualize_collection_active_findings,
-    query_collection_governance_overview,
+    BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult,
+    CollectionHealthSummary, ContextualActiveFindingProjection, EvidenceFreshness,
+    FindingGovernanceState, FindingProvider, FindingProviderError, FindingProviderErrorKind,
+    FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseBoard,
+    ReleaseDashboard, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression, build_release_board,
+    build_release_dashboard, contextualize_active_findings,
+    contextualize_collection_active_findings, query_collection_governance_overview,
 };
 use venom_domain::integration::{
     IntegrationEventPublishError, IntegrationEventPublisher, IntegrationRuntimeConfig,
@@ -3144,11 +3144,8 @@ fn build_scoped_active_findings_query(
 fn build_bulk_collection_governance_query(
     min_severity: Option<&str>,
     package_name: Option<&str>,
-) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
-    let mut query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(FindingGovernanceState::Open)
-        .with_offset(0)
-        .with_limit(200);
+) -> Result<BulkGovernanceQuery, ApiApplicationError> {
+    let mut query = BulkGovernanceQuery::new(FindingGovernanceState::Open);
     if let Some(min_severity) = min_severity {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
@@ -3162,7 +3159,7 @@ fn build_bulk_collection_reopen_query(
     governance_state: Option<&str>,
     min_severity: Option<&str>,
     package_name: Option<&str>,
-) -> Result<ScopedActiveFindingsQuery, ApiApplicationError> {
+) -> Result<BulkGovernanceQuery, ApiApplicationError> {
     let governance_state = governance_state.ok_or_else(|| {
         ApiApplicationError::InvalidRequest(
             "bulk reopen requires a governed state filter".to_owned(),
@@ -3175,10 +3172,7 @@ fn build_bulk_collection_reopen_query(
         ));
     }
 
-    let mut query = ScopedActiveFindingsQuery::new()
-        .with_governance_state(governance_state)
-        .with_offset(0)
-        .with_limit(200);
+    let mut query = BulkGovernanceQuery::new(governance_state);
     if let Some(min_severity) = min_severity {
         query = query.with_min_severity(parse_severity(min_severity)?);
     }
