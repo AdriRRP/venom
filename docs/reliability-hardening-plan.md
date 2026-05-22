@@ -46,6 +46,10 @@ Completed:
 19. `W107-bulk-governance-state-compaction`
     Remove full `FindingGovernance` and `FindingReadModel` clones from bulk
     governance actions in local and Postgres paths.
+20. `W108-local-scheduler-materialization-veracity`
+    Keep local collection scheduling side-effect free until durable
+    materialization succeeds, and derive pending-due state from real durable
+    inventory instead of planning clones.
 
 ## Exit condition
 

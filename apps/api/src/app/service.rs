@@ -1639,8 +1639,12 @@ impl ApiApplication {
                         .map_err(|error| ApiApplicationError::State(error.to_string()))?;
                 }
 
-                let pending_due_remaining =
-                    inventory.due_collection_keys(now_unix_ms, usize::MAX).len();
+                let pending_due_remaining = local
+                    .state
+                    .ingestion()
+                    .inventory()
+                    .due_collection_keys(now_unix_ms, usize::MAX)
+                    .len();
                 let outcome = if processed_collections == 0 {
                     "idle"
                 } else if pending_due_remaining == 0 {
