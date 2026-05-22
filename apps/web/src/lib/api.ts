@@ -5,6 +5,11 @@ export type ContextProfileRef = {
 	name: string;
 };
 
+export type ContextualFactorProvenance = {
+	factor: string;
+	source: string;
+};
+
 export type ActiveFinding = {
 	component_key: string;
 	artifact_kind: string;
@@ -18,6 +23,7 @@ export type ActiveFinding = {
 	contextual_posture?: string;
 	contextual_rule?: string;
 	contextual_factors?: string[];
+	contextual_factor_provenance?: ContextualFactorProvenance[];
 	context_profile_key: string | null;
 	context_profile_name: string | null;
 	component_context_profile?: ContextProfileRef | null;

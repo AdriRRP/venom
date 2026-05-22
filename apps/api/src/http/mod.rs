@@ -31,11 +31,14 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify, watch};
+use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
+use venom_domain::scanning::ScanCommandStatus;
 
 type ApiMutationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
 
@@ -49,6 +52,100 @@ struct ApiStateInner {
     service_ready: Notify,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
+}
+
+enum SnapshotRefresh {
+    Unchanged,
+    InventoryAndReleaseBoard {
+        inventory: Arc<venom_domain::ComponentInventory>,
+        release_board: Arc<venom_domain::ReleaseBoard>,
+    },
+    ReadModelAndReleaseBoard {
+        read_model: Arc<venom_domain::FindingReadModel>,
+        release_board: Arc<venom_domain::ReleaseBoard>,
+    },
+    SystemEvents {
+        system_events: Arc<SystemEventQueryIndex>,
+    },
+    CombinedReadModelAndSystemEvents {
+        read_model: Arc<venom_domain::FindingReadModel>,
+        release_board: Arc<venom_domain::ReleaseBoard>,
+        system_events: Arc<SystemEventQueryIndex>,
+    },
+    CombinedCommandStatusesAndSystemEvents {
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        system_events: Arc<SystemEventQueryIndex>,
+    },
+    CombinedInventoryCommandStatusesAndSystemEvents {
+        inventory: Arc<venom_domain::ComponentInventory>,
+        release_board: Arc<venom_domain::ReleaseBoard>,
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        system_events: Arc<SystemEventQueryIndex>,
+    },
+    CombinedReadModelCommandStatusesAndSystemEvents {
+        read_model: Arc<venom_domain::FindingReadModel>,
+        release_board: Arc<venom_domain::ReleaseBoard>,
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        system_events: Arc<SystemEventQueryIndex>,
+    },
+}
+
+impl SnapshotRefresh {
+    fn apply(self, current: &Arc<ApiReadSnapshot>) -> Arc<ApiReadSnapshot> {
+        match self {
+            Self::Unchanged => Arc::clone(current),
+            Self::InventoryAndReleaseBoard {
+                inventory,
+                release_board,
+            } => Arc::new(current.with_inventory_and_release_board_arcs(inventory, release_board)),
+            Self::ReadModelAndReleaseBoard {
+                read_model,
+                release_board,
+            } => {
+                Arc::new(current.with_read_model_and_release_board_arcs(read_model, release_board))
+            }
+            Self::SystemEvents { system_events } => {
+                Arc::new(current.with_system_event_index_arc(system_events))
+            }
+            Self::CombinedReadModelAndSystemEvents {
+                read_model,
+                release_board,
+                system_events,
+            } => {
+                let next =
+                    current.with_read_model_and_release_board_arcs(read_model, release_board);
+                Arc::new(next.with_system_event_index_arc(system_events))
+            }
+            Self::CombinedCommandStatusesAndSystemEvents {
+                command_statuses,
+                system_events,
+            } => {
+                let next = current.with_command_statuses_arc(command_statuses);
+                Arc::new(next.with_system_event_index_arc(system_events))
+            }
+            Self::CombinedInventoryCommandStatusesAndSystemEvents {
+                inventory,
+                release_board,
+                command_statuses,
+                system_events,
+            } => {
+                let next = current.with_inventory_and_release_board_arcs(inventory, release_board);
+                let next = next.with_command_statuses_arc(command_statuses);
+                Arc::new(next.with_system_event_index_arc(system_events))
+            }
+            Self::CombinedReadModelCommandStatusesAndSystemEvents {
+                read_model,
+                release_board,
+                command_statuses,
+                system_events,
+            } => {
+                let next =
+                    current.with_read_model_and_release_board_arcs(read_model, release_board);
+                let next = next.with_command_statuses_arc(command_statuses);
+                Arc::new(next.with_system_event_index_arc(system_events))
+            }
+        }
+    }
 }
 
 impl ApiState {
@@ -95,38 +192,75 @@ impl ApiState {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
-    fn refresh_inventory_snapshot(
-        current: &Arc<ApiReadSnapshot>,
-        service: &ApiApplication,
-    ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_inventory_and_release_board_arcs(
-            service.inventory_snapshot_arc(),
-            service.release_board_snapshot_arc(),
-        ))
+    fn refresh_inventory_snapshot(service: &ApiApplication) -> SnapshotRefresh {
+        SnapshotRefresh::InventoryAndReleaseBoard {
+            inventory: service.inventory_snapshot_arc(),
+            release_board: service.release_board_snapshot_arc(),
+        }
     }
 
-    fn refresh_read_model_snapshot(
-        current: &Arc<ApiReadSnapshot>,
-        service: &ApiApplication,
-    ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_read_model_and_release_board_arcs(
-            service.read_model_snapshot_arc(),
-            service.release_board_snapshot_arc(),
-        ))
+    fn refresh_read_model_snapshot(service: &ApiApplication) -> SnapshotRefresh {
+        SnapshotRefresh::ReadModelAndReleaseBoard {
+            read_model: service.read_model_snapshot_arc(),
+            release_board: service.release_board_snapshot_arc(),
+        }
     }
 
-    fn refresh_system_events_snapshot(
-        current: &Arc<ApiReadSnapshot>,
-        service: &ApiApplication,
-    ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_system_event_index_arc(service.system_event_index_snapshot_arc()))
+    fn refresh_system_events_snapshot(service: &ApiApplication) -> SnapshotRefresh {
+        SnapshotRefresh::SystemEvents {
+            system_events: service.system_event_index_snapshot_arc(),
+        }
     }
 
-    fn refresh_command_status_snapshot(
-        current: &Arc<ApiReadSnapshot>,
+    const fn unchanged_snapshot(_service: &ApiApplication) -> SnapshotRefresh {
+        SnapshotRefresh::Unchanged
+    }
+
+    fn refresh_read_model_and_system_events_snapshot(service: &ApiApplication) -> SnapshotRefresh {
+        let snapshot = Self::refresh_read_model_snapshot(service);
+        let system_events = service.system_event_index_snapshot_arc();
+        match snapshot {
+            SnapshotRefresh::ReadModelAndReleaseBoard {
+                read_model,
+                release_board,
+            } => SnapshotRefresh::CombinedReadModelAndSystemEvents {
+                read_model,
+                release_board,
+                system_events,
+            },
+            _ => unreachable!("read-model refresh must produce a read-model lane"),
+        }
+    }
+
+    fn refresh_command_status_and_system_events_snapshot(
         service: &ApiApplication,
-    ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_command_statuses_arc(service.command_statuses_snapshot_arc()))
+    ) -> SnapshotRefresh {
+        SnapshotRefresh::CombinedCommandStatusesAndSystemEvents {
+            command_statuses: service.command_statuses_snapshot_arc(),
+            system_events: service.system_event_index_snapshot_arc(),
+        }
+    }
+
+    fn refresh_inventory_command_status_and_system_events_snapshot(
+        service: &ApiApplication,
+    ) -> SnapshotRefresh {
+        SnapshotRefresh::CombinedInventoryCommandStatusesAndSystemEvents {
+            inventory: service.inventory_snapshot_arc(),
+            release_board: service.release_board_snapshot_arc(),
+            command_statuses: service.command_statuses_snapshot_arc(),
+            system_events: service.system_event_index_snapshot_arc(),
+        }
+    }
+
+    fn refresh_read_model_command_status_and_system_events_snapshot(
+        service: &ApiApplication,
+    ) -> SnapshotRefresh {
+        SnapshotRefresh::CombinedReadModelCommandStatusesAndSystemEvents {
+            read_model: service.read_model_snapshot_arc(),
+            release_board: service.release_board_snapshot_arc(),
+            command_statuses: service.command_statuses_snapshot_arc(),
+            system_events: service.system_event_index_snapshot_arc(),
+        }
     }
 
     async fn take_service(&self) -> ApiApplication {
@@ -150,13 +284,14 @@ impl ApiState {
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
     where
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
-        R: FnOnce(&Arc<ApiReadSnapshot>, &ApiApplication) -> Arc<ApiReadSnapshot>,
+        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
         let mut service = self.take_service().await;
         let result = operation(&mut service).await;
-        let current_snapshot = self.read_snapshot();
-        let next_snapshot = refresh(&current_snapshot, &service);
+        let next_snapshot = refresh(&service);
         self.restore_service(service).await;
+        let current_snapshot = self.read_snapshot();
+        let next_snapshot = next_snapshot.apply(&current_snapshot);
         self.inner.read_snapshot_tx.send_replace(next_snapshot);
         result
     }
@@ -669,7 +804,7 @@ async fn configure_integration_runtime(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, _service| Arc::clone(snapshot),
+            ApiState::unchanged_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -704,10 +839,7 @@ async fn accept_risk(
             |service| {
                 Box::pin(async move { service.accept_risk(request).await.map_err(ApiError::from) })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -728,10 +860,7 @@ async fn accept_collection_risk(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -752,10 +881,7 @@ async fn accept_tag_risk(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -775,10 +901,7 @@ async fn suppress_finding(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -799,10 +922,7 @@ async fn suppress_collection_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -823,10 +943,7 @@ async fn suppress_tag_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -846,10 +963,7 @@ async fn reopen_finding(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -870,10 +984,7 @@ async fn reopen_collection_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -888,10 +999,7 @@ async fn request_scan(
             |service| {
                 Box::pin(async move { service.request_scan(request).await.map_err(ApiError::from) })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_command_status_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_command_status_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -912,10 +1020,7 @@ async fn request_collection_scan(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_command_status_snapshot(snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_command_status_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -946,11 +1051,7 @@ async fn drain_collection_scan_worker(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_inventory_snapshot(snapshot, service);
-                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_inventory_command_status_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -967,11 +1068,7 @@ async fn run_next_scan(
                     async move { service.run_next_scan(request).await.map_err(ApiError::from) },
                 )
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_command_status_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -991,11 +1088,7 @@ async fn drain_worker(
                         .map_err(ApiError::from)
                 })
             },
-            |snapshot, service| {
-                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
-                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
-                ApiState::refresh_system_events_snapshot(&snapshot, service)
-            },
+            ApiState::refresh_read_model_command_status_and_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))

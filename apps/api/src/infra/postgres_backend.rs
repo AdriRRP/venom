@@ -71,6 +71,8 @@ pub struct DrainDueCollectionScansResult {
     pub last_error: Option<Box<str>>,
 }
 
+type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule)>;
+
 impl PostgresStore {
     /// Open or create the Postgres durable backend and rebuild in-memory state.
     ///
@@ -818,6 +820,7 @@ impl PostgresStore {
                 self.read_model
                     .accept_risk(finding.clone(), acceptance.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -887,6 +890,7 @@ impl PostgresStore {
                 self.read_model
                     .accept_risk(finding.clone(), acceptance.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1070,6 +1074,7 @@ impl PostgresStore {
                 self.read_model
                     .suppress(finding.clone(), suppression.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1140,6 +1145,7 @@ impl PostgresStore {
                 self.read_model
                     .suppress(finding.clone(), suppression.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1208,6 +1214,7 @@ impl PostgresStore {
                 self.governance.reopen(finding);
                 self.read_model.reopen(finding);
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1431,7 +1438,7 @@ impl PostgresStore {
             });
         }
 
-        let (candidate_ingestion, due_scans, pending_due_remaining) =
+        let (due_scans, schedule_rows, pending_due_remaining) =
             self.collect_due_collection_scans(now_unix_ms, max_collections);
         let processed_collections = due_scans.len();
         if due_scans.is_empty() {
@@ -1446,8 +1453,6 @@ impl PostgresStore {
             });
         }
 
-        let schedule_rows =
-            Self::build_due_schedule_rows(candidate_ingestion.inventory(), &due_scans);
         let all_requests = Self::flatten_due_scan_requests(&due_scans);
         let command_ids = (0..all_requests.len())
             .map(|_| next_command_id())
@@ -1467,7 +1472,8 @@ impl PostgresStore {
         .await?;
 
         self.apply_due_collection_scan_state(
-            candidate_ingestion,
+            &due_scans,
+            now_unix_ms,
             system_events,
             &command_ids,
             all_requests,
@@ -1789,15 +1795,16 @@ impl PostgresStore {
         &self,
         now_unix_ms: u64,
         max_collections: usize,
-    ) -> (FindingIngestion, Vec<DueCollectionScan>, usize) {
-        let mut candidate_ingestion = self.ingestion.clone();
-        let due_scans = CollectionScanScheduler::new(candidate_ingestion.inventory_mut())
+    ) -> (Vec<DueCollectionScan>, DueCollectionScanRows, usize) {
+        let due_scans = CollectionScanScheduler::new(self.ingestion.inventory())
             .collect_due(now_unix_ms, max_collections);
-        let pending_due_remaining = candidate_ingestion
+        let schedule_rows = Self::build_due_schedule_rows(self.ingestion.inventory(), &due_scans);
+        let pending_due_remaining = self
+            .ingestion
             .inventory()
             .due_collection_keys(now_unix_ms, usize::MAX)
             .len();
-        (candidate_ingestion, due_scans, pending_due_remaining)
+        (due_scans, schedule_rows, pending_due_remaining)
     }
 
     fn build_due_schedule_rows(
@@ -1841,12 +1848,23 @@ impl PostgresStore {
 
     fn apply_due_collection_scan_state(
         &mut self,
-        candidate_ingestion: FindingIngestion,
+        due_scans: &[DueCollectionScan],
+        materialized_at_unix_ms: u64,
         system_events: Vec<SystemEvent>,
         command_ids: &[Box<str>],
         requests: Vec<ScanRequest>,
     ) {
-        self.ingestion = candidate_ingestion;
+        for due_scan in due_scans {
+            let _ = self
+                .ingestion
+                .inventory_mut()
+                .record_collection_scan_materialization(
+                    due_scan.collection_key.as_ref(),
+                    due_scan.next_due_at_unix_ms,
+                    materialized_at_unix_ms,
+                    u32::try_from(due_scan.requests.len()).unwrap_or(u32::MAX),
+                );
+        }
         for event in system_events {
             self.push_system_event(event);
         }
@@ -3451,7 +3469,6 @@ impl PostgresStore {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_event_index.push_newest(event);
-        self.refresh_read_snapshot_caches();
         self.refresh_system_event_index_snapshot_cache();
     }
 

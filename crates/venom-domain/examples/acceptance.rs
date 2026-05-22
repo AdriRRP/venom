@@ -1019,8 +1019,8 @@ async fn venom_durably_materializes_due_collection_scans(
     limit: usize,
 ) {
     let now_unix_ms = u64::try_from(now_unix_ms).expect("current time should fit u64");
-    let mut inventory = world.durable_state_ref().ingestion().inventory().clone();
-    let due_scans = CollectionScanScheduler::new(&mut inventory).collect_due(now_unix_ms, limit);
+    let inventory = world.durable_state_ref().ingestion().inventory().clone();
+    let due_scans = CollectionScanScheduler::new(&inventory).collect_due(now_unix_ms, limit);
     for due_scan in &due_scans {
         world
             .durable_state_mut()

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Default number of recent operator-facing system events returned in one query.
 pub const DEFAULT_SYSTEM_EVENTS_LIMIT: usize = 50;
 
@@ -160,11 +162,11 @@ pub struct SystemEventQueryIndex {
     command_total: usize,
     governance_total: usize,
     publication_total: usize,
-    recent_events: Vec<SystemEvent>,
-    recent_scheduler_events: Vec<SystemEvent>,
-    recent_command_events: Vec<SystemEvent>,
-    recent_governance_events: Vec<SystemEvent>,
-    recent_publication_events: Vec<SystemEvent>,
+    recent_events: Vec<Arc<SystemEvent>>,
+    recent_scheduler_events: Vec<Arc<SystemEvent>>,
+    recent_command_events: Vec<Arc<SystemEvent>>,
+    recent_governance_events: Vec<Arc<SystemEvent>>,
+    recent_publication_events: Vec<Arc<SystemEvent>>,
 }
 
 impl Default for SystemEventQueryIndex {
@@ -194,12 +196,16 @@ impl SystemEventQueryIndex {
     pub fn from_newest_first<'a>(events: impl IntoIterator<Item = &'a SystemEvent>) -> Self {
         let mut index = Self::new();
         for event in events {
-            index.push_newest(event.clone());
+            index.push_newest_shared(Arc::new(event.clone()));
         }
         index
     }
 
     pub fn push_newest(&mut self, event: SystemEvent) {
+        self.push_newest_shared(Arc::new(event));
+    }
+
+    fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
         self.total += 1;
         match event.category() {
             SystemEventCategory::Scheduler => {
@@ -267,7 +273,11 @@ impl SystemEventQueryIndex {
             }
         };
 
-        let events = source.iter().take(limit).cloned().collect::<Vec<_>>();
+        let events = source
+            .iter()
+            .take(limit)
+            .map(|event| event.as_ref().clone())
+            .collect::<Vec<_>>();
         SystemEventsPage {
             total,
             returned: events.len(),
@@ -277,14 +287,17 @@ impl SystemEventQueryIndex {
     }
 }
 
-fn push_bounded(events: &mut Vec<SystemEvent>, event: SystemEvent) {
+fn push_bounded(events: &mut Vec<Arc<SystemEvent>>, event: Arc<SystemEvent>) {
     if events.len() == MAX_SYSTEM_EVENTS_LIMIT {
         events.pop();
     }
     events.insert(0, event);
 }
 
-fn merge_recent_events(left: &[SystemEvent], right: &[SystemEvent]) -> Vec<SystemEvent> {
+fn merge_recent_events(
+    left: &[Arc<SystemEvent>],
+    right: &[Arc<SystemEvent>],
+) -> Vec<Arc<SystemEvent>> {
     let mut merged = left
         .iter()
         .cloned()

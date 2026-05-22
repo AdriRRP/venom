@@ -834,6 +834,7 @@ impl DurableState {
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-risk-accepted-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -907,6 +908,7 @@ impl DurableState {
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-risk-accepted-live-{tag_key}-{occurred_at_unix_ms}"
@@ -1081,6 +1083,7 @@ impl DurableState {
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-suppressed-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -1154,6 +1157,7 @@ impl DurableState {
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-suppressed-live-{tag_key}-{occurred_at_unix_ms}"
@@ -1221,6 +1225,7 @@ impl DurableState {
                 self.governance.reopen(&finding);
                 self.read_model.reopen(&finding);
             }
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-reopened-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -2276,7 +2281,6 @@ impl DurableState {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_event_index.push_newest(event);
-        self.refresh_read_snapshot_caches();
         self.refresh_system_event_index_snapshot_cache();
     }
 

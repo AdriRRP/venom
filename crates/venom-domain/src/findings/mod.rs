@@ -14,8 +14,8 @@ pub use collection_governance_overview::{
 };
 pub use collection_health::{CollectionHealthSummary, summarize_collection_health};
 pub use contextual_risk::{
-    ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level,
-    contextualize_active_findings, contextualize_collection_active_findings,
+    ContextualActiveFindingProjection, ContextualFactorProvenance, ContextualRiskLevel,
+    contextual_risk_level, contextualize_active_findings, contextualize_collection_active_findings,
 };
 pub use finding_governance::{
     AcceptRiskChange, AcceptRiskResult, BulkAcceptRiskResult, BulkReopenFindingResult,
