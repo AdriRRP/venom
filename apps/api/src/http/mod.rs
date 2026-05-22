@@ -119,9 +119,7 @@ impl ApiState {
         current: &Arc<ApiReadSnapshot>,
         service: &ApiApplication,
     ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_system_event_index_arc(
-            service.system_event_index_snapshot_arc(),
-        ))
+        Arc::new(current.with_system_event_index_arc(service.system_event_index_snapshot_arc()))
     }
 
     fn refresh_command_status_snapshot(

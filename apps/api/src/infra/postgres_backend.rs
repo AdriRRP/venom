@@ -11,9 +11,9 @@ use venom_domain::findings::{
     BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
     FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    ProviderScanReport, ReleaseBoard, ReopenFindingChange, ReopenFindingResult,
-    ReportedFinding, RiskAcceptance, ScanRequest, SuppressFindingChange,
-    SuppressFindingResult, Suppression, build_release_board,
+    ProviderScanReport, ReleaseBoard, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
+    RiskAcceptance, ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
+    build_release_board,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -34,8 +34,8 @@ use venom_domain::inventory::{
     RegisterComponentChange, RegisterComponentResult, RegisterComponentTagChange,
     RegisterComponentTagResult, RegisterContextProfileChange, RegisterContextProfileResult,
 };
-use venom_domain::operations::{SystemEvent, SystemEventKind};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
+use venom_domain::operations::{SystemEvent, SystemEventKind};
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
     RunNextScanResult, ScanCommandStatus, ScanPlanner,
@@ -3401,41 +3401,40 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres system events load failed: {error}"))?;
 
-        let events = rows
-            .into_iter()
-            .map(
-                |(
-                    event_id,
-                    occurred_at_unix_ms,
-                    _category,
-                    kind,
-                    collection_key,
-                    component_key,
-                    command_id,
-                    integration_event_id,
-                    finding_count,
-                    retryable,
-                    detail,
-                )| {
-                    Ok(SystemEvent {
-                        event_id: event_id.into_boxed_str(),
-                        occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
-                            .map_err(|_| "negative system event timestamp".to_owned())?,
-                        kind: parse_system_event_kind(&kind)?,
-                        collection_key: collection_key.map(String::into_boxed_str),
-                        component_key: component_key.map(String::into_boxed_str),
-                        command_id: command_id.map(String::into_boxed_str),
-                        integration_event_id: integration_event_id.map(String::into_boxed_str),
-                        finding_count: finding_count
-                            .map(u32::try_from)
-                            .transpose()
-                            .map_err(|_| "system event finding count out of range".to_owned())?,
+        let events =
+            rows.into_iter()
+                .map(
+                    |(
+                        event_id,
+                        occurred_at_unix_ms,
+                        _category,
+                        kind,
+                        collection_key,
+                        component_key,
+                        command_id,
+                        integration_event_id,
+                        finding_count,
                         retryable,
-                        detail: detail.map(String::into_boxed_str),
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>, String>>()?;
+                        detail,
+                    )| {
+                        Ok(SystemEvent {
+                            event_id: event_id.into_boxed_str(),
+                            occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
+                                .map_err(|_| "negative system event timestamp".to_owned())?,
+                            kind: parse_system_event_kind(&kind)?,
+                            collection_key: collection_key.map(String::into_boxed_str),
+                            component_key: component_key.map(String::into_boxed_str),
+                            command_id: command_id.map(String::into_boxed_str),
+                            integration_event_id: integration_event_id.map(String::into_boxed_str),
+                            finding_count: finding_count.map(u32::try_from).transpose().map_err(
+                                |_| "system event finding count out of range".to_owned(),
+                            )?,
+                            retryable,
+                            detail: detail.map(String::into_boxed_str),
+                        })
+                    },
+                )
+                .collect::<Result<Vec<_>, String>>()?;
         self.system_event_index = SystemEventQueryIndex::from_newest_first(events.iter());
         Ok(())
     }

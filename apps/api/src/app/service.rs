@@ -27,10 +27,10 @@ use venom_domain::inventory::{
     ComponentRegistration, ComponentTagRegistration, ContextProfileRegistration,
     ManagedComponentTag, ManagedContextProfile,
 };
+use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::operations::{
     SystemEvent, SystemEventCategory, SystemEventsPage, SystemEventsQuery,
 };
-use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -150,7 +150,8 @@ impl ApiReadSnapshot {
     ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
         let query = build_system_events_query(request)?;
         let category = query.category.map(|value| value.as_str().to_owned());
-        let mut response = ListSystemEventsResponse::from_page(self.system_event_index.query(&query));
+        let mut response =
+            ListSystemEventsResponse::from_page(self.system_event_index.query(&query));
         response.category = category;
         Ok(response)
     }

@@ -1,3 +1,4 @@
+use crate::operations::system_event_trace::SystemEventQueryIndex;
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
@@ -22,7 +23,6 @@ use crate::{
     SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery,
     findings::finding_read_model::canonicalize_reported_findings,
 };
-use crate::operations::system_event_trace::SystemEventQueryIndex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
