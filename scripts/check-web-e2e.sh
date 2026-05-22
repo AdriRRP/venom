@@ -61,8 +61,9 @@ select_free_port() {
 [[ -f apps/web/package.json ]] || fail "missing apps/web/package.json"
 [[ -f apps/web/playwright.config.ts ]] || fail "missing apps/web/playwright.config.ts"
 
-api_port="$(select_free_port "${VENOM_E2E_API_PORT:-3300}")" || fail "no free api port available"
-web_port="$(select_free_port "${VENOM_E2E_WEB_PORT:-4173}")" || fail "no free web port available"
+port_offset="${VENOM_E2E_PORT_OFFSET:-$((BASHPID % 50))}"
+api_port="$(select_free_port "$(( ${VENOM_E2E_API_PORT:-34300} + port_offset ))")" || fail "no free api port available"
+web_port="$(select_free_port "$(( ${VENOM_E2E_WEB_PORT:-34400} + port_offset ))")" || fail "no free web port available"
 api_ready_attempts="${VENOM_E2E_API_READY_ATTEMPTS:-120}"
 web_ready_attempts="${VENOM_E2E_WEB_READY_ATTEMPTS:-60}"
 api_url="http://127.0.0.1:${api_port}"
