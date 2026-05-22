@@ -1628,8 +1628,7 @@ impl ApiApplication {
         let now_unix_ms = current_unix_millis()?;
         match &mut self.backend {
             ApiStore::Local(local) => {
-                let mut inventory = local.state.ingestion().inventory().clone();
-                let due_scans = CollectionScanScheduler::new(&mut inventory)
+                let due_scans = CollectionScanScheduler::new(local.state.ingestion().inventory())
                     .collect_due(now_unix_ms, max_collections);
 
                 let processed_collections = due_scans.len();
@@ -2756,6 +2755,7 @@ pub struct ActiveFindingItem {
     pub contextual_posture: String,
     pub contextual_rule: String,
     pub contextual_factors: Vec<String>,
+    pub contextual_factor_provenance: Vec<ContextualFactorProvenanceItem>,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2784,6 +2784,11 @@ impl ActiveFindingItem {
                 .contextual_factors
                 .into_iter()
                 .map(Into::into)
+                .collect(),
+            contextual_factor_provenance: value
+                .contextual_factor_provenance
+                .into_iter()
+                .map(ContextualFactorProvenanceItem::from)
                 .collect(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
@@ -2860,6 +2865,7 @@ pub struct CollectionActiveFindingItem {
     pub contextual_posture: String,
     pub contextual_rule: String,
     pub contextual_factors: Vec<String>,
+    pub contextual_factor_provenance: Vec<ContextualFactorProvenanceItem>,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2889,6 +2895,11 @@ impl CollectionActiveFindingItem {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            contextual_factor_provenance: value
+                .contextual_factor_provenance
+                .into_iter()
+                .map(ContextualFactorProvenanceItem::from)
+                .collect(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -2905,6 +2916,21 @@ impl CollectionActiveFindingItem {
             governance_state: value.governance_state.as_str().to_owned(),
             governance_reason: value.governance_reason.map(Into::into),
             governance_until_unix_ms: value.governance_until_unix_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextualFactorProvenanceItem {
+    pub factor: String,
+    pub source: String,
+}
+
+impl From<venom_domain::findings::ContextualFactorProvenance> for ContextualFactorProvenanceItem {
+    fn from(value: venom_domain::findings::ContextualFactorProvenance) -> Self {
+        Self {
+            factor: value.factor.into(),
+            source: value.source.into(),
         }
     }
 }

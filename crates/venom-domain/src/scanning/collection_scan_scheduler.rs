@@ -16,12 +16,12 @@ pub struct DueCollectionScan {
 /// Minimal domain service that materializes due collection schedules into scan requests.
 #[derive(Debug)]
 pub struct CollectionScanScheduler<'a> {
-    inventory: &'a mut ComponentInventory,
+    inventory: &'a ComponentInventory,
 }
 
 impl<'a> CollectionScanScheduler<'a> {
     #[must_use]
-    pub const fn new(inventory: &'a mut ComponentInventory) -> Self {
+    pub const fn new(inventory: &'a ComponentInventory) -> Self {
         Self { inventory }
     }
 
@@ -110,7 +110,7 @@ mod tests {
             1_000,
         );
 
-        let due = CollectionScanScheduler::new(&mut inventory).collect_due(1_500, 8);
+        let due = CollectionScanScheduler::new(&inventory).collect_due(1_500, 8);
 
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].collection_key.as_ref(), "release:2026.05");
