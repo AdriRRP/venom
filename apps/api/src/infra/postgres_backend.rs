@@ -37,6 +37,7 @@ use venom_domain::inventory::{
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::operations::{
     MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory, SystemEventKind,
+    SystemEventRecentWindows, SystemEventWindowTotals,
 };
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
@@ -3467,16 +3468,20 @@ impl PostgresStore {
             .await?;
 
         self.system_event_index = SystemEventQueryIndex::from_recent_windows(
-            totals.total,
-            totals.scheduler_total,
-            totals.command_total,
-            totals.governance_total,
-            totals.publication_total,
-            recent_events,
-            recent_scheduler_events,
-            recent_command_events,
-            recent_governance_events,
-            recent_publication_events,
+            SystemEventWindowTotals {
+                total: totals.total,
+                scheduler_total: totals.scheduler_total,
+                command_total: totals.command_total,
+                governance_total: totals.governance_total,
+                publication_total: totals.publication_total,
+            },
+            SystemEventRecentWindows {
+                recent_events,
+                recent_scheduler_events,
+                recent_command_events,
+                recent_governance_events,
+                recent_publication_events,
+            },
         );
         Ok(())
     }

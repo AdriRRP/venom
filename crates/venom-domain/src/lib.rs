@@ -50,7 +50,8 @@ pub use inventory::{
 };
 pub use operations::{
     DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
-    SystemEventKind, SystemEventsPage, SystemEventsQuery,
+    SystemEventKind, SystemEventRecentWindows, SystemEventWindowTotals, SystemEventsPage,
+    SystemEventsQuery,
 };
 pub use scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,
