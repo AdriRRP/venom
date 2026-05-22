@@ -155,7 +155,7 @@ pub fn contextual_risk_level(
             Severity::Critical => ContextualRiskLevel::Critical,
         };
     };
-    let posture = contextual_posture(context_profile);
+    let posture = contextual_posture(*context_profile);
 
     if severity == Severity::Unknown {
         return ContextualRiskLevel::Unknown;
@@ -201,7 +201,7 @@ pub fn contextual_risk_level(
     }
 }
 
-fn contextual_posture(context_profile: &ContextProfileValues) -> ContextualPosture {
+fn contextual_posture(context_profile: ContextProfileValues) -> ContextualPosture {
     let internet_exposed = context_profile.internet_exposed.unwrap_or(false);
     let production = context_profile.production.unwrap_or(false);
     let mission_critical = context_profile.mission_critical.unwrap_or(false);
