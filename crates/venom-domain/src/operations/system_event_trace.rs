@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Default number of recent operator-facing system events returned in one query.
 pub const DEFAULT_SYSTEM_EVENTS_LIMIT: usize = 50;
 
@@ -414,4 +416,3 @@ mod tests {
         assert_eq!(query.normalized_limit(), DEFAULT_SYSTEM_EVENTS_LIMIT);
     }
 }
-use std::sync::Arc;

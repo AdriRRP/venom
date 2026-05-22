@@ -2138,33 +2138,43 @@ impl ComponentInventory {
             internet_exposed: component_profile
                 .and_then(|profile| profile.internet_exposed)
                 .map(|_| ContextFactorSource::Component)
-                .or(tag_values
-                    .and_then(|values| values.internet_exposed)
-                    .map(|_| ContextFactorSource::Tag)),
+                .or_else(|| {
+                    tag_values
+                        .and_then(|values| values.internet_exposed)
+                        .map(|_| ContextFactorSource::Tag)
+                }),
             production: component_profile
                 .and_then(|profile| profile.production)
                 .map(|_| ContextFactorSource::Component)
-                .or(tag_values
-                    .and_then(|values| values.production)
-                    .map(|_| ContextFactorSource::Tag)),
+                .or_else(|| {
+                    tag_values
+                        .and_then(|values| values.production)
+                        .map(|_| ContextFactorSource::Tag)
+                }),
             mission_critical: component_profile
                 .and_then(|profile| profile.mission_critical)
                 .map(|_| ContextFactorSource::Component)
-                .or(tag_values
-                    .and_then(|values| values.mission_critical)
-                    .map(|_| ContextFactorSource::Tag)),
+                .or_else(|| {
+                    tag_values
+                        .and_then(|values| values.mission_critical)
+                        .map(|_| ContextFactorSource::Tag)
+                }),
             vpn_restricted: component_profile
                 .and_then(|profile| profile.vpn_restricted)
                 .map(|_| ContextFactorSource::Component)
-                .or(tag_values
-                    .and_then(|values| values.vpn_restricted)
-                    .map(|_| ContextFactorSource::Tag)),
+                .or_else(|| {
+                    tag_values
+                        .and_then(|values| values.vpn_restricted)
+                        .map(|_| ContextFactorSource::Tag)
+                }),
             non_privileged_user: component_profile
                 .and_then(|profile| profile.non_privileged_user)
                 .map(|_| ContextFactorSource::Component)
-                .or(tag_values
-                    .and_then(|values| values.non_privileged_user)
-                    .map(|_| ContextFactorSource::Tag)),
+                .or_else(|| {
+                    tag_values
+                        .and_then(|values| values.non_privileged_user)
+                        .map(|_| ContextFactorSource::Tag)
+                }),
         }
     }
 
@@ -2175,29 +2185,39 @@ impl ComponentInventory {
         EffectiveContextFactorSources {
             internet_exposed: component_effective_context
                 .and_then(|context| context.factor_sources.internet_exposed)
-                .or(collection_profile
-                    .and_then(|profile| profile.internet_exposed)
-                    .map(|_| ContextFactorSource::Collection)),
+                .or_else(|| {
+                    collection_profile
+                        .and_then(|profile| profile.internet_exposed)
+                        .map(|_| ContextFactorSource::Collection)
+                }),
             production: component_effective_context
                 .and_then(|context| context.factor_sources.production)
-                .or(collection_profile
-                    .and_then(|profile| profile.production)
-                    .map(|_| ContextFactorSource::Collection)),
+                .or_else(|| {
+                    collection_profile
+                        .and_then(|profile| profile.production)
+                        .map(|_| ContextFactorSource::Collection)
+                }),
             mission_critical: component_effective_context
                 .and_then(|context| context.factor_sources.mission_critical)
-                .or(collection_profile
-                    .and_then(|profile| profile.mission_critical)
-                    .map(|_| ContextFactorSource::Collection)),
+                .or_else(|| {
+                    collection_profile
+                        .and_then(|profile| profile.mission_critical)
+                        .map(|_| ContextFactorSource::Collection)
+                }),
             vpn_restricted: component_effective_context
                 .and_then(|context| context.factor_sources.vpn_restricted)
-                .or(collection_profile
-                    .and_then(|profile| profile.vpn_restricted)
-                    .map(|_| ContextFactorSource::Collection)),
+                .or_else(|| {
+                    collection_profile
+                        .and_then(|profile| profile.vpn_restricted)
+                        .map(|_| ContextFactorSource::Collection)
+                }),
             non_privileged_user: component_effective_context
                 .and_then(|context| context.factor_sources.non_privileged_user)
-                .or(collection_profile
-                    .and_then(|profile| profile.non_privileged_user)
-                    .map(|_| ContextFactorSource::Collection)),
+                .or_else(|| {
+                    collection_profile
+                        .and_then(|profile| profile.non_privileged_user)
+                        .map(|_| ContextFactorSource::Collection)
+                }),
         }
     }
 
