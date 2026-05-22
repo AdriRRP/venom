@@ -95,32 +95,32 @@ impl ApiState {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
-    fn refresh_inventory_snapshot(&self, service: &ApiApplication) {
-        let next = self
-            .read_snapshot()
-            .with_inventory_arc(service.inventory_snapshot_arc());
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    fn refresh_inventory_snapshot(
+        current: &Arc<ApiReadSnapshot>,
+        service: &ApiApplication,
+    ) -> Arc<ApiReadSnapshot> {
+        Arc::new(current.with_inventory_arc(service.inventory_snapshot_arc()))
     }
 
-    fn refresh_read_model_snapshot(&self, service: &ApiApplication) {
-        let next = self
-            .read_snapshot()
-            .with_read_model_arc(service.read_model_snapshot_arc());
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    fn refresh_read_model_snapshot(
+        current: &Arc<ApiReadSnapshot>,
+        service: &ApiApplication,
+    ) -> Arc<ApiReadSnapshot> {
+        Arc::new(current.with_read_model_arc(service.read_model_snapshot_arc()))
     }
 
-    fn refresh_system_events_snapshot(&self, service: &ApiApplication) {
-        let next = self
-            .read_snapshot()
-            .with_system_events_arc(service.system_events_snapshot_arc());
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    fn refresh_system_events_snapshot(
+        current: &Arc<ApiReadSnapshot>,
+        service: &ApiApplication,
+    ) -> Arc<ApiReadSnapshot> {
+        Arc::new(current.with_system_events_arc(service.system_events_snapshot_arc()))
     }
 
-    fn refresh_command_status_snapshot(&self, service: &ApiApplication) {
-        let next = self
-            .read_snapshot()
-            .with_command_statuses_arc(service.command_statuses_snapshot_arc());
-        self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    fn refresh_command_status_snapshot(
+        current: &Arc<ApiReadSnapshot>,
+        service: &ApiApplication,
+    ) -> Arc<ApiReadSnapshot> {
+        Arc::new(current.with_command_statuses_arc(service.command_statuses_snapshot_arc()))
     }
 
     async fn take_service(&self) -> ApiApplication {
@@ -141,15 +141,27 @@ impl ApiState {
         self.inner.service_ready.notify_waiters();
     }
 
+    async fn inspect<T, F>(&self, operation: F) -> T
+    where
+        F: FnOnce(&ApiApplication) -> T,
+    {
+        let service = self.take_service().await;
+        let result = operation(&service);
+        self.restore_service(service).await;
+        result
+    }
+
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
     where
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
-        R: FnOnce(&Self, &ApiApplication),
+        R: FnOnce(&Arc<ApiReadSnapshot>, &ApiApplication) -> Arc<ApiReadSnapshot>,
     {
         let mut service = self.take_service().await;
         let result = operation(&mut service).await;
-        refresh(self, &service);
+        let current_snapshot = self.read_snapshot();
+        let next_snapshot = refresh(&current_snapshot, &service);
         self.restore_service(service).await;
+        self.inner.read_snapshot_tx.send_replace(next_snapshot);
         result
     }
 }
@@ -303,8 +315,8 @@ async fn list_system_events(
         limit: request.limit,
     };
     let response = state
-        .read_snapshot()
-        .list_system_events(&request)
+        .inspect(|service| service.list_system_events(&request))
+        .await
         .map_err(ApiError::from)?;
     Ok(Json(response))
 }
@@ -665,7 +677,7 @@ async fn configure_integration_runtime(
                         .map_err(ApiError::from)
                 })
             },
-            |_state, _service| {},
+            |snapshot, _service| Arc::clone(snapshot),
         )
         .await?;
     Ok(Json(response))
@@ -700,9 +712,9 @@ async fn accept_risk(
             |service| {
                 Box::pin(async move { service.accept_risk(request).await.map_err(ApiError::from) })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -724,9 +736,9 @@ async fn accept_collection_risk(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -748,9 +760,9 @@ async fn accept_tag_risk(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -771,9 +783,9 @@ async fn suppress_finding(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -795,9 +807,9 @@ async fn suppress_collection_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -819,9 +831,9 @@ async fn suppress_tag_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -842,9 +854,9 @@ async fn reopen_finding(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -866,9 +878,9 @@ async fn reopen_collection_findings(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -884,9 +896,9 @@ async fn request_scan(
             |service| {
                 Box::pin(async move { service.request_scan(request).await.map_err(ApiError::from) })
             },
-            |state, service| {
-                state.refresh_command_status_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_command_status_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -908,9 +920,9 @@ async fn request_collection_scan(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_command_status_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_command_status_snapshot(snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -942,10 +954,10 @@ async fn drain_collection_scan_worker(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_inventory_snapshot(service);
-                state.refresh_command_status_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_inventory_snapshot(snapshot, service);
+                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -963,10 +975,10 @@ async fn run_next_scan(
                     async move { service.run_next_scan(request).await.map_err(ApiError::from) },
                 )
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_command_status_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -987,10 +999,10 @@ async fn drain_worker(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| {
-                state.refresh_read_model_snapshot(service);
-                state.refresh_command_status_snapshot(service);
-                state.refresh_system_events_snapshot(service);
+            |snapshot, service| {
+                let snapshot = ApiState::refresh_read_model_snapshot(snapshot, service);
+                let snapshot = ApiState::refresh_command_status_snapshot(&snapshot, service);
+                ApiState::refresh_system_events_snapshot(&snapshot, service)
             },
         )
         .await?;
@@ -2320,41 +2332,10 @@ mod tests {
         let response = bind_owned_artifact(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/context-profiles")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "profile_key": "context:corp-api-private",
-                            "name": "Corporate Private API",
-                            "vpn_restricted": true,
-                            "non_privileged_user": true
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("context profile request should succeed");
+        let response = register_corp_api_private_context_profile(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = router
-            .clone()
-            .oneshot(
-                Request::post("/components/component:payments-api/context-profile")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "profile_key": "context:corp-api-private"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("assign context profile request should succeed");
+        let response = assign_corp_api_private_context_profile(router.clone()).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = router
@@ -2408,8 +2389,16 @@ mod tests {
         assert_eq!(payload["active_findings"][0]["severity"], "high");
         assert_eq!(payload["active_findings"][0]["contextual_risk"], "medium");
         assert_eq!(
+            payload["active_findings"][0]["contextual_rule"],
+            "mitigated-private-downgrade"
+        );
+        assert_eq!(
             payload["active_findings"][0]["context_profile_key"],
             "context:corp-api-private"
+        );
+        assert_eq!(
+            payload["active_findings"][0]["context_profile_name"],
+            "Corporate Private API"
         );
     }
 
@@ -3745,6 +3734,28 @@ mod tests {
             .expect("register context profile request should succeed")
     }
 
+    async fn register_corp_api_private_context_profile(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/context-profiles")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:corp-api-private",
+                            "name": "Corporate Private API",
+                            "vpn_restricted": true,
+                            "non_privileged_user": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("context profile request should succeed")
+    }
+
     async fn assign_internet_prod_context_profile(
         router: axum::Router,
     ) -> axum::response::Response {
@@ -3755,6 +3766,25 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "profile_key": "context:internet-prod"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("assign context profile request should succeed")
+    }
+
+    async fn assign_corp_api_private_context_profile(
+        router: axum::Router,
+    ) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/components/component:payments-api/context-profile")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "profile_key": "context:corp-api-private"
                         })
                         .to_string(),
                     ))

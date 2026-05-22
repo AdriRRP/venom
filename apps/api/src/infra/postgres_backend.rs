@@ -46,6 +46,8 @@ pub struct PostgresStore {
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: FindingReadModel,
+    inventory_snapshot_cache: Arc<ComponentInventory>,
+    read_model_snapshot_cache: Arc<FindingReadModel>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
@@ -62,6 +64,8 @@ pub struct DrainDueCollectionScansResult {
     pub enqueued_commands: usize,
     pub pending_due_remaining: usize,
     pub last_collection_key: Option<Box<str>>,
+    pub partial_progress: bool,
+    pub last_error: Option<Box<str>>,
 }
 
 impl PostgresStore {
@@ -84,6 +88,8 @@ impl PostgresStore {
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
             read_model: FindingReadModel::new(),
+            inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
+            read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             integration_runtime_config: None,
             commands: BTreeMap::new(),
             order: Vec::new(),
@@ -119,6 +125,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres component insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -153,6 +160,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres context profile insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -179,6 +187,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres component tag insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -205,6 +214,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -233,6 +243,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres artifact binding insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -260,6 +271,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -287,6 +299,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres component tag membership insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -315,6 +328,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -354,6 +368,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection source upsert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -399,6 +414,7 @@ impl PostgresStore {
             }
             self.commit_transaction(transaction).await?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -438,6 +454,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection scan schedule upsert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -468,6 +485,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres provider config upsert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -498,6 +516,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres component context profile upsert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -531,6 +550,7 @@ impl PostgresStore {
                 format!("postgres collection context profile update failed: {error}")
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -670,6 +690,7 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.refresh_read_snapshot_caches();
         self.pending_integration_events
             .push(pending_integration_event);
         Ok(change_set)
@@ -723,6 +744,7 @@ impl PostgresStore {
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -929,6 +951,7 @@ impl PostgresStore {
             candidate_read_model.reopen(&finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -984,6 +1007,7 @@ impl PostgresStore {
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1217,7 +1241,7 @@ impl PostgresStore {
 
     #[must_use]
     pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
-        Arc::new(self.read_model.clone())
+        Arc::clone(&self.read_model_snapshot_cache)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1228,7 +1252,7 @@ impl PostgresStore {
 
     #[must_use]
     pub fn inventory_snapshot_arc(&self) -> Arc<ComponentInventory> {
-        Arc::new(self.ingestion.inventory().clone())
+        Arc::clone(&self.inventory_snapshot_cache)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1240,6 +1264,11 @@ impl PostgresStore {
     #[must_use]
     pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
         Arc::clone(&self.system_events_snapshot_cache)
+    }
+
+    #[must_use]
+    pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
+        &self.system_events
     }
 
     #[must_use]
@@ -1412,6 +1441,8 @@ impl PostgresStore {
                 enqueued_commands: 0,
                 pending_due_remaining: 0,
                 last_collection_key: None,
+                partial_progress: false,
+                last_error: None,
             });
         }
 
@@ -1425,6 +1456,8 @@ impl PostgresStore {
                 enqueued_commands: 0,
                 pending_due_remaining,
                 last_collection_key: None,
+                partial_progress: false,
+                last_error: None,
             });
         }
 
@@ -1467,6 +1500,8 @@ impl PostgresStore {
             last_collection_key: due_scans
                 .last()
                 .map(|due_scan| due_scan.collection_key.clone()),
+            partial_progress: false,
+            last_error: None,
         })
     }
 
@@ -1748,6 +1783,7 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.refresh_read_snapshot_caches();
         let completed = CompletedScanCommand {
             command_id,
             provider_key: report.provider_key,
@@ -2747,6 +2783,7 @@ impl PostgresStore {
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
+        self.refresh_read_snapshot_caches();
         self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_events_snapshot_cache();
 
@@ -3428,11 +3465,23 @@ impl PostgresStore {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_events.push_front(event);
+        self.refresh_read_snapshot_caches();
         self.refresh_system_events_snapshot_cache();
     }
 
+    fn refresh_read_snapshot_caches(&mut self) {
+        self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+        self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+    }
+
     fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
+        self.system_events_snapshot_cache = Arc::new(
+            self.system_events
+                .iter()
+                .take(venom_domain::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
+                .cloned()
+                .collect(),
+        );
     }
 
     fn refresh_command_statuses_snapshot_cache(&mut self) {

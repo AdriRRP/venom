@@ -16,6 +16,7 @@ export type ActiveFinding = {
 	severity: string;
 	contextual_risk: string;
 	contextual_posture?: string;
+	contextual_rule?: string;
 	context_profile_key: string | null;
 	context_profile_name: string | null;
 	component_context_profile?: ContextProfileRef | null;
@@ -595,6 +596,8 @@ export type DrainCollectionScanWorkerResponse = {
 	enqueued_commands: number;
 	pending_due_remaining: number;
 	last_collection_key: string | null;
+	partial_progress: boolean;
+	last_error: string | null;
 };
 
 export async function fetchApiHealth(): Promise<ApiHealthState> {

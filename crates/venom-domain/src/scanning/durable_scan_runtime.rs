@@ -1000,7 +1000,13 @@ impl ScanCommandQueue {
     }
 
     fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
+        self.system_events_snapshot_cache = Arc::new(
+            self.system_events
+                .iter()
+                .take(crate::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
+                .cloned()
+                .collect(),
+        );
     }
 
     fn refresh_command_statuses_snapshot_cache(&mut self) {

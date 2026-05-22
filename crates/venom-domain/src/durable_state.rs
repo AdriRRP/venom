@@ -5,7 +5,7 @@ use crate::{
     AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
     BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkGovernanceQuery,
     BulkReopenFindingResult, BulkSuppressFindingResult, CollectionRegistration, CollectionSource,
-    CollectionSourceMode, ComponentRegistration, ComponentTagRegistration,
+    CollectionSourceMode, ComponentInventory, ComponentRegistration, ComponentTagRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
@@ -43,6 +43,8 @@ pub struct DurableState {
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: FindingReadModel,
+    inventory_snapshot_cache: Arc<ComponentInventory>,
+    read_model_snapshot_cache: Arc<FindingReadModel>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
@@ -73,6 +75,8 @@ impl DurableState {
             ingestion: FindingIngestion::default(),
             governance: FindingGovernance::default(),
             read_model: FindingReadModel::default(),
+            inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
+            read_model_snapshot_cache: Arc::new(FindingReadModel::default()),
             integration_runtime_config: None,
             applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
@@ -91,6 +95,16 @@ impl DurableState {
     #[must_use]
     pub const fn read_model(&self) -> &FindingReadModel {
         &self.read_model
+    }
+
+    #[must_use]
+    pub fn inventory_snapshot_arc(&self) -> Arc<ComponentInventory> {
+        Arc::clone(&self.inventory_snapshot_cache)
+    }
+
+    #[must_use]
+    pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
+        Arc::clone(&self.read_model_snapshot_cache)
     }
 
     #[must_use]
@@ -235,6 +249,7 @@ impl DurableState {
                 registration: StoredComponentRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -255,6 +270,7 @@ impl DurableState {
                 registration: StoredComponentTagRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -277,6 +293,7 @@ impl DurableState {
                 artifact,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -300,6 +317,7 @@ impl DurableState {
                 provider_key,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -320,6 +338,7 @@ impl DurableState {
                 registration: StoredContextProfileRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -342,6 +361,7 @@ impl DurableState {
                 profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -364,6 +384,7 @@ impl DurableState {
                 component_key: component_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -386,6 +407,7 @@ impl DurableState {
                 profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -409,6 +431,7 @@ impl DurableState {
                 profile_key: profile_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -429,6 +452,7 @@ impl DurableState {
                 registration: StoredCollectionRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -451,6 +475,7 @@ impl DurableState {
                 component_key: component_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -474,6 +499,7 @@ impl DurableState {
                 component_key: component_key.into(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -497,6 +523,7 @@ impl DurableState {
                 source: StoredCollectionSource::from(source),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -519,6 +546,7 @@ impl DurableState {
                 removed_component_keys: result.removed_component_keys.clone(),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -550,6 +578,7 @@ impl DurableState {
                 next_due_at_unix_ms,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -599,6 +628,7 @@ impl DurableState {
                 ),
             });
             *self.ingestion.inventory_mut() = candidate_inventory;
+            self.refresh_read_snapshot_caches();
         }
         Ok(result)
     }
@@ -684,6 +714,7 @@ impl DurableState {
         })?;
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.refresh_read_snapshot_caches();
         if let Some(command_id) = command_id {
             self.applied_scan_commands
                 .insert(command_id.into(), change_set.clone());
@@ -726,6 +757,7 @@ impl DurableState {
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-risk-accepted-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -930,6 +962,7 @@ impl DurableState {
             candidate_read_model.reopen(finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-reopened-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -981,6 +1014,7 @@ impl DurableState {
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.refresh_read_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-suppressed-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -1243,6 +1277,8 @@ impl DurableState {
             self.apply_event(event, line_index + 1)?;
         }
 
+        self.refresh_read_snapshot_caches();
+        self.refresh_system_events_snapshot_cache();
         Ok(())
     }
 
@@ -2247,11 +2283,23 @@ impl DurableState {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_events.push_front(event);
+        self.refresh_read_snapshot_caches();
         self.refresh_system_events_snapshot_cache();
     }
 
+    fn refresh_read_snapshot_caches(&mut self) {
+        self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+        self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+    }
+
     fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
+        self.system_events_snapshot_cache = Arc::new(
+            self.system_events
+                .iter()
+                .take(crate::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
+                .cloned()
+                .collect(),
+        );
     }
 }
 
