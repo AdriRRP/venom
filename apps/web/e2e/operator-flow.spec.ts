@@ -263,10 +263,13 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByRole("cell", { name: "openssl@3.0.0" }),
 	).toBeVisible();
 	await expect(
-		collectionPanel.getByRole("cell", { name: "critical" }),
+		collectionPanel.getByRole("cell", { name: "critical", exact: true }),
 	).toBeVisible();
 	await expect(
-		collectionPanel.getByRole("cell", { name: "Internet Production" }),
+		collectionPanel.getByRole("cell", {
+			name: "Internet Production",
+			exact: true,
+		}),
 	).toBeVisible();
 	await collectionPanel
 		.getByRole("combobox", { name: "Governance", exact: true })
