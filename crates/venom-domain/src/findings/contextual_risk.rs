@@ -4,6 +4,17 @@ use crate::inventory::{
 };
 use std::collections::BTreeMap;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextualPosture {
+    Unspecified,
+    InternalRestricted,
+    HardenedPrivate,
+    ProductionService,
+    CriticalInternal,
+    PublicEdge,
+    PublicCritical,
+}
+
 /// Deterministic operator-facing risk level after execution context is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ContextualRiskLevel {
@@ -144,12 +155,7 @@ pub fn contextual_risk_level(
             Severity::Critical => ContextualRiskLevel::Critical,
         };
     };
-
-    let context_pressure = i8::from(context_profile.internet_exposed.unwrap_or(false))
-        + i8::from(context_profile.production.unwrap_or(false))
-        + i8::from(context_profile.mission_critical.unwrap_or(false))
-        - i8::from(context_profile.vpn_restricted.unwrap_or(false))
-        - i8::from(context_profile.non_privileged_user.unwrap_or(false));
+    let posture = contextual_posture(context_profile);
 
     if severity == Severity::Unknown {
         return ContextualRiskLevel::Unknown;
@@ -161,26 +167,66 @@ pub fn contextual_risk_level(
         return ContextualRiskLevel::Critical;
     }
     if severity == Severity::High {
-        return match context_pressure {
-            i8::MIN..=-1 => ContextualRiskLevel::Medium,
-            0 => ContextualRiskLevel::High,
-            _ => ContextualRiskLevel::Critical,
+        return match posture {
+            ContextualPosture::HardenedPrivate => ContextualRiskLevel::Medium,
+            ContextualPosture::PublicEdge
+            | ContextualPosture::PublicCritical
+            | ContextualPosture::CriticalInternal => ContextualRiskLevel::Critical,
+            ContextualPosture::Unspecified
+            | ContextualPosture::InternalRestricted
+            | ContextualPosture::ProductionService => ContextualRiskLevel::High,
         };
     }
     if severity == Severity::Medium {
-        return match context_pressure {
-            i8::MIN..=-1 => ContextualRiskLevel::Low,
-            0 => ContextualRiskLevel::Medium,
-            1 => ContextualRiskLevel::High,
-            _ => ContextualRiskLevel::Critical,
+        return match posture {
+            ContextualPosture::HardenedPrivate => ContextualRiskLevel::Low,
+            ContextualPosture::PublicCritical => ContextualRiskLevel::Critical,
+            ContextualPosture::PublicEdge
+            | ContextualPosture::ProductionService
+            | ContextualPosture::CriticalInternal => ContextualRiskLevel::High,
+            ContextualPosture::Unspecified | ContextualPosture::InternalRestricted => {
+                ContextualRiskLevel::Medium
+            }
         };
     }
 
-    match context_pressure {
-        i8::MIN..=0 => ContextualRiskLevel::Low,
-        1 | 2 => ContextualRiskLevel::Medium,
-        _ => ContextualRiskLevel::High,
+    match posture {
+        ContextualPosture::PublicCritical => ContextualRiskLevel::High,
+        ContextualPosture::PublicEdge
+        | ContextualPosture::ProductionService
+        | ContextualPosture::CriticalInternal => ContextualRiskLevel::Medium,
+        ContextualPosture::Unspecified
+        | ContextualPosture::InternalRestricted
+        | ContextualPosture::HardenedPrivate => ContextualRiskLevel::Low,
     }
+}
+
+fn contextual_posture(context_profile: &ContextProfileValues) -> ContextualPosture {
+    let internet_exposed = context_profile.internet_exposed.unwrap_or(false);
+    let production = context_profile.production.unwrap_or(false);
+    let mission_critical = context_profile.mission_critical.unwrap_or(false);
+    let vpn_restricted = context_profile.vpn_restricted.unwrap_or(false);
+    let non_privileged_user = context_profile.non_privileged_user.unwrap_or(false);
+
+    if internet_exposed && (production || mission_critical) {
+        return ContextualPosture::PublicCritical;
+    }
+    if internet_exposed {
+        return ContextualPosture::PublicEdge;
+    }
+    if production && mission_critical {
+        return ContextualPosture::CriticalInternal;
+    }
+    if production || mission_critical {
+        return ContextualPosture::ProductionService;
+    }
+    if vpn_restricted && non_privileged_user {
+        return ContextualPosture::HardenedPrivate;
+    }
+    if vpn_restricted || non_privileged_user {
+        return ContextualPosture::InternalRestricted;
+    }
+    ContextualPosture::Unspecified
 }
 
 #[cfg(test)]
@@ -211,6 +257,24 @@ mod tests {
     }
 
     #[test]
+    fn medium_finding_in_critical_internal_context_becomes_high() {
+        let profile = ManagedContextProfile {
+            profile_key: "context:internal-critical".into(),
+            name: "Internal Critical".into(),
+            internet_exposed: Some(false),
+            production: Some(true),
+            mission_critical: Some(true),
+            vpn_restricted: Some(true),
+            non_privileged_user: Some(true),
+        };
+
+        assert_eq!(
+            contextual_risk_level(Severity::Medium, Some(&profile.values())),
+            ContextualRiskLevel::High
+        );
+    }
+
+    #[test]
     fn high_finding_without_context_stays_high() {
         assert_eq!(
             contextual_risk_level(Severity::High, None),
@@ -232,6 +296,24 @@ mod tests {
 
         assert_eq!(
             contextual_risk_level(Severity::High, Some(&profile.values())),
+            ContextualRiskLevel::Medium
+        );
+    }
+
+    #[test]
+    fn low_finding_on_public_edge_becomes_medium() {
+        let profile = ManagedContextProfile {
+            profile_key: "context:public-edge".into(),
+            name: "Public Edge".into(),
+            internet_exposed: Some(true),
+            production: Some(false),
+            mission_critical: Some(false),
+            vpn_restricted: None,
+            non_privileged_user: None,
+        };
+
+        assert_eq!(
+            contextual_risk_level(Severity::Low, Some(&profile.values())),
             ContextualRiskLevel::Medium
         );
     }
