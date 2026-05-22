@@ -462,10 +462,10 @@ impl ApiApplication {
                 Arc::new(local.state.ingestion().inventory().clone()),
                 Arc::new(local.state.read_model().clone()),
                 Arc::new(merge_system_events(
-                    local.state.system_events(),
-                    local.runtime.system_events(),
+                    local.state.system_events_snapshot_arc().as_ref(),
+                    local.runtime.system_events_snapshot_arc().as_ref(),
                 )),
-                Arc::new(local.runtime.command_statuses_snapshot()),
+                local.runtime.command_statuses_snapshot_arc(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
@@ -496,8 +496,8 @@ impl ApiApplication {
     pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
         match &self.backend {
             ApiStore::Local(local) => Arc::new(merge_system_events(
-                local.state.system_events(),
-                local.runtime.system_events(),
+                local.state.system_events_snapshot_arc().as_ref(),
+                local.runtime.system_events_snapshot_arc().as_ref(),
             )),
             ApiStore::Postgres(postgres) => postgres.system_events_snapshot_arc(),
         }
@@ -506,7 +506,7 @@ impl ApiApplication {
     #[must_use]
     pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
         match &self.backend {
-            ApiStore::Local(local) => Arc::new(local.runtime.command_statuses_snapshot()),
+            ApiStore::Local(local) => local.runtime.command_statuses_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot_arc(),
         }
     }
@@ -2716,6 +2716,7 @@ pub struct ActiveFindingItem {
     pub package_purl: Option<String>,
     pub severity: String,
     pub contextual_risk: String,
+    pub contextual_posture: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2738,6 +2739,7 @@ impl ActiveFindingItem {
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
             contextual_risk: value.contextual_risk.as_str().to_owned(),
+            contextual_posture: value.contextual_posture.into(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -2810,6 +2812,7 @@ pub struct CollectionActiveFindingItem {
     pub package_purl: Option<String>,
     pub severity: String,
     pub contextual_risk: String,
+    pub contextual_posture: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2832,6 +2835,7 @@ impl CollectionActiveFindingItem {
             package_purl: value.finding.package.purl.map(Into::into),
             severity: severity_name(value.severity).to_owned(),
             contextual_risk: value.contextual_risk.as_str().to_owned(),
+            contextual_posture: value.contextual_posture.into(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -3243,10 +3247,7 @@ fn parse_system_event_category(value: &str) -> Result<SystemEventCategory, ApiAp
     }
 }
 
-fn merge_system_events(
-    left: &std::collections::VecDeque<SystemEvent>,
-    right: &std::collections::VecDeque<SystemEvent>,
-) -> Vec<SystemEvent> {
+fn merge_system_events(left: &[SystemEvent], right: &[SystemEvent]) -> Vec<SystemEvent> {
     let mut merged = left
         .iter()
         .cloned()
@@ -3257,7 +3258,6 @@ fn merge_system_events(
             .cmp(&a.occurred_at_unix_ms)
             .then_with(|| b.event_id.cmp(&a.event_id))
     });
-    merged.truncate(venom_domain::MAX_SYSTEM_EVENTS_LIMIT);
     merged
 }
 

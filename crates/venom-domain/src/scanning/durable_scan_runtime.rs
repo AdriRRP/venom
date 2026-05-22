@@ -11,10 +11,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const SYSTEM_EVENT_LOG_CAPACITY: usize = 512;
 
 /// Minimal durable queue for canonical scan requests.
 ///
@@ -28,6 +27,8 @@ pub struct ScanCommandQueue {
     order: Vec<Box<str>>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
     system_events: VecDeque<SystemEvent>,
+    command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
 }
 
 impl ScanCommandQueue {
@@ -54,6 +55,8 @@ impl ScanCommandQueue {
             order: Vec::new(),
             pending_integration_events: VecDeque::new(),
             system_events: VecDeque::new(),
+            command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
+            system_events_snapshot_cache: Arc::new(Vec::new()),
         };
         runtime.rebuild_from_history()?;
         Ok(runtime)
@@ -160,10 +163,12 @@ impl ScanCommandQueue {
 
     #[must_use]
     pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
-        self.commands
-            .iter()
-            .map(|(command_id, record)| (command_id.clone(), record.status))
-            .collect()
+        self.command_statuses_snapshot_cache.as_ref().clone()
+    }
+
+    #[must_use]
+    pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
+        Arc::clone(&self.command_statuses_snapshot_cache)
     }
 
     #[must_use]
@@ -174,6 +179,11 @@ impl ScanCommandQueue {
     #[must_use]
     pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
         &self.system_events
+    }
+
+    #[must_use]
+    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
+        Arc::clone(&self.system_events_snapshot_cache)
     }
 
     fn find_collection_batch(
@@ -427,6 +437,7 @@ impl ScanCommandQueue {
         };
         command.status = ScanCommandStatus::Applying;
         command.captured_report = Some(stored_report);
+        self.refresh_command_statuses_snapshot_cache();
         Ok(())
     }
 
@@ -476,6 +487,7 @@ impl ScanCommandQueue {
         let component_key = command.request.component_key.clone();
         command.status = ScanCommandStatus::Completed;
         command.captured_report = None;
+        self.refresh_command_statuses_snapshot_cache();
         self.pending_integration_events
             .push_back(pending_integration_event);
         self.push_system_event(SystemEvent {
@@ -530,6 +542,7 @@ impl ScanCommandQueue {
         };
         command.status = ScanCommandStatus::Failed;
         command.captured_report = None;
+        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(SystemEvent {
             event_id: format!(
                 "scan-command-failed-live-{}-{occurred_at_unix_ms}",
@@ -570,6 +583,9 @@ impl ScanCommandQueue {
             })?;
             self.apply_event(event, line_index + 1)?;
         }
+
+        self.refresh_command_statuses_snapshot_cache();
+        self.refresh_system_events_snapshot_cache();
 
         Ok(())
     }
@@ -719,6 +735,7 @@ impl ScanCommandQueue {
         }
         record.status = ScanCommandStatus::Applying;
         record.captured_report = Some(report);
+        self.refresh_command_statuses_snapshot_cache();
         Ok(())
     }
 
@@ -746,6 +763,7 @@ impl ScanCommandQueue {
                 captured_report: None,
             },
         );
+        self.refresh_command_statuses_snapshot_cache();
         let component_key = self
             .commands
             .get(command_id.as_ref())
@@ -787,6 +805,7 @@ impl ScanCommandQueue {
         if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
             record.captured_report = None;
         }
+        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-completed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -865,6 +884,7 @@ impl ScanCommandQueue {
         if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
             record.captured_report = None;
         }
+        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-failed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -921,6 +941,7 @@ impl ScanCommandQueue {
             });
         }
         record.status = status;
+        self.refresh_command_statuses_snapshot_cache();
         Ok(())
     }
 
@@ -938,9 +959,7 @@ impl ScanCommandQueue {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_events.push_front(event);
-        while self.system_events.len() > SYSTEM_EVENT_LOG_CAPACITY {
-            self.system_events.pop_back();
-        }
+        self.refresh_system_events_snapshot_cache();
     }
 
     fn apply_enqueued_batch(
@@ -977,6 +996,20 @@ impl ScanCommandQueue {
                 detail: None,
             });
         }
+        self.refresh_command_statuses_snapshot_cache();
+    }
+
+    fn refresh_system_events_snapshot_cache(&mut self) {
+        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
+    }
+
+    fn refresh_command_statuses_snapshot_cache(&mut self) {
+        self.command_statuses_snapshot_cache = Arc::new(
+            self.commands
+                .iter()
+                .map(|(command_id, record)| (command_id.clone(), record.status))
+                .collect(),
+        );
     }
 }
 

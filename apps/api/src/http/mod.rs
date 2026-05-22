@@ -148,9 +148,7 @@ impl ApiState {
     {
         let mut service = self.take_service().await;
         let result = operation(&mut service).await;
-        if result.is_ok() {
-            refresh(self, &service);
-        }
+        refresh(self, &service);
         self.restore_service(service).await;
         result
     }

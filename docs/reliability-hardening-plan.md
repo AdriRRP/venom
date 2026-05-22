@@ -54,6 +54,24 @@ Completed:
     Replace the flat context-pressure sum with deterministic contextual
     postures that distinguish public-edge, critical-internal, and hardened
     private workloads without losing predictability.
+22. `W110-local-mutation-partial-progress-veracity`
+    Refresh operator read snapshots even after failed local mutations so partial
+    durable progress is visible instead of hidden behind stale HTTP views.
+23. `W111-http-mutation-lane-parallelism`
+    Reduce time spent inside the single-flight HTTP mutation slot by making
+    volatile read lanes cheaper to refresh.
+24. `W112-local-read-snapshot-volatile-lane-caches`
+    Cache local `system events` and `command statuses` as `Arc` lanes inside the
+    durable local stores.
+25. `W113-system-event-window-semantics`
+    Stop truncating recent system events before filtering so operator timelines
+    and totals mean the same thing across local and Postgres backends.
+26. `W114-postgres-bulk-governance-batching`
+    Batch Postgres risk-acceptance and suppression upserts for collection and
+    tag cohorts instead of issuing one write per finding.
+27. `W115-contextual-risk-explainability`
+    Expose the deterministic contextual posture behind each contextual risk
+    decision to API and UI consumers.
 
 ## Exit condition
 

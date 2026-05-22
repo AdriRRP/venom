@@ -15,6 +15,7 @@ export type ActiveFinding = {
 	package_purl: string | null;
 	severity: string;
 	contextual_risk: string;
+	contextual_posture?: string;
 	context_profile_key: string | null;
 	context_profile_name: string | null;
 	component_context_profile?: ContextProfileRef | null;
