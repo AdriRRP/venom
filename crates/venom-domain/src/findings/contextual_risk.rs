@@ -397,10 +397,9 @@ fn contextual_posture(context_profile: ContextProfileValues) -> ContextualPostur
 mod tests {
     use super::{ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level};
     use crate::{
-        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorSource,
-        ContextProfileRef, ContextProfileValues, EffectiveContextFactorSources,
-        EffectiveContextProfile, FindingGovernanceState, FindingRef, ManagedContextProfile,
-        PackageCoordinate, Severity,
+        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorSource, ContextProfileRef,
+        ContextProfileValues, EffectiveContextFactorSources, EffectiveContextProfile,
+        FindingGovernanceState, FindingRef, ManagedContextProfile, PackageCoordinate, Severity,
     };
 
     #[test]

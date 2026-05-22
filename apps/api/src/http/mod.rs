@@ -97,17 +97,13 @@ impl SnapshotRefresh {
             Self::InventoryAndReleaseBoard {
                 inventory,
                 release_board,
-            } => Arc::new(current.with_inventory_and_release_board_arcs(
-                inventory,
-                release_board,
-            )),
+            } => Arc::new(current.with_inventory_and_release_board_arcs(inventory, release_board)),
             Self::ReadModelAndReleaseBoard {
                 read_model,
                 release_board,
-            } => Arc::new(current.with_read_model_and_release_board_arcs(
-                read_model,
-                release_board,
-            )),
+            } => {
+                Arc::new(current.with_read_model_and_release_board_arcs(read_model, release_board))
+            }
             Self::SystemEvents { system_events } => {
                 Arc::new(current.with_system_event_index_arc(system_events))
             }
@@ -116,7 +112,8 @@ impl SnapshotRefresh {
                 release_board,
                 system_events,
             } => {
-                let next = current.with_read_model_and_release_board_arcs(read_model, release_board);
+                let next =
+                    current.with_read_model_and_release_board_arcs(read_model, release_board);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
             Self::CombinedCommandStatusesAndSystemEvents {
@@ -142,7 +139,8 @@ impl SnapshotRefresh {
                 command_statuses,
                 system_events,
             } => {
-                let next = current.with_read_model_and_release_board_arcs(read_model, release_board);
+                let next =
+                    current.with_read_model_and_release_board_arcs(read_model, release_board);
                 let next = next.with_command_statuses_arc(command_statuses);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
@@ -218,9 +216,7 @@ impl ApiState {
         SnapshotRefresh::Unchanged
     }
 
-    fn refresh_read_model_and_system_events_snapshot(
-        service: &ApiApplication,
-    ) -> SnapshotRefresh {
+    fn refresh_read_model_and_system_events_snapshot(service: &ApiApplication) -> SnapshotRefresh {
         let snapshot = Self::refresh_read_model_snapshot(service);
         let system_events = service.system_event_index_snapshot_arc();
         match snapshot {

@@ -1857,12 +1857,15 @@ impl PostgresStore {
         requests: Vec<ScanRequest>,
     ) {
         for due_scan in due_scans {
-            let _ = self.ingestion.inventory_mut().record_collection_scan_materialization(
-                due_scan.collection_key.as_ref(),
-                due_scan.next_due_at_unix_ms,
-                materialized_at_unix_ms,
-                u32::try_from(due_scan.requests.len()).unwrap_or(u32::MAX),
-            );
+            let _ = self
+                .ingestion
+                .inventory_mut()
+                .record_collection_scan_materialization(
+                    due_scan.collection_key.as_ref(),
+                    due_scan.next_due_at_unix_ms,
+                    materialized_at_unix_ms,
+                    u32::try_from(due_scan.requests.len()).unwrap_or(u32::MAX),
+                );
         }
         for event in system_events {
             self.push_system_event(event);
