@@ -318,11 +318,13 @@ impl ApiState {
         &self,
         request: DrainWorkerCommand,
     ) -> Result<DrainWorkerResponse, ApiError> {
-        let max_commands = request.max_commands.ok_or_else(|| {
-            ApiError::bad_request("max_commands is required")
-        })?;
+        let max_commands = request
+            .max_commands
+            .ok_or_else(|| ApiError::bad_request("max_commands is required"))?;
         if max_commands == 0 {
-            return Err(ApiError::bad_request("max_commands must be greater than zero"));
+            return Err(ApiError::bad_request(
+                "max_commands must be greater than zero",
+            ));
         }
 
         let mut response = DrainWorkerResponse {
@@ -346,7 +348,10 @@ impl ApiState {
                             provider: request.provider.clone(),
                         };
                         Box::pin(async move {
-                            service.run_worker_until_idle(request).await.map_err(ApiError::from)
+                            service
+                                .run_worker_until_idle(request)
+                                .await
+                                .map_err(ApiError::from)
                         })
                     },
                     ApiState::refresh_read_model_command_status_and_system_events_snapshot,
@@ -373,11 +378,13 @@ impl ApiState {
         &self,
         request: DrainCollectionScanWorkerCommand,
     ) -> Result<DrainCollectionScanWorkerResponse, ApiError> {
-        let max_collections = request.max_collections.ok_or_else(|| {
-            ApiError::bad_request("max_collections is required")
-        })?;
+        let max_collections = request
+            .max_collections
+            .ok_or_else(|| ApiError::bad_request("max_collections is required"))?;
         if max_collections == 0 {
-            return Err(ApiError::bad_request("max_collections must be greater than zero"));
+            return Err(ApiError::bad_request(
+                "max_collections must be greater than zero",
+            ));
         }
 
         let mut response = DrainCollectionScanWorkerResponse {
@@ -426,11 +433,13 @@ impl ApiState {
         &self,
         request: DrainIntegrationWorkerCommand,
     ) -> Result<DrainIntegrationWorkerResponse, ApiError> {
-        let max_events = request.max_events.ok_or_else(|| {
-            ApiError::bad_request("max_events is required")
-        })?;
+        let max_events = request
+            .max_events
+            .ok_or_else(|| ApiError::bad_request("max_events is required"))?;
         if max_events == 0 {
-            return Err(ApiError::bad_request("max_events must be greater than zero"));
+            return Err(ApiError::bad_request(
+                "max_events must be greater than zero",
+            ));
         }
 
         let mut response = DrainIntegrationWorkerResponse {
@@ -631,7 +640,10 @@ async fn list_system_events(
         limit: request.limit,
     };
     Ok(Json(
-        state.read_snapshot_fresh().await?.list_system_events(&request)?,
+        state
+            .read_snapshot_fresh()
+            .await?
+            .list_system_events(&request)?,
     ))
 }
 
@@ -678,7 +690,9 @@ async fn register_component_tag(
 async fn list_component_tags(
     State(state): State<ApiState>,
 ) -> Result<Json<ListComponentTagsResponse>, ApiError> {
-    Ok(Json(state.read_snapshot_fresh().await?.list_component_tags()))
+    Ok(Json(
+        state.read_snapshot_fresh().await?.list_component_tags(),
+    ))
 }
 
 async fn register_context_profile(
@@ -746,7 +760,9 @@ async fn assign_tag_context_profile(
 async fn list_context_profiles(
     State(state): State<ApiState>,
 ) -> Result<Json<ListContextProfilesResponse>, ApiError> {
-    Ok(Json(state.read_snapshot_fresh().await?.list_context_profiles()))
+    Ok(Json(
+        state.read_snapshot_fresh().await?.list_context_profiles(),
+    ))
 }
 
 async fn register_collection(
@@ -1231,7 +1247,9 @@ async fn drain_collection_scan_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainCollectionScanWorkerCommand>,
 ) -> Result<Json<DrainCollectionScanWorkerResponse>, ApiError> {
-    let response = state.drain_collection_scan_worker_until_idle(request).await?;
+    let response = state
+        .drain_collection_scan_worker_until_idle(request)
+        .await?;
     Ok(Json(response))
 }
 

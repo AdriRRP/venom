@@ -3928,9 +3928,7 @@ fn parse_system_event_kind(value: &str) -> Result<SystemEventKind, String> {
     }
 }
 
-fn parse_system_event_row(
-    row: SystemEventRow,
-) -> Result<SystemEvent, String> {
+fn parse_system_event_row(row: SystemEventRow) -> Result<SystemEvent, String> {
     let (
         event_id,
         occurred_at_unix_ms,

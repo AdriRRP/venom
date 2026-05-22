@@ -401,8 +401,8 @@ mod tests {
     use crate::{
         ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorOrigin,
         ContextFactorSource, ContextProfileRef, ContextProfileValues,
-        EffectiveContextFactorSources, EffectiveContextProfile, FindingGovernanceState,
-        FindingRef, ManagedContextProfile, PackageCoordinate, Severity,
+        EffectiveContextFactorSources, EffectiveContextProfile, FindingGovernanceState, FindingRef,
+        ManagedContextProfile, PackageCoordinate, Severity,
     };
 
     #[test]

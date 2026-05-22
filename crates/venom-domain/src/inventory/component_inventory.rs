@@ -2127,7 +2127,8 @@ impl ComponentInventory {
         &self,
         component_key: &str,
     ) -> (Option<ContextProfileValues>, Vec<ContextProfileRef>) {
-        let (values, profiles, _) = self.tag_overlay_effective_context_with_provenance(component_key);
+        let (values, profiles, _) =
+            self.tag_overlay_effective_context_with_provenance(component_key);
         (values, profiles)
     }
 
@@ -2180,8 +2181,7 @@ impl ComponentInventory {
                     tag_key.clone(),
                 ));
             }
-            if factor_sources.non_privileged_user.is_none()
-                && profile.non_privileged_user.is_some()
+            if factor_sources.non_privileged_user.is_none() && profile.non_privileged_user.is_some()
             {
                 factor_sources.non_privileged_user = Some(ContextFactorOrigin::new(
                     ContextFactorSource::Tag,
@@ -2203,7 +2203,10 @@ impl ComponentInventory {
                 .map(|_| {
                     ContextFactorOrigin::new(
                         ContextFactorSource::Component,
-                        component_profile.expect("component profile present").profile_key.clone(),
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
                     )
                 })
                 .or(tag_factor_sources.internet_exposed),
@@ -2212,7 +2215,10 @@ impl ComponentInventory {
                 .map(|_| {
                     ContextFactorOrigin::new(
                         ContextFactorSource::Component,
-                        component_profile.expect("component profile present").profile_key.clone(),
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
                     )
                 })
                 .or(tag_factor_sources.production),
@@ -2221,7 +2227,10 @@ impl ComponentInventory {
                 .map(|_| {
                     ContextFactorOrigin::new(
                         ContextFactorSource::Component,
-                        component_profile.expect("component profile present").profile_key.clone(),
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
                     )
                 })
                 .or(tag_factor_sources.mission_critical),
@@ -2230,7 +2239,10 @@ impl ComponentInventory {
                 .map(|_| {
                     ContextFactorOrigin::new(
                         ContextFactorSource::Component,
-                        component_profile.expect("component profile present").profile_key.clone(),
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
                     )
                 })
                 .or(tag_factor_sources.vpn_restricted),
@@ -2239,7 +2251,10 @@ impl ComponentInventory {
                 .map(|_| {
                     ContextFactorOrigin::new(
                         ContextFactorSource::Component,
-                        component_profile.expect("component profile present").profile_key.clone(),
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
                     )
                 })
                 .or(tag_factor_sources.non_privileged_user),
