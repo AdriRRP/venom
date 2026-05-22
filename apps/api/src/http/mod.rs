@@ -31,9 +31,13 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
+
+type ApiMutationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -41,7 +45,8 @@ pub struct ApiState {
 }
 
 struct ApiStateInner {
-    service: Mutex<ApiApplication>,
+    service: Mutex<Option<ApiApplication>>,
+    service_ready: Notify,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
 }
@@ -78,7 +83,8 @@ impl ApiState {
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
             inner: Arc::new(ApiStateInner {
-                service: Mutex::new(service),
+                service: Mutex::new(Some(service)),
+                service_ready: Notify::new(),
                 read_snapshot_tx,
                 read_snapshot_rx,
             }),
@@ -115,6 +121,38 @@ impl ApiState {
             .read_snapshot()
             .with_command_statuses_arc(service.command_statuses_snapshot_arc());
         self.inner.read_snapshot_tx.send_replace(Arc::new(next));
+    }
+
+    async fn take_service(&self) -> ApiApplication {
+        loop {
+            let mut guard = self.inner.service.lock().await;
+            if let Some(service) = guard.take() {
+                return service;
+            }
+            drop(guard);
+            self.inner.service_ready.notified().await;
+        }
+    }
+
+    async fn restore_service(&self, service: ApiApplication) {
+        let mut guard = self.inner.service.lock().await;
+        *guard = Some(service);
+        drop(guard);
+        self.inner.service_ready.notify_waiters();
+    }
+
+    async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
+    where
+        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
+        R: FnOnce(&Self, &ApiApplication),
+    {
+        let mut service = self.take_service().await;
+        let result = operation(&mut service).await;
+        if result.is_ok() {
+            refresh(self, &service);
+        }
+        self.restore_service(service).await;
+        result
     }
 }
 
@@ -277,16 +315,19 @@ async fn register_component(
     State(state): State<ApiState>,
     Json(request): Json<ComponentRegistrationRequest>,
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .register_component(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .register_component(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -294,16 +335,19 @@ async fn register_component_tag(
     State(state): State<ApiState>,
     Json(request): Json<ComponentTagRegistrationRequest>,
 ) -> Result<Json<RegisterComponentTagResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .register_component_tag(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .register_component_tag(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -317,16 +361,19 @@ async fn register_context_profile(
     State(state): State<ApiState>,
     Json(request): Json<ContextProfileRegistrationRequest>,
 ) -> Result<Json<RegisterContextProfileResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .register_context_profile(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .register_context_profile(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -335,16 +382,19 @@ async fn add_component_to_tag(
     Path(tag_key): Path<String>,
     Json(request): Json<ComponentTagMembershipRequest>,
 ) -> Result<Json<ComponentTagMembershipResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .add_component_to_tag(&tag_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .add_component_to_tag(&tag_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -353,16 +403,19 @@ async fn assign_tag_context_profile(
     Path(tag_key): Path<String>,
     Json(request): Json<AssignTagContextProfileRequest>,
 ) -> Result<Json<AssignTagContextProfileResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .assign_context_profile_for_tag(&tag_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .assign_context_profile_for_tag(&tag_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -376,16 +429,19 @@ async fn register_collection(
     State(state): State<ApiState>,
     Json(request): Json<CollectionRegistrationRequest>,
 ) -> Result<Json<RegisterCollectionResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .register_collection(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .register_collection(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -415,16 +471,19 @@ async fn add_component_to_collection(
     Path(collection_key): Path<String>,
     Json(request): Json<CollectionMembershipRequest>,
 ) -> Result<Json<CollectionMembershipResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .add_component_to_collection(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .add_component_to_collection(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -432,16 +491,19 @@ async fn remove_component_from_collection(
     State(state): State<ApiState>,
     Path((collection_key, component_key)): Path<(String, String)>,
 ) -> Result<Json<CollectionMembershipResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .remove_component_from_collection(&collection_key, &component_key)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .remove_component_from_collection(&collection_key, &component_key)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -450,16 +512,19 @@ async fn configure_collection_source(
     Path(collection_key): Path<String>,
     Json(request): Json<ConfigureCollectionSourceRequest>,
 ) -> Result<Json<ConfigureCollectionSourceResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .configure_collection_source(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .configure_collection_source(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -467,16 +532,19 @@ async fn materialize_collection_source(
     State(state): State<ApiState>,
     Path(collection_key): Path<String>,
 ) -> Result<Json<MaterializeCollectionSourceResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .materialize_collection_source(&collection_key)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .materialize_collection_source(&collection_key)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -485,16 +553,19 @@ async fn configure_collection_scan_schedule(
     Path(collection_key): Path<String>,
     Json(request): Json<ConfigureCollectionScanScheduleRequest>,
 ) -> Result<Json<ConfigureCollectionScanScheduleResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .configure_collection_scan_schedule(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .configure_collection_scan_schedule(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -503,16 +574,19 @@ async fn bind_artifact(
     Path(component_key): Path<String>,
     Json(request): Json<BindArtifactRequest>,
 ) -> Result<Json<BindArtifactResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .bind_artifact(&component_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .bind_artifact(&component_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -521,16 +595,19 @@ async fn assign_context_profile(
     Path(component_key): Path<String>,
     Json(request): Json<AssignContextProfileRequest>,
 ) -> Result<Json<AssignContextProfileResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .assign_context_profile(&component_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .assign_context_profile(&component_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -539,16 +616,19 @@ async fn assign_collection_context_profile(
     Path(collection_key): Path<String>,
     Json(request): Json<AssignCollectionContextProfileRequest>,
 ) -> Result<Json<AssignCollectionContextProfileResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .assign_collection_context_profile(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .assign_collection_context_profile(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -557,16 +637,19 @@ async fn configure_provider(
     Path(component_key): Path<String>,
     Json(request): Json<ConfigureProviderRequest>,
 ) -> Result<Json<ConfigureProviderResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .configure_provider(&component_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .configure_provider(&component_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_inventory_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -574,15 +657,19 @@ async fn configure_integration_runtime(
     State(state): State<ApiState>,
     Json(request): Json<ConfigureIntegrationRuntimeRequest>,
 ) -> Result<Json<ConfigureIntegrationRuntimeResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .configure_integration_runtime(request)
-            .await
-            .map_err(ApiError::from)?;
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .configure_integration_runtime(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |_state, _service| {},
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -590,16 +677,19 @@ async fn record_provider_report(
     State(state): State<ApiState>,
     Json(request): Json<ProviderScanReportRequest>,
 ) -> Result<Json<RecordProviderReportResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .record_provider_report(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .record_provider_report(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_read_model_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -607,14 +697,17 @@ async fn accept_risk(
     State(state): State<ApiState>,
     Json(request): Json<AcceptRiskRequest>,
 ) -> Result<Json<AcceptRiskResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service.accept_risk(request).await.map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move { service.accept_risk(request).await.map_err(ApiError::from) })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -623,17 +716,22 @@ async fn accept_collection_risk(
     Path(collection_key): Path<String>,
     Json(request): Json<BulkAcceptRiskRequest>,
 ) -> Result<Json<BulkAcceptRiskResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .accept_risk_for_collection(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .accept_risk_for_collection(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -642,17 +740,22 @@ async fn accept_tag_risk(
     Path(tag_key): Path<String>,
     Json(request): Json<BulkAcceptRiskRequest>,
 ) -> Result<Json<BulkAcceptRiskByTagResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .accept_risk_for_tag(&tag_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .accept_risk_for_tag(&tag_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -660,17 +763,22 @@ async fn suppress_finding(
     State(state): State<ApiState>,
     Json(request): Json<SuppressFindingRequest>,
 ) -> Result<Json<SuppressFindingResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .suppress_finding(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .suppress_finding(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -679,17 +787,22 @@ async fn suppress_collection_findings(
     Path(collection_key): Path<String>,
     Json(request): Json<BulkSuppressFindingsRequest>,
 ) -> Result<Json<BulkSuppressFindingsResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .suppress_findings_for_collection(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .suppress_findings_for_collection(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -698,17 +811,22 @@ async fn suppress_tag_findings(
     Path(tag_key): Path<String>,
     Json(request): Json<BulkSuppressFindingsRequest>,
 ) -> Result<Json<BulkSuppressFindingsByTagResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .suppress_findings_for_tag(&tag_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .suppress_findings_for_tag(&tag_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -716,17 +834,22 @@ async fn reopen_finding(
     State(state): State<ApiState>,
     Json(request): Json<ReopenFindingRequest>,
 ) -> Result<Json<ReopenFindingResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .reopen_finding(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .reopen_finding(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -735,17 +858,22 @@ async fn reopen_collection_findings(
     Path(collection_key): Path<String>,
     Json(request): Json<BulkReopenFindingsRequest>,
 ) -> Result<Json<BulkReopenFindingsResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .reopen_findings_for_collection(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .reopen_findings_for_collection(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -753,17 +881,17 @@ async fn request_scan(
     State(state): State<ApiState>,
     Json(request): Json<RequestScanCommand>,
 ) -> Result<Json<RequestScanResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .request_scan(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_command_status_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move { service.request_scan(request).await.map_err(ApiError::from) })
+            },
+            |state, service| {
+                state.refresh_command_status_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -772,17 +900,22 @@ async fn request_collection_scan(
     Path(collection_key): Path<String>,
     Json(request): Json<RequestCollectionScanCommand>,
 ) -> Result<Json<RequestCollectionScanResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .request_collection_scan(&collection_key, request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_command_status_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .request_collection_scan(&collection_key, request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_command_status_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -801,18 +934,23 @@ async fn drain_collection_scan_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainCollectionScanWorkerCommand>,
 ) -> Result<Json<DrainCollectionScanWorkerResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .run_collection_scan_worker_until_idle(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_inventory_snapshot(&service);
-        state.refresh_command_status_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .run_collection_scan_worker_until_idle(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_inventory_snapshot(service);
+                state.refresh_command_status_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -820,18 +958,20 @@ async fn run_next_scan(
     State(state): State<ApiState>,
     Json(request): Json<RunNextScanCommand>,
 ) -> Result<Json<RunNextScanResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .run_next_scan(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_command_status_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(
+                    async move { service.run_next_scan(request).await.map_err(ApiError::from) },
+                )
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_command_status_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -839,18 +979,23 @@ async fn drain_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainWorkerCommand>,
 ) -> Result<Json<DrainWorkerResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .run_worker_until_idle(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_read_model_snapshot(&service);
-        state.refresh_command_status_snapshot(&service);
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .run_worker_until_idle(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            |state, service| {
+                state.refresh_read_model_snapshot(service);
+                state.refresh_command_status_snapshot(service);
+                state.refresh_system_events_snapshot(service);
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -858,16 +1003,19 @@ async fn drain_integration_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainIntegrationWorkerCommand>,
 ) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
-    let response = {
-        let mut service = state.inner.service.lock().await;
-        let response = service
-            .publish_integration_events_until_idle(request)
-            .await
-            .map_err(ApiError::from)?;
-        state.refresh_system_events_snapshot(&service);
-        drop(service);
-        response
-    };
+    let response = state
+        .mutate(
+            |service| {
+                Box::pin(async move {
+                    service
+                        .publish_integration_events_until_idle(request)
+                        .await
+                        .map_err(ApiError::from)
+                })
+            },
+            ApiState::refresh_system_events_snapshot,
+        )
+        .await?;
     Ok(Json(response))
 }
 
