@@ -171,18 +171,25 @@ function contextSourceLabels(finding: {
 
 function contextLabel(finding: {
 	context_profile_name: string | null;
+	contextual_posture?: string;
 	component_context_profile?: { name: string } | null;
 	collection_context_profile?: { name: string } | null;
 	tag_context_profiles?: Array<{ name: string }>;
 }) {
 	const labels = contextSourceLabels(finding);
+	const posture =
+		finding.contextual_posture == null
+			? null
+			: `posture:${finding.contextual_posture}`;
 	if (labels.length === 0) {
-		return "unassigned";
+		return posture ?? "unassigned";
 	}
 	if (labels.length === 1) {
-		return labels[0];
+		return posture == null ? labels[0] : `${labels[0]} (${posture})`;
 	}
-	return `composite (${labels.join(" + ")})`;
+	return posture == null
+		? `composite (${labels.join(" + ")})`
+		: `composite (${labels.join(" + ")}) (${posture})`;
 }
 
 export function FindingsPage() {

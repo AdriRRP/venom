@@ -27,11 +27,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-
-const SYSTEM_EVENT_LOG_CAPACITY: usize = 512;
 
 /// Minimal durable state boundary for the current domain slice.
 ///
@@ -48,6 +47,7 @@ pub struct DurableState {
     applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
     system_events: VecDeque<SystemEvent>,
+    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
 }
 
 impl DurableState {
@@ -77,6 +77,7 @@ impl DurableState {
             applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
             system_events: VecDeque::new(),
+            system_events_snapshot_cache: Arc::new(Vec::new()),
         };
         state.rebuild_from_history()?;
         Ok(state)
@@ -110,6 +111,11 @@ impl DurableState {
     #[must_use]
     pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
         &self.system_events
+    }
+
+    #[must_use]
+    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
+        Arc::clone(&self.system_events_snapshot_cache)
     }
 
     #[must_use]
@@ -2241,9 +2247,11 @@ impl DurableState {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_events.push_front(event);
-        while self.system_events.len() > SYSTEM_EVENT_LOG_CAPACITY {
-            self.system_events.pop_back();
-        }
+        self.refresh_system_events_snapshot_cache();
+    }
+
+    fn refresh_system_events_snapshot_cache(&mut self) {
+        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
     }
 }
 

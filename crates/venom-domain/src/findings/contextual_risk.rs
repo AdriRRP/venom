@@ -15,6 +15,20 @@ enum ContextualPosture {
     PublicCritical,
 }
 
+impl ContextualPosture {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::InternalRestricted => "internal-restricted",
+            Self::HardenedPrivate => "hardened-private",
+            Self::ProductionService => "production-service",
+            Self::CriticalInternal => "critical-internal",
+            Self::PublicEdge => "public-edge",
+            Self::PublicCritical => "public-critical",
+        }
+    }
+}
+
 /// Deterministic operator-facing risk level after execution context is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ContextualRiskLevel {
@@ -46,6 +60,7 @@ pub struct ContextualActiveFindingProjection {
     pub finding: crate::FindingRef,
     pub severity: Severity,
     pub contextual_risk: ContextualRiskLevel,
+    pub contextual_posture: Box<str>,
     pub context_profile_key: Option<Box<str>>,
     pub context_profile_name: Option<Box<str>>,
     pub component_context_profile: Option<ContextProfileRef>,
@@ -62,6 +77,11 @@ impl ContextualActiveFindingProjection {
         finding: ActiveFindingProjection,
         effective_context: Option<EffectiveContextProfile>,
     ) -> Self {
+        let posture = effective_context
+            .as_ref()
+            .map_or(ContextualPosture::Unspecified, |context| {
+                contextual_posture(context.values)
+            });
         let contextual_risk = contextual_risk_level(
             finding.severity,
             effective_context.as_ref().map(|context| &context.values),
@@ -74,6 +94,7 @@ impl ContextualActiveFindingProjection {
             finding: finding.finding,
             severity: finding.severity,
             contextual_risk,
+            contextual_posture: posture.as_str().into(),
             context_profile_key: singular_profile
                 .as_ref()
                 .map(|profile| profile.profile_key.clone()),

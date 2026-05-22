@@ -781,10 +781,8 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(acceptance.reason.clone()),
             };
-            for finding in &changed {
-                self.upsert_risk_acceptance_in_transaction(&mut tx, finding, &acceptance)
-                    .await?;
-            }
+            self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
+                .await?;
             self.insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
             tx.commit().await.map_err(|error| {
@@ -858,10 +856,8 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(format!("tag {tag_key}: {}", acceptance.reason).into_boxed_str()),
             };
-            for finding in &changed {
-                self.upsert_risk_acceptance_in_transaction(&mut tx, finding, &acceptance)
-                    .await?;
-            }
+            self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
+                .await?;
             self.insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
             tx.commit().await.map_err(|error| {
@@ -1047,10 +1043,8 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(suppression.reason.clone()),
             };
-            for finding in &changed_findings {
-                self.upsert_suppression_in_transaction(&mut tx, finding, &suppression)
-                    .await?;
-            }
+            self.upsert_suppressions_in_transaction(&mut tx, &changed_findings, &suppression)
+                .await?;
             self.insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
             tx.commit()
@@ -1125,10 +1119,8 @@ impl PostgresStore {
                 retryable: None,
                 detail: Some(format!("tag {tag_key}: {}", suppression.reason).into_boxed_str()),
             };
-            for finding in &changed {
-                self.upsert_suppression_in_transaction(&mut tx, finding, &suppression)
-                    .await?;
-            }
+            self.upsert_suppressions_in_transaction(&mut tx, &changed, &suppression)
+                .await?;
             self.insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
             tx.commit().await.map_err(|error| {
@@ -3379,10 +3371,9 @@ impl PostgresStore {
             concat!(
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                 "command_id, integration_event_id, finding_count, retryable, detail ",
-                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT {}"
+                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC"
             ),
-            self.names.system_events,
-            venom_domain::MAX_SYSTEM_EVENTS_LIMIT
+            self.names.system_events
         ))
         .fetch_all(&self.pool)
         .await
@@ -3437,9 +3428,6 @@ impl PostgresStore {
 
     fn push_system_event(&mut self, event: SystemEvent) {
         self.system_events.push_front(event);
-        while self.system_events.len() > 512 {
-            self.system_events.pop_back();
-        }
         self.refresh_system_events_snapshot_cache();
     }
 
@@ -3544,6 +3532,47 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn upsert_risk_acceptances_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        findings: &[FindingRef],
+        acceptance: &RiskAcceptance,
+    ) -> Result<(), String> {
+        if findings.is_empty() {
+            return Ok(());
+        }
+
+        let until_unix_ms = acceptance
+            .until_unix_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| "risk acceptance until overflow".to_owned())?;
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {} \
+            (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason, until_unix_ms) ",
+            self.names.finding_risk_acceptances
+        ));
+        query.push_values(findings, |mut row, finding| {
+            row.push_bind(finding.component_key.as_ref())
+                .push_bind(artifact_kind_name(finding.artifact.kind))
+                .push_bind(finding.artifact.identity.as_ref())
+                .push_bind(finding.vulnerability_id.as_ref())
+                .push_bind(finding.package.name.as_ref())
+                .push_bind(finding.package.version.as_ref())
+                .push_bind(finding.package.purl.as_deref().unwrap_or(""))
+                .push_bind(acceptance.reason.as_ref())
+                .push_bind(until_unix_ms);
+        });
+        query.push(
+            " ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) \
+            DO UPDATE SET reason = EXCLUDED.reason, until_unix_ms = EXCLUDED.until_unix_ms, updated_at = NOW()",
+        );
+        query.build().execute(&mut **tx).await.map_err(|error| {
+            format!("postgres finding risk acceptance batch upsert failed: {error}")
+        })?;
+        Ok(())
+    }
+
     async fn upsert_suppression_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -3571,6 +3600,41 @@ impl PostgresStore {
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("postgres finding suppression upsert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn upsert_suppressions_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        findings: &[FindingRef],
+        suppression: &Suppression,
+    ) -> Result<(), String> {
+        if findings.is_empty() {
+            return Ok(());
+        }
+
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {} \
+            (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, reason) ",
+            self.names.finding_suppressions
+        ));
+        query.push_values(findings, |mut row, finding| {
+            row.push_bind(finding.component_key.as_ref())
+                .push_bind(artifact_kind_name(finding.artifact.kind))
+                .push_bind(finding.artifact.identity.as_ref())
+                .push_bind(finding.vulnerability_id.as_ref())
+                .push_bind(finding.package.name.as_ref())
+                .push_bind(finding.package.version.as_ref())
+                .push_bind(finding.package.purl.as_deref().unwrap_or(""))
+                .push_bind(suppression.reason.as_ref());
+        });
+        query.push(
+            " ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) \
+            DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()",
+        );
+        query.build().execute(&mut **tx).await.map_err(|error| {
+            format!("postgres finding suppression batch upsert failed: {error}")
+        })?;
         Ok(())
     }
 }
