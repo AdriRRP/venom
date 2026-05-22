@@ -169,7 +169,7 @@ pub struct SystemEventQueryIndex {
     recent_publication_events: Vec<Arc<SystemEvent>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SystemEventWindowTotals {
     pub total: usize,
     pub scheduler_total: usize,
