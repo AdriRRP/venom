@@ -10,10 +10,10 @@ use crate::{
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
-    FindingDecision, FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
-    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
-    MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
-    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    FindingDecision, FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel,
+    FindingRef, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, MaterializeCollectionSourceChange, MaterializeCollectionSourceResult,
+    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
@@ -789,7 +789,8 @@ impl DurableState {
                 .cloned()
                 .map(StoredFindingRef::into_domain)
             {
-                self.governance.accept_risk(finding.clone(), acceptance.clone());
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
             self.push_system_event(SystemEvent {
@@ -864,7 +865,8 @@ impl DurableState {
                 .cloned()
                 .map(StoredFindingRef::into_domain)
             {
-                self.governance.accept_risk(finding.clone(), acceptance.clone());
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
             self.push_system_event(SystemEvent {
@@ -1038,7 +1040,8 @@ impl DurableState {
                 .cloned()
                 .map(StoredFindingRef::into_domain)
             {
-                self.governance.suppress(finding.clone(), suppression.clone());
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
             self.push_system_event(SystemEvent {
@@ -1113,7 +1116,8 @@ impl DurableState {
                 .cloned()
                 .map(StoredFindingRef::into_domain)
             {
-                self.governance.suppress(finding.clone(), suppression.clone());
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
             self.push_system_event(SystemEvent {

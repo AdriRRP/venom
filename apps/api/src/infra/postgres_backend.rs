@@ -10,9 +10,9 @@ use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
     BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
     FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
-    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport,
-    ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
-    SuppressFindingChange, SuppressFindingResult, Suppression,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
+    ProviderScanReport, ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance,
+    ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
