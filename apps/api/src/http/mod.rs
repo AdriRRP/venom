@@ -212,7 +212,7 @@ impl ApiState {
         }
     }
 
-    fn unchanged_snapshot(_service: &ApiApplication) -> SnapshotRefresh {
+    const fn unchanged_snapshot(_service: &ApiApplication) -> SnapshotRefresh {
         SnapshotRefresh::Unchanged
     }
 

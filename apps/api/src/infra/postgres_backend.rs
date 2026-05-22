@@ -71,6 +71,8 @@ pub struct DrainDueCollectionScansResult {
     pub last_error: Option<Box<str>>,
 }
 
+type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule)>;
+
 impl PostgresStore {
     /// Open or create the Postgres durable backend and rebuild in-memory state.
     ///
@@ -1793,11 +1795,7 @@ impl PostgresStore {
         &self,
         now_unix_ms: u64,
         max_collections: usize,
-    ) -> (
-        Vec<DueCollectionScan>,
-        Vec<(Box<str>, venom_domain::CollectionScanSchedule)>,
-        usize,
-    ) {
+    ) -> (Vec<DueCollectionScan>, DueCollectionScanRows, usize) {
         let due_scans = CollectionScanScheduler::new(self.ingestion.inventory())
             .collect_due(now_unix_ms, max_collections);
         let schedule_rows = Self::build_due_schedule_rows(self.ingestion.inventory(), &due_scans);
