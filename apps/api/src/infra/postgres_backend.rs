@@ -1,5 +1,5 @@
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,8 +11,9 @@ use venom_domain::findings::{
     BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
     FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    ProviderScanReport, ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance,
-    ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
+    ProviderScanReport, ReleaseBoard, ReopenFindingChange, ReopenFindingResult,
+    ReportedFinding, RiskAcceptance, ScanRequest, SuppressFindingChange,
+    SuppressFindingResult, Suppression, build_release_board,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -34,6 +35,7 @@ use venom_domain::inventory::{
     RegisterComponentTagResult, RegisterContextProfileChange, RegisterContextProfileResult,
 };
 use venom_domain::operations::{SystemEvent, SystemEventKind};
+use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
     RunNextScanResult, ScanCommandStatus, ScanPlanner,
@@ -48,12 +50,13 @@ pub struct PostgresStore {
     read_model: FindingReadModel,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
+    release_board_snapshot_cache: Arc<ReleaseBoard>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
-    system_events: VecDeque<SystemEvent>,
-    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
+    system_event_index: SystemEventQueryIndex,
+    system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
 
@@ -90,12 +93,16 @@ impl PostgresStore {
             read_model: FindingReadModel::new(),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
+            release_board_snapshot_cache: Arc::new(build_release_board(
+                &ComponentInventory::default(),
+                &FindingReadModel::new(),
+            )),
             integration_runtime_config: None,
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: Vec::new(),
-            system_events: VecDeque::new(),
-            system_events_snapshot_cache: Arc::new(Vec::new()),
+            system_event_index: SystemEventQueryIndex::new(),
+            system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         };
         backend.init_schema().await?;
@@ -768,20 +775,14 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let findings = self
+        let (targeted, changed) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            })
-            .collect::<Vec<_>>();
+            });
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -844,20 +845,14 @@ impl PostgresStore {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
-        let findings = self
+        let (targeted, changed) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            })
-            .collect::<Vec<_>>();
+            });
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -1031,20 +1026,14 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let findings = self
+        let (targeted, changed_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed_findings = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            })
-            .collect::<Vec<_>>();
+            });
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
@@ -1108,20 +1097,14 @@ impl PostgresStore {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
-        let findings = self
+        let (targeted, changed) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            })
-            .collect::<Vec<_>>();
+            });
 
         let suppressed = changed.len();
         if suppressed > 0 {
@@ -1184,15 +1167,11 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let findings = self
+        let (targeted, reopened_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let reopened_findings = findings
-            .into_iter()
-            .filter(|finding| self.governance.decision(finding).is_some())
-            .collect::<Vec<_>>();
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+                self.governance.decision(finding).is_some()
+            });
 
         let reopened = reopened_findings.len();
         if reopened > 0 {
@@ -1258,17 +1237,23 @@ impl PostgresStore {
     #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
-        self.system_events_snapshot_cache.as_ref().clone()
+        self.system_event_index_snapshot_cache
+            .query(
+                &venom_domain::operations::SystemEventsQuery::new().with_limit(
+                    venom_domain::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT,
+                ),
+            )
+            .events
     }
 
     #[must_use]
-    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
-        Arc::clone(&self.system_events_snapshot_cache)
+    pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
+        Arc::clone(&self.system_event_index_snapshot_cache)
     }
 
     #[must_use]
-    pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
-        &self.system_events
+    pub fn release_board_snapshot_arc(&self) -> Arc<ReleaseBoard> {
+        Arc::clone(&self.release_board_snapshot_cache)
     }
 
     #[must_use]
@@ -2763,7 +2748,7 @@ impl PostgresStore {
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
-        self.system_events.clear();
+        self.system_event_index = SystemEventQueryIndex::new();
 
         self.load_components().await?;
         self.load_context_profiles().await?;
@@ -2785,7 +2770,7 @@ impl PostgresStore {
         self.load_system_events().await?;
         self.refresh_read_snapshot_caches();
         self.refresh_command_statuses_snapshot_cache();
-        self.refresh_system_events_snapshot_cache();
+        self.refresh_system_event_index_snapshot_cache();
 
         Ok(())
     }
@@ -3416,40 +3401,42 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres system events load failed: {error}"))?;
 
-        self.system_events =
-            rows.into_iter()
-                .map(
-                    |(
-                        event_id,
-                        occurred_at_unix_ms,
-                        _category,
-                        kind,
-                        collection_key,
-                        component_key,
-                        command_id,
-                        integration_event_id,
-                        finding_count,
+        let events = rows
+            .into_iter()
+            .map(
+                |(
+                    event_id,
+                    occurred_at_unix_ms,
+                    _category,
+                    kind,
+                    collection_key,
+                    component_key,
+                    command_id,
+                    integration_event_id,
+                    finding_count,
+                    retryable,
+                    detail,
+                )| {
+                    Ok(SystemEvent {
+                        event_id: event_id.into_boxed_str(),
+                        occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
+                            .map_err(|_| "negative system event timestamp".to_owned())?,
+                        kind: parse_system_event_kind(&kind)?,
+                        collection_key: collection_key.map(String::into_boxed_str),
+                        component_key: component_key.map(String::into_boxed_str),
+                        command_id: command_id.map(String::into_boxed_str),
+                        integration_event_id: integration_event_id.map(String::into_boxed_str),
+                        finding_count: finding_count
+                            .map(u32::try_from)
+                            .transpose()
+                            .map_err(|_| "system event finding count out of range".to_owned())?,
                         retryable,
-                        detail,
-                    )| {
-                        Ok(SystemEvent {
-                            event_id: event_id.into_boxed_str(),
-                            occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
-                                .map_err(|_| "negative system event timestamp".to_owned())?,
-                            kind: parse_system_event_kind(&kind)?,
-                            collection_key: collection_key.map(String::into_boxed_str),
-                            component_key: component_key.map(String::into_boxed_str),
-                            command_id: command_id.map(String::into_boxed_str),
-                            integration_event_id: integration_event_id.map(String::into_boxed_str),
-                            finding_count: finding_count.map(u32::try_from).transpose().map_err(
-                                |_| "system event finding count out of range".to_owned(),
-                            )?,
-                            retryable,
-                            detail: detail.map(String::into_boxed_str),
-                        })
-                    },
-                )
-                .collect::<Result<VecDeque<_>, String>>()?;
+                        detail: detail.map(String::into_boxed_str),
+                    })
+                },
+            )
+            .collect::<Result<Vec<_>, String>>()?;
+        self.system_event_index = SystemEventQueryIndex::from_newest_first(events.iter());
         Ok(())
     }
 
@@ -3464,24 +3451,22 @@ impl PostgresStore {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_events.push_front(event);
+        self.system_event_index.push_newest(event);
         self.refresh_read_snapshot_caches();
-        self.refresh_system_events_snapshot_cache();
+        self.refresh_system_event_index_snapshot_cache();
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
         self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
         self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+        self.release_board_snapshot_cache = Arc::new(build_release_board(
+            self.ingestion.inventory(),
+            &self.read_model,
+        ));
     }
 
-    fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(
-            self.system_events
-                .iter()
-                .take(venom_domain::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-        );
+    fn refresh_system_event_index_snapshot_cache(&mut self) {
+        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 
     fn refresh_command_statuses_snapshot_cache(&mut self) {

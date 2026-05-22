@@ -13,7 +13,7 @@ use venom_domain::findings::{
     FindingGovernanceState, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseBoard,
     ReleaseDashboard, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression, build_release_board,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
     build_release_dashboard, contextualize_active_findings,
     contextualize_collection_active_findings, query_collection_governance_overview,
 };
@@ -30,6 +30,7 @@ use venom_domain::inventory::{
 use venom_domain::operations::{
     SystemEvent, SystemEventCategory, SystemEventsPage, SystemEventsQuery,
 };
+use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -57,7 +58,7 @@ impl std::error::Error for ApiApplicationError {}
 pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
-    system_events: Arc<Vec<SystemEvent>>,
+    system_event_index: Arc<SystemEventQueryIndex>,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     release_board: Arc<ReleaseBoard>,
 }
@@ -67,49 +68,58 @@ impl ApiReadSnapshot {
     pub fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
-        system_events: Arc<Vec<SystemEvent>>,
+        system_event_index: Arc<SystemEventQueryIndex>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        release_board: Arc<ReleaseBoard>,
     ) -> Self {
-        let release_board = Arc::new(build_release_board(&inventory, &read_model));
         Self {
             inventory,
             read_model,
-            system_events,
+            system_event_index,
             command_statuses,
             release_board,
         }
     }
 
     #[must_use]
-    pub fn with_inventory_arc(&self, inventory: Arc<ComponentInventory>) -> Self {
-        let release_board = Arc::new(build_release_board(&inventory, &self.read_model));
+    pub fn with_inventory_and_release_board_arcs(
+        &self,
+        inventory: Arc<ComponentInventory>,
+        release_board: Arc<ReleaseBoard>,
+    ) -> Self {
         Self {
             inventory,
             read_model: Arc::clone(&self.read_model),
-            system_events: Arc::clone(&self.system_events),
+            system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
             release_board,
         }
     }
 
     #[must_use]
-    pub fn with_read_model_arc(&self, read_model: Arc<FindingReadModel>) -> Self {
-        let release_board = Arc::new(build_release_board(&self.inventory, &read_model));
+    pub fn with_read_model_and_release_board_arcs(
+        &self,
+        read_model: Arc<FindingReadModel>,
+        release_board: Arc<ReleaseBoard>,
+    ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model,
-            system_events: Arc::clone(&self.system_events),
+            system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
             release_board,
         }
     }
 
     #[must_use]
-    pub fn with_system_events_arc(&self, system_events: Arc<Vec<SystemEvent>>) -> Self {
+    pub fn with_system_event_index_arc(
+        &self,
+        system_event_index: Arc<SystemEventQueryIndex>,
+    ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
-            system_events,
+            system_event_index,
             command_statuses: Arc::clone(&self.command_statuses),
             release_board: Arc::clone(&self.release_board),
         }
@@ -123,10 +133,26 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
-            system_events: Arc::clone(&self.system_events),
+            system_event_index: Arc::clone(&self.system_event_index),
             command_statuses,
             release_board: Arc::clone(&self.release_board),
         }
+    }
+
+    /// Query the current system-event trace from the indexed read-side snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the request is invalid.
+    pub fn list_system_events(
+        &self,
+        request: &ListSystemEventsRequest,
+    ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
+        let query = build_system_events_query(request)?;
+        let category = query.category.map(|value| value.as_str().to_owned());
+        let mut response = ListSystemEventsResponse::from_page(self.system_event_index.query(&query));
+        response.category = category;
+        Ok(response)
     }
 
     /// Query the currently active findings for one managed component and artifact.
@@ -446,17 +472,19 @@ impl ApiApplication {
             ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
-                Arc::new(merge_system_events(
-                    local.state.system_events_snapshot_arc().as_ref(),
-                    local.runtime.system_events_snapshot_arc().as_ref(),
+                Arc::new(SystemEventQueryIndex::merged(
+                    local.state.system_event_index_snapshot_arc().as_ref(),
+                    local.runtime.system_event_index_snapshot_arc().as_ref(),
                 )),
                 local.runtime.command_statuses_snapshot_arc(),
+                local.state.release_board_snapshot_arc(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
-                postgres.system_events_snapshot_arc(),
+                postgres.system_event_index_snapshot_arc(),
                 postgres.command_statuses_snapshot_arc(),
+                postgres.release_board_snapshot_arc(),
             ),
         }
     }
@@ -478,13 +506,13 @@ impl ApiApplication {
     }
 
     #[must_use]
-    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
+    pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         match &self.backend {
-            ApiStore::Local(local) => Arc::new(merge_system_events(
-                local.state.system_events_snapshot_arc().as_ref(),
-                local.runtime.system_events_snapshot_arc().as_ref(),
+            ApiStore::Local(local) => Arc::new(SystemEventQueryIndex::merged(
+                local.state.system_event_index_snapshot_arc().as_ref(),
+                local.runtime.system_event_index_snapshot_arc().as_ref(),
             )),
-            ApiStore::Postgres(postgres) => postgres.system_events_snapshot_arc(),
+            ApiStore::Postgres(postgres) => postgres.system_event_index_snapshot_arc(),
         }
     }
 
@@ -496,33 +524,12 @@ impl ApiApplication {
         }
     }
 
-    pub fn list_system_events(
-        &self,
-        request: &ListSystemEventsRequest,
-    ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
-        let query = build_system_events_query(request)?;
-        let category = query.category.map(|value| value.as_str().to_owned());
-        let page = match &self.backend {
-            ApiStore::Local(local) => {
-                let merged = merge_system_event_queues(
-                    local.state.system_events(),
-                    local.runtime.system_events(),
-                );
-                venom_domain::operations::system_event_trace::query_system_events(
-                    merged.iter(),
-                    &query,
-                )
-            }
-            ApiStore::Postgres(postgres) => {
-                venom_domain::operations::system_event_trace::query_system_events(
-                    postgres.system_events().iter(),
-                    &query,
-                )
-            }
-        };
-        let mut response = ListSystemEventsResponse::from_page(page);
-        response.category = category;
-        Ok(response)
+    #[must_use]
+    pub fn release_board_snapshot_arc(&self) -> Arc<ReleaseBoard> {
+        match &self.backend {
+            ApiStore::Local(local) => local.state.release_board_snapshot_arc(),
+            ApiStore::Postgres(postgres) => postgres.release_board_snapshot_arc(),
+        }
     }
 
     /// Register one managed component through the application boundary.
@@ -2747,6 +2754,7 @@ pub struct ActiveFindingItem {
     pub contextual_risk: String,
     pub contextual_posture: String,
     pub contextual_rule: String,
+    pub contextual_factors: Vec<String>,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2771,6 +2779,11 @@ impl ActiveFindingItem {
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             contextual_posture: value.contextual_posture.into(),
             contextual_rule: value.contextual_rule.into(),
+            contextual_factors: value
+                .contextual_factors
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -2845,6 +2858,7 @@ pub struct CollectionActiveFindingItem {
     pub contextual_risk: String,
     pub contextual_posture: String,
     pub contextual_rule: String,
+    pub contextual_factors: Vec<String>,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2869,6 +2883,11 @@ impl CollectionActiveFindingItem {
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             contextual_posture: value.contextual_posture.into(),
             contextual_rule: value.contextual_rule.into(),
+            contextual_factors: value
+                .contextual_factors
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -3282,37 +3301,6 @@ fn parse_system_event_category(value: &str) -> Result<SystemEventCategory, ApiAp
             "unsupported system event category: {value}"
         ))),
     }
-}
-
-fn merge_system_events(left: &[SystemEvent], right: &[SystemEvent]) -> Vec<SystemEvent> {
-    let mut merged = left
-        .iter()
-        .cloned()
-        .chain(right.iter().cloned())
-        .collect::<Vec<_>>();
-    merged.sort_by(|a, b| {
-        b.occurred_at_unix_ms
-            .cmp(&a.occurred_at_unix_ms)
-            .then_with(|| b.event_id.cmp(&a.event_id))
-    });
-    merged
-}
-
-fn merge_system_event_queues(
-    left: &std::collections::VecDeque<SystemEvent>,
-    right: &std::collections::VecDeque<SystemEvent>,
-) -> Vec<SystemEvent> {
-    let mut merged = left
-        .iter()
-        .cloned()
-        .chain(right.iter().cloned())
-        .collect::<Vec<_>>();
-    merged.sort_by(|a, b| {
-        b.occurred_at_unix_ms
-            .cmp(&a.occurred_at_unix_ms)
-            .then_with(|| b.event_id.cmp(&a.event_id))
-    });
-    merged
 }
 
 fn parse_governance_state(value: &str) -> Result<FindingGovernanceState, ApiApplicationError> {

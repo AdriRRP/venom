@@ -407,6 +407,24 @@ impl FindingReadModel {
         findings
     }
 
+    #[must_use]
+    pub fn collect_bulk_governance_finding_refs_matching(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        query: &BulkGovernanceQuery,
+        mut keep: impl FnMut(&FindingRef) -> bool,
+    ) -> (usize, Vec<FindingRef>) {
+        let mut targeted = 0;
+        let mut findings = Vec::new();
+        self.visit_bulk_governance_finding_refs(scope, query, |finding| {
+            targeted += 1;
+            if keep(&finding) {
+                findings.push(finding);
+            }
+        });
+        (targeted, findings)
+    }
+
     fn collect_filtered_scoped_active_findings(
         &self,
         scope: &[CollectionScopedArtifact],

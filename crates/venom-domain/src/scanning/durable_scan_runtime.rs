@@ -1,5 +1,6 @@
 use crate::durable_state::StoredProviderScanReport;
 use crate::findings::finding_provider_contract::validate_provider_scan_report;
+use crate::operations::system_event_trace::SystemEventQueryIndex;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, PendingIntegrationEvent,
@@ -26,9 +27,9 @@ pub struct ScanCommandQueue {
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
-    system_events: VecDeque<SystemEvent>,
+    system_event_index: SystemEventQueryIndex,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
-    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
+    system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
 }
 
 impl ScanCommandQueue {
@@ -54,9 +55,9 @@ impl ScanCommandQueue {
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: VecDeque::new(),
-            system_events: VecDeque::new(),
+            system_event_index: SystemEventQueryIndex::new(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
-            system_events_snapshot_cache: Arc::new(Vec::new()),
+            system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
         };
         runtime.rebuild_from_history()?;
         Ok(runtime)
@@ -177,13 +178,8 @@ impl ScanCommandQueue {
     }
 
     #[must_use]
-    pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
-        &self.system_events
-    }
-
-    #[must_use]
-    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
-        Arc::clone(&self.system_events_snapshot_cache)
+    pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
+        Arc::clone(&self.system_event_index_snapshot_cache)
     }
 
     fn find_collection_batch(
@@ -210,7 +206,7 @@ impl ScanCommandQueue {
 
     #[must_use]
     pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        crate::operations::system_event_trace::query_system_events(self.system_events.iter(), query)
+        self.system_event_index.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.
@@ -568,7 +564,7 @@ impl ScanCommandQueue {
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
-        self.system_events.clear();
+        self.system_event_index = SystemEventQueryIndex::new();
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(ScanCommandQueueError::Io)?;
@@ -585,7 +581,7 @@ impl ScanCommandQueue {
         }
 
         self.refresh_command_statuses_snapshot_cache();
-        self.refresh_system_events_snapshot_cache();
+        self.refresh_system_event_index_snapshot_cache();
 
         Ok(())
     }
@@ -958,8 +954,8 @@ impl ScanCommandQueue {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_events.push_front(event);
-        self.refresh_system_events_snapshot_cache();
+        self.system_event_index.push_newest(event);
+        self.refresh_system_event_index_snapshot_cache();
     }
 
     fn apply_enqueued_batch(
@@ -999,14 +995,8 @@ impl ScanCommandQueue {
         self.refresh_command_statuses_snapshot_cache();
     }
 
-    fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(
-            self.system_events
-                .iter()
-                .take(crate::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-        );
+    fn refresh_system_event_index_snapshot_cache(&mut self) {
+        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 
     fn refresh_command_statuses_snapshot_cache(&mut self) {
