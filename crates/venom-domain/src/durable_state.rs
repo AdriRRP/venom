@@ -10,10 +10,10 @@ use crate::{
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
     ConfigureProviderResult, ContextProfileRegistration, EvidenceFreshness, FindingChangeSet,
-    FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel, FindingRef,
-    IntegrationEventPublicationFailure, IntegrationEventPublisher, IntegrationRuntimeConfig,
-    MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, PackageCoordinate,
-    PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
+    FindingDecision, FindingGovernance, FindingIngestion, FindingIngestionError, FindingReadModel,
+    FindingRef, IntegrationEventPublicationFailure, IntegrationEventPublisher,
+    IntegrationRuntimeConfig, MaterializeCollectionSourceChange, MaterializeCollectionSourceResult,
+    PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, PublishIntegrationEventsResult,
     RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
     RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
@@ -764,29 +764,35 @@ impl DurableState {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
-            if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
-                changed_findings.push(StoredFindingRef::from(finding));
-            }
-        }
+        let changed_findings = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
+                )
+            })
+            .map(StoredFindingRef::from)
+            .collect::<Vec<_>>();
 
         let accepted = changed_findings.len();
         if accepted > 0 {
             let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingsRiskAccepted {
                 collection_key: collection_key.into(),
-                findings: changed_findings,
+                findings: changed_findings.clone(),
                 acceptance: acceptance.clone(),
                 occurred_at_unix_ms,
             })?;
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in changed_findings
+                .iter()
+                .cloned()
+                .map(StoredFindingRef::into_domain)
+            {
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
+                self.read_model.accept_risk(finding, acceptance.clone());
+            }
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-risk-accepted-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -834,29 +840,35 @@ impl DurableState {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
-            if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
-                changed_findings.push(StoredFindingRef::from(finding));
-            }
-        }
+        let changed_findings = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
+                )
+            })
+            .map(StoredFindingRef::from)
+            .collect::<Vec<_>>();
 
         let accepted = changed_findings.len();
         if accepted > 0 {
             let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::TagFindingsRiskAccepted {
                 tag_key: tag_key.into(),
-                findings: changed_findings,
+                findings: changed_findings.clone(),
                 acceptance: acceptance.clone(),
                 occurred_at_unix_ms,
             })?;
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in changed_findings
+                .iter()
+                .cloned()
+                .map(StoredFindingRef::into_domain)
+            {
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
+                self.read_model.accept_risk(finding, acceptance.clone());
+            }
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-risk-accepted-live-{tag_key}-{occurred_at_unix_ms}"
@@ -1003,29 +1015,35 @@ impl DurableState {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
-            if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.clone(), suppression.clone());
-                changed_findings.push(StoredFindingRef::from(finding));
-            }
-        }
+        let changed_findings = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::Suppressed(existing)) if existing == &suppression
+                )
+            })
+            .map(StoredFindingRef::from)
+            .collect::<Vec<_>>();
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
             let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingsSuppressed {
                 collection_key: collection_key.into(),
-                findings: changed_findings,
+                findings: changed_findings.clone(),
                 suppression: suppression.clone(),
                 occurred_at_unix_ms,
             })?;
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in changed_findings
+                .iter()
+                .cloned()
+                .map(StoredFindingRef::into_domain)
+            {
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
+                self.read_model.suppress(finding, suppression.clone());
+            }
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-suppressed-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -1073,29 +1091,35 @@ impl DurableState {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
-            if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.clone(), suppression.clone());
-                changed_findings.push(StoredFindingRef::from(finding));
-            }
-        }
+        let changed_findings = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::Suppressed(existing)) if existing == &suppression
+                )
+            })
+            .map(StoredFindingRef::from)
+            .collect::<Vec<_>>();
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
             let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::TagFindingsSuppressed {
                 tag_key: tag_key.into(),
-                findings: changed_findings,
+                findings: changed_findings.clone(),
                 suppression: suppression.clone(),
                 occurred_at_unix_ms,
             })?;
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in changed_findings
+                .iter()
+                .cloned()
+                .map(StoredFindingRef::into_domain)
+            {
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
+                self.read_model.suppress(finding, suppression.clone());
+            }
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-suppressed-live-{tag_key}-{occurred_at_unix_ms}"
@@ -1142,28 +1166,28 @@ impl DurableState {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut reopened_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.reopen(&finding);
-            if result.change == ReopenFindingChange::Reopened {
-                candidate_read_model.reopen(&finding);
-                reopened_findings.push(StoredFindingRef::from(finding));
-            }
-        }
+        let reopened_findings = findings
+            .into_iter()
+            .filter(|finding| self.governance.decision(finding).is_some())
+            .map(StoredFindingRef::from)
+            .collect::<Vec<_>>();
 
         let reopened = reopened_findings.len();
         if reopened > 0 {
             let occurred_at_unix_ms = current_unix_millis()?;
             self.append_event(&DurableEvent::FindingsReopened {
                 collection_key: collection_key.into(),
-                findings: reopened_findings,
+                findings: reopened_findings.clone(),
                 occurred_at_unix_ms,
             })?;
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in reopened_findings
+                .iter()
+                .cloned()
+                .map(StoredFindingRef::into_domain)
+            {
+                self.governance.reopen(&finding);
+                self.read_model.reopen(&finding);
+            }
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-reopened-many-live-{collection_key}-{occurred_at_unix_ms}"
