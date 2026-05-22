@@ -62,6 +62,7 @@ pub struct ContextualActiveFindingProjection {
     pub contextual_risk: ContextualRiskLevel,
     pub contextual_posture: Box<str>,
     pub contextual_rule: Box<str>,
+    pub contextual_factors: Vec<Box<str>>,
     pub context_profile_key: Option<Box<str>>,
     pub context_profile_name: Option<Box<str>>,
     pub component_context_profile: Option<ContextProfileRef>,
@@ -91,6 +92,9 @@ impl ContextualActiveFindingProjection {
             finding.severity,
             effective_context.as_ref().map(|context| &context.values),
         );
+        let contextual_factors = effective_context
+            .as_ref()
+            .map_or_else(Vec::new, |context| contextual_factor_labels(context.values));
         let singular_profile = effective_context
             .as_ref()
             .and_then(EffectiveContextProfile::singular_profile)
@@ -101,6 +105,7 @@ impl ContextualActiveFindingProjection {
             contextual_risk,
             contextual_posture: posture.as_str().into(),
             contextual_rule: contextual_rule.into(),
+            contextual_factors,
             context_profile_key: singular_profile
                 .as_ref()
                 .map(|profile| profile.profile_key.clone()),
@@ -118,6 +123,26 @@ impl ContextualActiveFindingProjection {
             governance_reason: finding.governance_reason,
             governance_until_unix_ms: finding.governance_until_unix_ms,
         }
+    }
+}
+
+fn contextual_factor_labels(values: ContextProfileValues) -> Vec<Box<str>> {
+    let mut factors = Vec::new();
+    push_context_factor(&mut factors, "internet-exposed", values.internet_exposed);
+    push_context_factor(&mut factors, "production", values.production);
+    push_context_factor(&mut factors, "mission-critical", values.mission_critical);
+    push_context_factor(&mut factors, "vpn-restricted", values.vpn_restricted);
+    push_context_factor(
+        &mut factors,
+        "non-privileged-user",
+        values.non_privileged_user,
+    );
+    factors
+}
+
+fn push_context_factor(factors: &mut Vec<Box<str>>, name: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        factors.push(format!("{name}:{value}").into_boxed_str());
     }
 }
 

@@ -87,6 +87,21 @@ Completed:
 32. `W120-contextual-risk-rule-explainability`
     Expose the exact deterministic contextual-risk rule that produced each
     operator-facing risk result.
+33. `W121-http-mutation-multi-lane`
+    Move `system events` reads fully onto HTTP read snapshots so they no longer
+    contend on the mutable application slot.
+34. `W122-read-side-structural-sharing`
+    Reuse cached release boards and shared read lanes instead of rebuilding
+    those projections inside HTTP snapshots.
+35. `W123-bounded-event-retention-and-indexed-querying`
+    Replace in-memory `system events` queues with a bounded query index that
+    preserves truthful totals and recent-category windows.
+36. `W124-bulk-cohort-stream-compaction`
+    Compute bulk-governance cohorts in one pass and stop materializing full
+    matched vectors before filtering for actual state changes.
+37. `W125-context-factor-explainability`
+    Expose the exact effective context factors that shaped each deterministic
+    contextual-risk result.
 
 ## Exit condition
 

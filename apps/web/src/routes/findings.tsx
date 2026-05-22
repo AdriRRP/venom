@@ -173,6 +173,7 @@ function contextLabel(finding: {
 	context_profile_name: string | null;
 	contextual_posture?: string;
 	contextual_rule?: string;
+	contextual_factors?: string[];
 	component_context_profile?: { name: string } | null;
 	collection_context_profile?: { name: string } | null;
 	tag_context_profiles?: Array<{ name: string }>;
@@ -184,7 +185,10 @@ function contextLabel(finding: {
 			: `posture:${finding.contextual_posture}`;
 	const rule =
 		finding.contextual_rule == null ? null : `rule:${finding.contextual_rule}`;
-	const semantics = [posture, rule].filter(
+	const factors = (finding.contextual_factors ?? []).map(
+		(factor) => `factor:${factor}`,
+	);
+	const semantics = [posture, rule, ...factors].filter(
 		(value): value is string => value != null,
 	);
 	const detail = semantics.length === 0 ? null : semantics.join(", ");

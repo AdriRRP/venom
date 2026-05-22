@@ -152,6 +152,153 @@ pub struct SystemEventsPage {
     pub events: Vec<SystemEvent>,
 }
 
+/// One bounded, truthful query index over operator-facing system events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemEventQueryIndex {
+    total: usize,
+    scheduler_total: usize,
+    command_total: usize,
+    governance_total: usize,
+    publication_total: usize,
+    recent_events: Vec<SystemEvent>,
+    recent_scheduler_events: Vec<SystemEvent>,
+    recent_command_events: Vec<SystemEvent>,
+    recent_governance_events: Vec<SystemEvent>,
+    recent_publication_events: Vec<SystemEvent>,
+}
+
+impl Default for SystemEventQueryIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SystemEventQueryIndex {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            total: 0,
+            scheduler_total: 0,
+            command_total: 0,
+            governance_total: 0,
+            publication_total: 0,
+            recent_events: Vec::new(),
+            recent_scheduler_events: Vec::new(),
+            recent_command_events: Vec::new(),
+            recent_governance_events: Vec::new(),
+            recent_publication_events: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_newest_first<'a>(events: impl IntoIterator<Item = &'a SystemEvent>) -> Self {
+        let mut index = Self::new();
+        for event in events {
+            index.push_newest(event.clone());
+        }
+        index
+    }
+
+    pub fn push_newest(&mut self, event: SystemEvent) {
+        self.total += 1;
+        match event.category() {
+            SystemEventCategory::Scheduler => {
+                self.scheduler_total += 1;
+                push_bounded(&mut self.recent_scheduler_events, event.clone());
+            }
+            SystemEventCategory::Command => {
+                self.command_total += 1;
+                push_bounded(&mut self.recent_command_events, event.clone());
+            }
+            SystemEventCategory::Governance => {
+                self.governance_total += 1;
+                push_bounded(&mut self.recent_governance_events, event.clone());
+            }
+            SystemEventCategory::Publication => {
+                self.publication_total += 1;
+                push_bounded(&mut self.recent_publication_events, event.clone());
+            }
+        }
+        push_bounded(&mut self.recent_events, event);
+    }
+
+    #[must_use]
+    pub fn merged(left: &Self, right: &Self) -> Self {
+        Self {
+            total: left.total + right.total,
+            scheduler_total: left.scheduler_total + right.scheduler_total,
+            command_total: left.command_total + right.command_total,
+            governance_total: left.governance_total + right.governance_total,
+            publication_total: left.publication_total + right.publication_total,
+            recent_events: merge_recent_events(&left.recent_events, &right.recent_events),
+            recent_scheduler_events: merge_recent_events(
+                &left.recent_scheduler_events,
+                &right.recent_scheduler_events,
+            ),
+            recent_command_events: merge_recent_events(
+                &left.recent_command_events,
+                &right.recent_command_events,
+            ),
+            recent_governance_events: merge_recent_events(
+                &left.recent_governance_events,
+                &right.recent_governance_events,
+            ),
+            recent_publication_events: merge_recent_events(
+                &left.recent_publication_events,
+                &right.recent_publication_events,
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
+        let limit = query.normalized_limit();
+        let (total, source) = match query.category {
+            None => (self.total, &self.recent_events),
+            Some(SystemEventCategory::Scheduler) => {
+                (self.scheduler_total, &self.recent_scheduler_events)
+            }
+            Some(SystemEventCategory::Command) => (self.command_total, &self.recent_command_events),
+            Some(SystemEventCategory::Governance) => {
+                (self.governance_total, &self.recent_governance_events)
+            }
+            Some(SystemEventCategory::Publication) => {
+                (self.publication_total, &self.recent_publication_events)
+            }
+        };
+
+        let events = source.iter().take(limit).cloned().collect::<Vec<_>>();
+        SystemEventsPage {
+            total,
+            returned: events.len(),
+            limit,
+            events,
+        }
+    }
+}
+
+fn push_bounded(events: &mut Vec<SystemEvent>, event: SystemEvent) {
+    if events.len() == MAX_SYSTEM_EVENTS_LIMIT {
+        events.pop();
+    }
+    events.insert(0, event);
+}
+
+fn merge_recent_events(left: &[SystemEvent], right: &[SystemEvent]) -> Vec<SystemEvent> {
+    let mut merged = left
+        .iter()
+        .cloned()
+        .chain(right.iter().cloned())
+        .collect::<Vec<_>>();
+    merged.sort_by(|a, b| {
+        b.occurred_at_unix_ms
+            .cmp(&a.occurred_at_unix_ms)
+            .then_with(|| b.event_id.cmp(&a.event_id))
+    });
+    merged.truncate(MAX_SYSTEM_EVENTS_LIMIT);
+    merged
+}
+
 #[must_use]
 pub fn query_system_events<'a>(
     events: impl IntoIterator<Item = &'a SystemEvent>,

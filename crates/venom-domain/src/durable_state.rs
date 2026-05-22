@@ -1,3 +1,4 @@
+use crate::operations::system_event_trace::SystemEventQueryIndex;
 use crate::{
     AcceptRiskChange, AcceptRiskResult, AddCollectionComponentChange, AddCollectionComponentResult,
     ArtifactRef, AssignCollectionContextProfileChange, AssignCollectionContextProfileResult,
@@ -45,11 +46,12 @@ pub struct DurableState {
     read_model: FindingReadModel,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
+    release_board_snapshot_cache: Arc<crate::ReleaseBoard>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
-    system_events: VecDeque<SystemEvent>,
-    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
+    system_event_index: SystemEventQueryIndex,
+    system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
 }
 
 impl DurableState {
@@ -77,11 +79,15 @@ impl DurableState {
             read_model: FindingReadModel::default(),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::default()),
+            release_board_snapshot_cache: Arc::new(crate::build_release_board(
+                &ComponentInventory::default(),
+                &FindingReadModel::default(),
+            )),
             integration_runtime_config: None,
             applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
-            system_events: VecDeque::new(),
-            system_events_snapshot_cache: Arc::new(Vec::new()),
+            system_event_index: SystemEventQueryIndex::new(),
+            system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
         };
         state.rebuild_from_history()?;
         Ok(state)
@@ -108,6 +114,11 @@ impl DurableState {
     }
 
     #[must_use]
+    pub fn release_board_snapshot_arc(&self) -> Arc<crate::ReleaseBoard> {
+        Arc::clone(&self.release_board_snapshot_cache)
+    }
+
+    #[must_use]
     pub const fn governance(&self) -> &FindingGovernance {
         &self.governance
     }
@@ -123,18 +134,13 @@ impl DurableState {
     }
 
     #[must_use]
-    pub const fn system_events(&self) -> &VecDeque<SystemEvent> {
-        &self.system_events
-    }
-
-    #[must_use]
-    pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
-        Arc::clone(&self.system_events_snapshot_cache)
+    pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
+        Arc::clone(&self.system_event_index_snapshot_cache)
     }
 
     #[must_use]
     pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        crate::operations::system_event_trace::query_system_events(self.system_events.iter(), query)
+        self.system_event_index.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.
@@ -797,19 +803,16 @@ impl DurableState {
                     format!("unknown collection: {collection_key}").into_boxed_str(),
                 )
             })?;
-        let findings = self
+        let (targeted, changed_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed_findings = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            })
+            });
+        let changed_findings = changed_findings
+            .into_iter()
             .map(StoredFindingRef::from)
             .collect::<Vec<_>>();
 
@@ -873,19 +876,16 @@ impl DurableState {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
-        let findings = self
+        let (targeted, changed_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed_findings = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            })
+            });
+        let changed_findings = changed_findings
+            .into_iter()
             .map(StoredFindingRef::from)
             .collect::<Vec<_>>();
 
@@ -1050,19 +1050,16 @@ impl DurableState {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
-        let findings = self
+        let (targeted, changed_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed_findings = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            })
+            });
+        let changed_findings = changed_findings
+            .into_iter()
             .map(StoredFindingRef::from)
             .collect::<Vec<_>>();
 
@@ -1126,19 +1123,16 @@ impl DurableState {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
-        let findings = self
+        let (targeted, changed_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let changed_findings = findings
-            .into_iter()
-            .filter(|finding| {
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            })
+            });
+        let changed_findings = changed_findings
+            .into_iter()
             .map(StoredFindingRef::from)
             .collect::<Vec<_>>();
 
@@ -1201,14 +1195,13 @@ impl DurableState {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
-        let findings = self
+        let (targeted, reopened_findings) = self
             .read_model
-            .collect_bulk_governance_finding_refs(&scope, query);
-        let targeted = findings.len();
-
-        let reopened_findings = findings
+            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+                self.governance.decision(finding).is_some()
+            });
+        let reopened_findings = reopened_findings
             .into_iter()
-            .filter(|finding| self.governance.decision(finding).is_some())
             .map(StoredFindingRef::from)
             .collect::<Vec<_>>();
 
@@ -1261,7 +1254,7 @@ impl DurableState {
         self.integration_runtime_config = None;
         self.applied_scan_commands.clear();
         self.pending_integration_events.clear();
-        self.system_events.clear();
+        self.system_event_index = SystemEventQueryIndex::new();
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(DurableStateError::Io)?;
@@ -1278,7 +1271,7 @@ impl DurableState {
         }
 
         self.refresh_read_snapshot_caches();
-        self.refresh_system_events_snapshot_cache();
+        self.refresh_system_event_index_snapshot_cache();
         Ok(())
     }
 
@@ -2282,24 +2275,22 @@ impl DurableState {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_events.push_front(event);
+        self.system_event_index.push_newest(event);
         self.refresh_read_snapshot_caches();
-        self.refresh_system_events_snapshot_cache();
+        self.refresh_system_event_index_snapshot_cache();
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
         self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
         self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+        self.release_board_snapshot_cache = Arc::new(crate::build_release_board(
+            self.ingestion.inventory(),
+            &self.read_model,
+        ));
     }
 
-    fn refresh_system_events_snapshot_cache(&mut self) {
-        self.system_events_snapshot_cache = Arc::new(
-            self.system_events
-                .iter()
-                .take(crate::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-        );
+    fn refresh_system_event_index_snapshot_cache(&mut self) {
+        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 }
 

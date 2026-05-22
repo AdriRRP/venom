@@ -99,21 +99,27 @@ impl ApiState {
         current: &Arc<ApiReadSnapshot>,
         service: &ApiApplication,
     ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_inventory_arc(service.inventory_snapshot_arc()))
+        Arc::new(current.with_inventory_and_release_board_arcs(
+            service.inventory_snapshot_arc(),
+            service.release_board_snapshot_arc(),
+        ))
     }
 
     fn refresh_read_model_snapshot(
         current: &Arc<ApiReadSnapshot>,
         service: &ApiApplication,
     ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_read_model_arc(service.read_model_snapshot_arc()))
+        Arc::new(current.with_read_model_and_release_board_arcs(
+            service.read_model_snapshot_arc(),
+            service.release_board_snapshot_arc(),
+        ))
     }
 
     fn refresh_system_events_snapshot(
         current: &Arc<ApiReadSnapshot>,
         service: &ApiApplication,
     ) -> Arc<ApiReadSnapshot> {
-        Arc::new(current.with_system_events_arc(service.system_events_snapshot_arc()))
+        Arc::new(current.with_system_event_index_arc(service.system_event_index_snapshot_arc()))
     }
 
     fn refresh_command_status_snapshot(
@@ -139,16 +145,6 @@ impl ApiState {
         *guard = Some(service);
         drop(guard);
         self.inner.service_ready.notify_waiters();
-    }
-
-    async fn inspect<T, F>(&self, operation: F) -> T
-    where
-        F: FnOnce(&ApiApplication) -> T,
-    {
-        let service = self.take_service().await;
-        let result = operation(&service);
-        self.restore_service(service).await;
-        result
     }
 
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
@@ -314,11 +310,7 @@ async fn list_system_events(
         category: request.category,
         limit: request.limit,
     };
-    let response = state
-        .inspect(|service| service.list_system_events(&request))
-        .await
-        .map_err(ApiError::from)?;
-    Ok(Json(response))
+    Ok(Json(state.read_snapshot().list_system_events(&request)?))
 }
 
 async fn register_component(

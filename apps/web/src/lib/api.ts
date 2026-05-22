@@ -17,6 +17,7 @@ export type ActiveFinding = {
 	contextual_risk: string;
 	contextual_posture?: string;
 	contextual_rule?: string;
+	contextual_factors?: string[];
 	context_profile_key: string | null;
 	context_profile_name: string | null;
 	component_context_profile?: ContextProfileRef | null;
