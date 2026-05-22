@@ -7,7 +7,7 @@ Feature: Schedule collection scan
       When VENOM schedules a deterministic collection scan for "release:2026.05" every 60 minutes due at unix ms 1000
       Then the collection scan schedule result is "rejected"
 
-    Scenario: Materialize one due collection scan and advance the next due time
+    Scenario: Plan one due collection scan without mutating the schedule state
       Given a managed component "component:payments-api" named "Payments API" with artifact "registry.example/payments@sha256:111"
       And VENOM creates collection "release:2026.05" named "May Release"
       And VENOM adds component "component:payments-api" to collection "release:2026.05"
@@ -17,7 +17,7 @@ Feature: Schedule collection scan
       And 1 due collection scans are materialized
       And the first due collection scan targets collection "release:2026.05"
       And the first due collection scan has 1 requests
-      And collection "release:2026.05" next due is unix ms 3601500
+      And collection "release:2026.05" next due is unix ms 1000
 
     Scenario: Durable replay preserves one collection scan schedule
       Given no managed components
