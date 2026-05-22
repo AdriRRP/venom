@@ -9,8 +9,8 @@ use venom_domain::findings::finding_provider_contract::{
 use venom_domain::findings::{
     AcceptRiskChange, AcceptRiskResult, ArtifactKind, ArtifactRef, BulkAcceptRiskResult,
     BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
-    FindingChangeSet, FindingGovernance, FindingIngestion, FindingProvider, FindingProviderError,
-    FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport,
+    FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
+    FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef, ProviderScanReport,
     ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
     SuppressFindingChange, SuppressFindingResult, Suppression,
 };
@@ -51,6 +51,8 @@ pub struct PostgresStore {
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
     system_events: VecDeque<SystemEvent>,
+    system_events_snapshot_cache: Arc<Vec<SystemEvent>>,
+    command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +89,8 @@ impl PostgresStore {
             order: Vec::new(),
             pending_integration_events: Vec::new(),
             system_events: VecDeque::new(),
+            system_events_snapshot_cache: Arc::new(Vec::new()),
+            command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         };
         backend.init_schema().await?;
         backend.rebuild().await?;
@@ -747,17 +751,15 @@ impl PostgresStore {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
-            if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
-                changed.push(finding);
-            }
-        }
+        let changed = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
+                )
+            })
+            .collect::<Vec<_>>();
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -789,8 +791,12 @@ impl PostgresStore {
                 format!("postgres risk acceptance batch commit failed: {error}")
             })?;
 
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in &changed {
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
+                self.read_model
+                    .accept_risk(finding.clone(), acceptance.clone());
+            }
             self.push_system_event(event);
         }
 
@@ -823,17 +829,15 @@ impl PostgresStore {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
-            if result.change == AcceptRiskChange::Accepted {
-                candidate_read_model.accept_risk(finding.clone(), acceptance.clone());
-                changed.push(finding);
-            }
-        }
+        let changed = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
+                )
+            })
+            .collect::<Vec<_>>();
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -864,8 +868,12 @@ impl PostgresStore {
                 format!("postgres tag risk acceptance batch commit failed: {error}")
             })?;
 
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in &changed {
+                self.governance
+                    .accept_risk(finding.clone(), acceptance.clone());
+                self.read_model
+                    .accept_risk(finding.clone(), acceptance.clone());
+            }
             self.push_system_event(event);
         }
 
@@ -1008,17 +1016,15 @@ impl PostgresStore {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
-            if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.clone(), suppression.clone());
-                changed_findings.push(finding);
-            }
-        }
+        let changed_findings = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::Suppressed(existing)) if existing == &suppression
+                )
+            })
+            .collect::<Vec<_>>();
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
@@ -1051,8 +1057,12 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
 
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in &changed_findings {
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
+                self.read_model
+                    .suppress(finding.clone(), suppression.clone());
+            }
             self.push_system_event(event);
         }
 
@@ -1085,17 +1095,15 @@ impl PostgresStore {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut changed = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.suppress(finding.clone(), suppression.clone());
-            if result.change == SuppressFindingChange::Suppressed {
-                candidate_read_model.suppress(finding.clone(), suppression.clone());
-                changed.push(finding);
-            }
-        }
+        let changed = findings
+            .into_iter()
+            .filter(|finding| {
+                !matches!(
+                    self.governance.decision(finding),
+                    Some(FindingDecision::Suppressed(existing)) if existing == &suppression
+                )
+            })
+            .collect::<Vec<_>>();
 
         let suppressed = changed.len();
         if suppressed > 0 {
@@ -1127,8 +1135,12 @@ impl PostgresStore {
                 format!("postgres tag suppression batch commit failed: {error}")
             })?;
 
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in &changed {
+                self.governance
+                    .suppress(finding.clone(), suppression.clone());
+                self.read_model
+                    .suppress(finding.clone(), suppression.clone());
+            }
             self.push_system_event(event);
         }
 
@@ -1161,17 +1173,10 @@ impl PostgresStore {
             .collect_bulk_governance_finding_refs(&scope, query);
         let targeted = findings.len();
 
-        let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
-        let mut reopened_findings = Vec::new();
-
-        for finding in findings {
-            let result = candidate_governance.reopen(&finding);
-            if result.change == ReopenFindingChange::Reopened {
-                candidate_read_model.reopen(&finding);
-                reopened_findings.push(finding);
-            }
-        }
+        let reopened_findings = findings
+            .into_iter()
+            .filter(|finding| self.governance.decision(finding).is_some())
+            .collect::<Vec<_>>();
 
         let reopened = reopened_findings.len();
         if reopened > 0 {
@@ -1204,8 +1209,10 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
 
-            self.governance = candidate_governance;
-            self.read_model = candidate_read_model;
+            for finding in &reopened_findings {
+                self.governance.reopen(finding);
+                self.read_model.reopen(finding);
+            }
             self.push_system_event(event);
         }
 
@@ -1235,12 +1242,12 @@ impl PostgresStore {
     #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
-        self.system_events.iter().cloned().collect()
+        self.system_events_snapshot_cache.as_ref().clone()
     }
 
     #[must_use]
     pub fn system_events_snapshot_arc(&self) -> Arc<Vec<SystemEvent>> {
-        Arc::new(self.system_events.iter().cloned().collect())
+        Arc::clone(&self.system_events_snapshot_cache)
     }
 
     #[must_use]
@@ -1322,6 +1329,7 @@ impl PostgresStore {
                 status: ScanCommandStatus::Pending,
             },
         );
+        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(event);
         Ok(command_id)
     }
@@ -1390,6 +1398,7 @@ impl PostgresStore {
                 },
             );
         }
+        self.refresh_command_statuses_snapshot_cache();
 
         Ok(command_ids)
     }
@@ -1574,18 +1583,15 @@ impl PostgresStore {
         self.commands.get(command_id).map(|record| record.status)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     #[must_use]
     pub fn command_statuses_snapshot(&self) -> BTreeMap<Box<str>, ScanCommandStatus> {
-        self.commands
-            .iter()
-            .map(|(command_id, record)| (command_id.clone(), record.status))
-            .collect()
+        self.command_statuses_snapshot_cache.as_ref().clone()
     }
 
     #[must_use]
     pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
-        Arc::new(self.command_statuses_snapshot())
+        Arc::clone(&self.command_statuses_snapshot_cache)
     }
 
     #[must_use]
@@ -1841,6 +1847,7 @@ impl PostgresStore {
                 },
             );
         }
+        self.refresh_command_statuses_snapshot_cache();
     }
 
     fn build_due_collection_system_events(
@@ -2066,6 +2073,7 @@ impl PostgresStore {
             .get_mut(completed.command_id.as_ref())
             .expect("completed scan command missing from postgres runtime");
         command.status = ScanCommandStatus::Completed;
+        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(system_event);
     }
 
@@ -2239,6 +2247,7 @@ impl PostgresStore {
             return Err("failed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Failed;
+        self.refresh_command_statuses_snapshot_cache();
         let event = SystemEvent {
             event_id: next_system_event_id("scan-command-failed"),
             occurred_at_unix_ms,
@@ -2746,6 +2755,8 @@ impl PostgresStore {
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
+        self.refresh_command_statuses_snapshot_cache();
+        self.refresh_system_events_snapshot_cache();
 
         Ok(())
     }
@@ -3429,6 +3440,20 @@ impl PostgresStore {
         while self.system_events.len() > 512 {
             self.system_events.pop_back();
         }
+        self.refresh_system_events_snapshot_cache();
+    }
+
+    fn refresh_system_events_snapshot_cache(&mut self) {
+        self.system_events_snapshot_cache = Arc::new(self.system_events.iter().cloned().collect());
+    }
+
+    fn refresh_command_statuses_snapshot_cache(&mut self) {
+        self.command_statuses_snapshot_cache = Arc::new(
+            self.commands
+                .iter()
+                .map(|(command_id, record)| (command_id.clone(), record.status))
+                .collect(),
+        );
     }
 
     async fn insert_system_event(&self, event: &SystemEvent) -> Result<(), String> {
