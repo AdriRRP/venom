@@ -59,12 +59,6 @@ impl<'a> CollectionScanScheduler<'a> {
             };
             let next_due_at_unix_ms =
                 now_unix_ms.saturating_add(cadence_minutes_to_millis(schedule.cadence_minutes));
-            let _ = self.inventory.record_collection_scan_materialization(
-                collection_key.as_ref(),
-                next_due_at_unix_ms,
-                now_unix_ms,
-                u32::try_from(batch.requests.len()).expect("request count should fit u32"),
-            );
             due_scans.push(DueCollectionScan {
                 collection_key,
                 due_at_unix_ms,
@@ -94,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn due_collection_scan_advances_next_due_and_materializes_requests() {
+    fn due_collection_scan_plans_materialization_without_mutating_inventory() {
         let mut inventory = ComponentInventory::default();
         let _ = inventory.register(ComponentRegistration::new(
             "component:payments-api",
@@ -125,26 +119,27 @@ mod tests {
             due[0].requests[0].artifact.identity.as_ref(),
             "registry.example/payments@sha256:111"
         );
+        assert_eq!(due[0].next_due_at_unix_ms, 3_601_500);
         assert_eq!(
             inventory
                 .collection_scan_schedule("release:2026.05")
                 .expect("schedule should remain configured")
                 .next_due_at_unix_ms,
-            3_601_500
+            1_000
         );
         assert_eq!(
             inventory
                 .collection_scan_schedule("release:2026.05")
                 .expect("schedule should remain configured")
                 .last_materialized_at_unix_ms,
-            Some(1_500)
+            None
         );
         assert_eq!(
             inventory
                 .collection_scan_schedule("release:2026.05")
                 .expect("schedule should remain configured")
                 .last_enqueued_commands,
-            Some(1)
+            None
         );
     }
 }
