@@ -533,6 +533,36 @@ impl ApiApplication {
         }
     }
 
+    /// Refresh one Postgres-backed in-memory view when the durable store advanced in another instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the Postgres-backed reload fails.
+    pub async fn refresh_from_remote_if_stale(&mut self) -> Result<bool, ApiApplicationError> {
+        match &mut self.backend {
+            ApiStore::Local(_) => Ok(false),
+            ApiStore::Postgres(postgres) => postgres
+                .refresh_from_remote_if_stale()
+                .await
+                .map_err(ApiApplicationError::State),
+        }
+    }
+
+    /// Mark the current Postgres durable change watermark as already observed locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the Postgres watermark cannot be read.
+    pub async fn mark_remote_change_observed(&mut self) -> Result<(), ApiApplicationError> {
+        match &mut self.backend {
+            ApiStore::Local(_) => Ok(()),
+            ApiStore::Postgres(postgres) => postgres
+                .mark_remote_change_observed()
+                .await
+                .map_err(ApiApplicationError::State),
+        }
+    }
+
     /// Register one managed component through the application boundary.
     ///
     /// # Errors
@@ -2924,6 +2954,7 @@ impl CollectionActiveFindingItem {
 pub struct ContextualFactorProvenanceItem {
     pub factor: String,
     pub source: String,
+    pub identity: String,
 }
 
 impl From<venom_domain::findings::ContextualFactorProvenance> for ContextualFactorProvenanceItem {
@@ -2931,6 +2962,7 @@ impl From<venom_domain::findings::ContextualFactorProvenance> for ContextualFact
         Self {
             factor: value.factor.into(),
             source: value.source.into(),
+            identity: value.identity.into(),
         }
     }
 }
@@ -2966,7 +2998,7 @@ pub struct RequestCollectionScanResponse {
     pub command_ids: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DrainCollectionScanWorkerCommand {
     pub max_collections: Option<usize>,
 }
@@ -3025,7 +3057,7 @@ pub struct RunNextScanResponse {
     pub retryable: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DrainWorkerCommand {
     pub max_commands: Option<usize>,
     #[serde(flatten)]

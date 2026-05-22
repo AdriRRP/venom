@@ -35,7 +35,9 @@ use venom_domain::inventory::{
     RegisterComponentTagResult, RegisterContextProfileChange, RegisterContextProfileResult,
 };
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
-use venom_domain::operations::{SystemEvent, SystemEventKind};
+use venom_domain::operations::{
+    MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory, SystemEventKind,
+};
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
     RunNextScanResult, ScanCommandStatus, ScanPlanner,
@@ -45,6 +47,7 @@ use venom_domain::scanning::{
 pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
+    observed_wal_lsn: Box<str>,
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: FindingReadModel,
@@ -72,6 +75,28 @@ pub struct DrainDueCollectionScansResult {
 }
 
 type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule)>;
+type SystemEventRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<bool>,
+    Option<String>,
+);
+
+#[derive(Default)]
+struct SystemEventTotals {
+    total: usize,
+    scheduler_total: usize,
+    command_total: usize,
+    governance_total: usize,
+    publication_total: usize,
+}
 
 impl PostgresStore {
     /// Open or create the Postgres durable backend and rebuild in-memory state.
@@ -90,6 +115,7 @@ impl PostgresStore {
         let mut backend = Self {
             pool,
             names,
+            observed_wal_lsn: Box::from(""),
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
             read_model: FindingReadModel::new(),
@@ -110,6 +136,30 @@ impl PostgresStore {
         backend.init_schema().await?;
         backend.rebuild().await?;
         Ok(backend)
+    }
+
+    /// Refresh one Postgres-backed in-memory view when another writer advanced the durable store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the WAL watermark cannot be read or rebuild fails.
+    pub async fn refresh_from_remote_if_stale(&mut self) -> Result<bool, String> {
+        let current_wal_lsn = self.current_wal_lsn().await?;
+        if current_wal_lsn == self.observed_wal_lsn {
+            return Ok(false);
+        }
+        self.rebuild().await?;
+        Ok(true)
+    }
+
+    /// Mark the latest Postgres WAL watermark as already observed by this instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the WAL watermark cannot be read.
+    pub async fn mark_remote_change_observed(&mut self) -> Result<(), String> {
+        self.observed_wal_lsn = self.current_wal_lsn().await?;
+        Ok(())
     }
 
     /// Durably register one managed component in Postgres.
@@ -134,7 +184,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres component insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
-            self.refresh_read_snapshot_caches();
+            self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
     }
@@ -169,7 +219,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres context profile insert failed: {error}"))?;
             *self.ingestion.inventory_mut() = candidate_inventory;
-            self.refresh_read_snapshot_caches();
+            self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
     }
@@ -699,7 +749,7 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.refresh_read_snapshot_caches();
+        self.refresh_read_model_and_release_board_snapshot_caches();
         self.pending_integration_events
             .push(pending_integration_event);
         Ok(change_set)
@@ -753,7 +803,7 @@ impl PostgresStore {
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -820,7 +870,7 @@ impl PostgresStore {
                 self.read_model
                     .accept_risk(finding.clone(), acceptance.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -890,7 +940,7 @@ impl PostgresStore {
                 self.read_model
                     .accept_risk(finding.clone(), acceptance.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -950,7 +1000,7 @@ impl PostgresStore {
             candidate_read_model.reopen(&finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1006,7 +1056,7 @@ impl PostgresStore {
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1074,7 +1124,7 @@ impl PostgresStore {
                 self.read_model
                     .suppress(finding.clone(), suppression.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1145,7 +1195,7 @@ impl PostgresStore {
                 self.read_model
                     .suppress(finding.clone(), suppression.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1214,7 +1264,7 @@ impl PostgresStore {
                 self.governance.reopen(finding);
                 self.read_model.reopen(finding);
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
         }
 
@@ -1774,7 +1824,7 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.refresh_read_snapshot_caches();
+        self.refresh_read_model_and_release_board_snapshot_caches();
         let completed = CompletedScanCommand {
             command_id,
             provider_key: report.provider_key,
@@ -2789,8 +2839,17 @@ impl PostgresStore {
         self.refresh_read_snapshot_caches();
         self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_event_index_snapshot_cache();
+        self.observed_wal_lsn = self.current_wal_lsn().await?;
 
         Ok(())
+    }
+
+    async fn current_wal_lsn(&self) -> Result<Box<str>, String> {
+        sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
+            .fetch_one(&self.pool)
+            .await
+            .map(String::into_boxed_str)
+            .map_err(|error| format!("postgres WAL LSN read failed: {error}"))
     }
 
     async fn load_components(&mut self) -> Result<(), String> {
@@ -3392,69 +3451,100 @@ impl PostgresStore {
     }
 
     async fn load_system_events(&mut self) -> Result<(), String> {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                i64,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i32>,
-                Option<bool>,
-                Option<String>,
-            ),
-        >(&format!(
-            concat!(
-                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
-                "command_id, integration_event_id, finding_count, retryable, detail ",
-                "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC"
-            ),
+        let totals = self.load_system_event_totals().await?;
+        let recent_events = self.load_recent_system_events(None).await?;
+        let recent_scheduler_events = self
+            .load_recent_system_events(Some(SystemEventCategory::Scheduler))
+            .await?;
+        let recent_command_events = self
+            .load_recent_system_events(Some(SystemEventCategory::Command))
+            .await?;
+        let recent_governance_events = self
+            .load_recent_system_events(Some(SystemEventCategory::Governance))
+            .await?;
+        let recent_publication_events = self
+            .load_recent_system_events(Some(SystemEventCategory::Publication))
+            .await?;
+
+        self.system_event_index = SystemEventQueryIndex::from_recent_windows(
+            totals.total,
+            totals.scheduler_total,
+            totals.command_total,
+            totals.governance_total,
+            totals.publication_total,
+            recent_events,
+            recent_scheduler_events,
+            recent_command_events,
+            recent_governance_events,
+            recent_publication_events,
+        );
+        Ok(())
+    }
+
+    async fn load_system_event_totals(&self) -> Result<SystemEventTotals, String> {
+        let rows = sqlx::query_as::<_, (String, i64)>(&format!(
+            "SELECT category, COUNT(*)::bigint FROM {} GROUP BY category",
             self.names.system_events
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres system events load failed: {error}"))?;
+        .map_err(|error| format!("postgres system event totals load failed: {error}"))?;
 
-        let events =
-            rows.into_iter()
-                .map(
-                    |(
-                        event_id,
-                        occurred_at_unix_ms,
-                        _category,
-                        kind,
-                        collection_key,
-                        component_key,
-                        command_id,
-                        integration_event_id,
-                        finding_count,
-                        retryable,
-                        detail,
-                    )| {
-                        Ok(SystemEvent {
-                            event_id: event_id.into_boxed_str(),
-                            occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
-                                .map_err(|_| "negative system event timestamp".to_owned())?,
-                            kind: parse_system_event_kind(&kind)?,
-                            collection_key: collection_key.map(String::into_boxed_str),
-                            component_key: component_key.map(String::into_boxed_str),
-                            command_id: command_id.map(String::into_boxed_str),
-                            integration_event_id: integration_event_id.map(String::into_boxed_str),
-                            finding_count: finding_count.map(u32::try_from).transpose().map_err(
-                                |_| "system event finding count out of range".to_owned(),
-                            )?,
-                            retryable,
-                            detail: detail.map(String::into_boxed_str),
-                        })
-                    },
-                )
-                .collect::<Result<Vec<_>, String>>()?;
-        self.system_event_index = SystemEventQueryIndex::from_newest_first(events.iter());
-        Ok(())
+        let mut totals = SystemEventTotals::default();
+        for (category, count) in rows {
+            let count = usize::try_from(count)
+                .map_err(|_| "postgres system event total out of range".to_owned())?;
+            totals.total += count;
+            match category.as_str() {
+                "scheduler" => totals.scheduler_total = count,
+                "command" => totals.command_total = count,
+                "governance" => totals.governance_total = count,
+                "publication" => totals.publication_total = count,
+                _ => {
+                    return Err(format!(
+                        "postgres system events contain unknown category: {category}"
+                    ));
+                }
+            }
+        }
+        Ok(totals)
+    }
+
+    async fn load_recent_system_events(
+        &self,
+        category: Option<SystemEventCategory>,
+    ) -> Result<Vec<SystemEvent>, String> {
+        let rows = if let Some(category) = category {
+            sqlx::query_as::<_, SystemEventRow>(&format!(
+                concat!(
+                    "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                    "command_id, integration_event_id, finding_count, retryable, detail ",
+                    "FROM {} WHERE category = $1 ",
+                    "ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT $2"
+                ),
+                self.names.system_events
+            ))
+            .bind(category.as_str())
+            .bind(i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64"))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("postgres recent system events load failed: {error}"))?
+        } else {
+            sqlx::query_as::<_, SystemEventRow>(&format!(
+                concat!(
+                    "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                    "command_id, integration_event_id, finding_count, retryable, detail ",
+                    "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT $1"
+                ),
+                self.names.system_events
+            ))
+            .bind(i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64"))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("postgres recent system events load failed: {error}"))?
+        };
+
+        rows.into_iter().map(parse_system_event_row).collect()
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {
@@ -3473,8 +3563,30 @@ impl PostgresStore {
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
+        self.refresh_inventory_snapshot_cache();
+        self.refresh_read_model_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_inventory_and_release_board_snapshot_caches(&mut self) {
+        self.refresh_inventory_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_read_model_and_release_board_snapshot_caches(&mut self) {
+        self.refresh_read_model_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_inventory_snapshot_cache(&mut self) {
         self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+    }
+
+    fn refresh_read_model_snapshot_cache(&mut self) {
         self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+    }
+
+    fn refresh_release_board_snapshot_cache(&mut self) {
         self.release_board_snapshot_cache = Arc::new(build_release_board(
             self.ingestion.inventory(),
             &self.read_model,
@@ -3814,6 +3926,41 @@ fn parse_system_event_kind(value: &str) -> Result<SystemEventKind, String> {
         }
         other => Err(format!("unsupported system event kind: {other}")),
     }
+}
+
+fn parse_system_event_row(
+    row: SystemEventRow,
+) -> Result<SystemEvent, String> {
+    let (
+        event_id,
+        occurred_at_unix_ms,
+        _category,
+        kind,
+        collection_key,
+        component_key,
+        command_id,
+        integration_event_id,
+        finding_count,
+        retryable,
+        detail,
+    ) = row;
+
+    Ok(SystemEvent {
+        event_id: event_id.into_boxed_str(),
+        occurred_at_unix_ms: u64::try_from(occurred_at_unix_ms)
+            .map_err(|_| "negative system event timestamp".to_owned())?,
+        kind: parse_system_event_kind(&kind)?,
+        collection_key: collection_key.map(String::into_boxed_str),
+        component_key: component_key.map(String::into_boxed_str),
+        command_id: command_id.map(String::into_boxed_str),
+        integration_event_id: integration_event_id.map(String::into_boxed_str),
+        finding_count: finding_count
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| "system event finding count out of range".to_owned())?,
+        retryable,
+        detail: detail.map(String::into_boxed_str),
+    })
 }
 
 fn parse_freshness(value: &str) -> Result<EvidenceFreshness, String> {

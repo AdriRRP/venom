@@ -257,6 +257,36 @@ impl SystemEventQueryIndex {
     }
 
     #[must_use]
+    pub fn from_recent_windows(
+        total: usize,
+        scheduler_total: usize,
+        command_total: usize,
+        governance_total: usize,
+        publication_total: usize,
+        recent_events: Vec<SystemEvent>,
+        recent_scheduler_events: Vec<SystemEvent>,
+        recent_command_events: Vec<SystemEvent>,
+        recent_governance_events: Vec<SystemEvent>,
+        recent_publication_events: Vec<SystemEvent>,
+    ) -> Self {
+        Self {
+            total,
+            scheduler_total,
+            command_total,
+            governance_total,
+            publication_total,
+            recent_events: recent_events.into_iter().map(Arc::new).collect(),
+            recent_scheduler_events: recent_scheduler_events.into_iter().map(Arc::new).collect(),
+            recent_command_events: recent_command_events.into_iter().map(Arc::new).collect(),
+            recent_governance_events: recent_governance_events.into_iter().map(Arc::new).collect(),
+            recent_publication_events: recent_publication_events
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+        }
+    }
+
+    #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
         let limit = query.normalized_limit();
         let (total, source) = match query.category {

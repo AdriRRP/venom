@@ -192,6 +192,21 @@ impl ApiState {
         self.inner.read_snapshot_rx.borrow().clone()
     }
 
+    async fn read_snapshot_fresh(&self) -> Result<Arc<ApiReadSnapshot>, ApiError> {
+        let mut service = self.take_service().await;
+        let changed = service.refresh_from_remote_if_stale().await?;
+        let next_snapshot = changed.then(|| Arc::new(service.read_snapshot()));
+        self.restore_service(service).await;
+        if let Some(next_snapshot) = next_snapshot {
+            self.inner
+                .read_snapshot_tx
+                .send_replace(Arc::clone(&next_snapshot));
+            Ok(next_snapshot)
+        } else {
+            Ok(self.read_snapshot())
+        }
+    }
+
     fn refresh_inventory_snapshot(service: &ApiApplication) -> SnapshotRefresh {
         SnapshotRefresh::InventoryAndReleaseBoard {
             inventory: service.inventory_snapshot_arc(),
@@ -288,12 +303,181 @@ impl ApiState {
     {
         let mut service = self.take_service().await;
         let result = operation(&mut service).await;
+        if result.is_ok() {
+            service.mark_remote_change_observed().await?;
+        }
         let next_snapshot = refresh(&service);
         self.restore_service(service).await;
         let current_snapshot = self.read_snapshot();
         let next_snapshot = next_snapshot.apply(&current_snapshot);
         self.inner.read_snapshot_tx.send_replace(next_snapshot);
         result
+    }
+
+    async fn drain_worker_until_idle(
+        &self,
+        request: DrainWorkerCommand,
+    ) -> Result<DrainWorkerResponse, ApiError> {
+        let max_commands = request.max_commands.ok_or_else(|| {
+            ApiError::bad_request("max_commands is required")
+        })?;
+        if max_commands == 0 {
+            return Err(ApiError::bad_request("max_commands must be greater than zero"));
+        }
+
+        let mut response = DrainWorkerResponse {
+            outcome: "idle".to_owned(),
+            processed: 0,
+            completed: 0,
+            failed: 0,
+            pending_remaining: 0,
+            last_command_id: None,
+            last_command_status: None,
+            last_error_code: None,
+            last_retryable: None,
+        };
+
+        for _ in 0..max_commands {
+            let step = self
+                .mutate(
+                    |service| {
+                        let request = DrainWorkerCommand {
+                            max_commands: Some(1),
+                            provider: request.provider.clone(),
+                        };
+                        Box::pin(async move {
+                            service.run_worker_until_idle(request).await.map_err(ApiError::from)
+                        })
+                    },
+                    ApiState::refresh_read_model_command_status_and_system_events_snapshot,
+                )
+                .await?;
+            response.outcome = step.outcome.clone();
+            response.pending_remaining = step.pending_remaining;
+            response.last_command_id = step.last_command_id;
+            response.last_command_status = step.last_command_status;
+            response.last_error_code = step.last_error_code;
+            response.last_retryable = step.last_retryable;
+            response.processed += step.processed;
+            response.completed += step.completed;
+            response.failed += step.failed;
+            if matches!(step.outcome.as_str(), "idle" | "drained") {
+                break;
+            }
+        }
+
+        Ok(response)
+    }
+
+    async fn drain_collection_scan_worker_until_idle(
+        &self,
+        request: DrainCollectionScanWorkerCommand,
+    ) -> Result<DrainCollectionScanWorkerResponse, ApiError> {
+        let max_collections = request.max_collections.ok_or_else(|| {
+            ApiError::bad_request("max_collections is required")
+        })?;
+        if max_collections == 0 {
+            return Err(ApiError::bad_request("max_collections must be greater than zero"));
+        }
+
+        let mut response = DrainCollectionScanWorkerResponse {
+            outcome: "idle".to_owned(),
+            processed_collections: 0,
+            enqueued_commands: 0,
+            pending_due_remaining: 0,
+            last_collection_key: None,
+            partial_progress: false,
+            last_error: None,
+        };
+
+        for _ in 0..max_collections {
+            let step = self
+                .mutate(
+                    |service| {
+                        let request = DrainCollectionScanWorkerCommand {
+                            max_collections: Some(1),
+                        };
+                        Box::pin(async move {
+                            service
+                                .run_collection_scan_worker_until_idle(request)
+                                .await
+                                .map_err(ApiError::from)
+                        })
+                    },
+                    ApiState::refresh_inventory_command_status_and_system_events_snapshot,
+                )
+                .await?;
+            response.outcome = step.outcome.clone();
+            response.pending_due_remaining = step.pending_due_remaining;
+            response.last_collection_key = step.last_collection_key;
+            response.partial_progress = step.partial_progress;
+            response.last_error = step.last_error;
+            response.processed_collections += step.processed_collections;
+            response.enqueued_commands += step.enqueued_commands;
+            if step.partial_progress || matches!(step.outcome.as_str(), "idle" | "drained") {
+                break;
+            }
+        }
+
+        Ok(response)
+    }
+
+    async fn drain_integration_worker_until_idle(
+        &self,
+        request: DrainIntegrationWorkerCommand,
+    ) -> Result<DrainIntegrationWorkerResponse, ApiError> {
+        let max_events = request.max_events.ok_or_else(|| {
+            ApiError::bad_request("max_events is required")
+        })?;
+        if max_events == 0 {
+            return Err(ApiError::bad_request("max_events must be greater than zero"));
+        }
+
+        let mut response = DrainIntegrationWorkerResponse {
+            outcome: "idle".to_owned(),
+            attempted: 0,
+            published: 0,
+            pending_remaining: 0,
+            last_event_id: None,
+            last_event_kind: None,
+            last_error: None,
+            last_retryable: None,
+        };
+
+        for _ in 0..max_events {
+            let step = self
+                .mutate(
+                    |service| {
+                        let request = DrainIntegrationWorkerCommand {
+                            max_events: Some(1),
+                            error_message: request.error_message.clone(),
+                            retryable: request.retryable,
+                        };
+                        Box::pin(async move {
+                            service
+                                .publish_integration_events_until_idle(request)
+                                .await
+                                .map_err(ApiError::from)
+                        })
+                    },
+                    ApiState::refresh_system_events_snapshot,
+                )
+                .await?;
+            let has_error = step.last_error.is_some();
+            response.outcome = step.outcome.clone();
+            response.pending_remaining = step.pending_remaining;
+            response.last_event_id = step.last_event_id;
+            response.last_event_kind = step.last_event_kind;
+            response.last_error = step.last_error;
+            response.last_retryable = step.last_retryable;
+            response.attempted += step.attempted;
+            response.published += step.published;
+            if has_error || matches!(step.outcome.as_str(), "idle" | "drained") {
+                break;
+            }
+        }
+
+        Ok(response)
     }
 }
 
@@ -431,7 +615,8 @@ async fn release_dashboard(
     State(state): State<ApiState>,
 ) -> Result<Json<ReleaseDashboardResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .release_dashboard()
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -445,7 +630,9 @@ async fn list_system_events(
         category: request.category,
         limit: request.limit,
     };
-    Ok(Json(state.read_snapshot().list_system_events(&request)?))
+    Ok(Json(
+        state.read_snapshot_fresh().await?.list_system_events(&request)?,
+    ))
 }
 
 async fn register_component(
@@ -491,7 +678,7 @@ async fn register_component_tag(
 async fn list_component_tags(
     State(state): State<ApiState>,
 ) -> Result<Json<ListComponentTagsResponse>, ApiError> {
-    Ok(Json(state.read_snapshot().list_component_tags()))
+    Ok(Json(state.read_snapshot_fresh().await?.list_component_tags()))
 }
 
 async fn register_context_profile(
@@ -559,7 +746,7 @@ async fn assign_tag_context_profile(
 async fn list_context_profiles(
     State(state): State<ApiState>,
 ) -> Result<Json<ListContextProfilesResponse>, ApiError> {
-    Ok(Json(state.read_snapshot().list_context_profiles()))
+    Ok(Json(state.read_snapshot_fresh().await?.list_context_profiles()))
 }
 
 async fn register_collection(
@@ -586,7 +773,8 @@ async fn list_collections(
     State(state): State<ApiState>,
 ) -> Result<Json<ListCollectionsResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .list_collections()
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -597,7 +785,8 @@ async fn collection_detail(
     Path(collection_key): Path<String>,
 ) -> Result<Json<CollectionDetailResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .collection_detail(&collection_key)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -1031,7 +1220,8 @@ async fn scan_command_status(
     Path(command_id): Path<String>,
 ) -> Result<Json<ScanCommandStatusResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .scan_command_status(&command_id)
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -1041,19 +1231,7 @@ async fn drain_collection_scan_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainCollectionScanWorkerCommand>,
 ) -> Result<Json<DrainCollectionScanWorkerResponse>, ApiError> {
-    let response = state
-        .mutate(
-            |service| {
-                Box::pin(async move {
-                    service
-                        .run_collection_scan_worker_until_idle(request)
-                        .await
-                        .map_err(ApiError::from)
-                })
-            },
-            ApiState::refresh_inventory_command_status_and_system_events_snapshot,
-        )
-        .await?;
+    let response = state.drain_collection_scan_worker_until_idle(request).await?;
     Ok(Json(response))
 }
 
@@ -1078,19 +1256,7 @@ async fn drain_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainWorkerCommand>,
 ) -> Result<Json<DrainWorkerResponse>, ApiError> {
-    let response = state
-        .mutate(
-            |service| {
-                Box::pin(async move {
-                    service
-                        .run_worker_until_idle(request)
-                        .await
-                        .map_err(ApiError::from)
-                })
-            },
-            ApiState::refresh_read_model_command_status_and_system_events_snapshot,
-        )
-        .await?;
+    let response = state.drain_worker_until_idle(request).await?;
     Ok(Json(response))
 }
 
@@ -1098,19 +1264,7 @@ async fn drain_integration_worker(
     State(state): State<ApiState>,
     Json(request): Json<DrainIntegrationWorkerCommand>,
 ) -> Result<Json<DrainIntegrationWorkerResponse>, ApiError> {
-    let response = state
-        .mutate(
-            |service| {
-                Box::pin(async move {
-                    service
-                        .publish_integration_events_until_idle(request)
-                        .await
-                        .map_err(ApiError::from)
-                })
-            },
-            ApiState::refresh_system_events_snapshot,
-        )
-        .await?;
+    let response = state.drain_integration_worker_until_idle(request).await?;
     Ok(Json(response))
 }
 
@@ -1119,7 +1273,8 @@ async fn list_active_findings(
     Query(query): Query<ActiveFindingsQuery>,
 ) -> Result<Json<ActiveFindingsResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .list_active_findings(query.into_request())
         .map_err(ApiError::from)?;
     Ok(Json(response))
@@ -1131,7 +1286,8 @@ async fn list_collection_active_findings(
     Query(query): Query<CollectionActiveFindingsQuery>,
 ) -> Result<Json<CollectionActiveFindingsResponse>, ApiError> {
     let response = state
-        .read_snapshot()
+        .read_snapshot_fresh()
+        .await?
         .list_collection_active_findings(&collection_key, query.into_request())
         .map_err(ApiError::from)?;
     Ok(Json(response))

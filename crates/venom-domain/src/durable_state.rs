@@ -255,7 +255,7 @@ impl DurableState {
                 registration: StoredComponentRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
-            self.refresh_read_snapshot_caches();
+            self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
     }
@@ -276,7 +276,7 @@ impl DurableState {
                 registration: StoredComponentTagRegistration::from(registration),
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
-            self.refresh_read_snapshot_caches();
+            self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
     }
@@ -299,7 +299,7 @@ impl DurableState {
                 artifact,
             })?;
             *self.ingestion.inventory_mut() = candidate_inventory;
-            self.refresh_read_snapshot_caches();
+            self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
     }
@@ -720,7 +720,7 @@ impl DurableState {
         })?;
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.refresh_read_snapshot_caches();
+        self.refresh_read_model_and_release_board_snapshot_caches();
         if let Some(command_id) = command_id {
             self.applied_scan_commands
                 .insert(command_id.into(), change_set.clone());
@@ -763,7 +763,7 @@ impl DurableState {
             candidate_read_model.accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-risk-accepted-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -834,7 +834,7 @@ impl DurableState {
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-risk-accepted-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -908,7 +908,7 @@ impl DurableState {
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model.accept_risk(finding, acceptance.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-risk-accepted-live-{tag_key}-{occurred_at_unix_ms}"
@@ -964,7 +964,7 @@ impl DurableState {
             candidate_read_model.reopen(finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-reopened-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -1016,7 +1016,7 @@ impl DurableState {
             candidate_read_model.suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!("durable-state-suppressed-live-{occurred_at_unix_ms}")
                     .into_boxed_str(),
@@ -1083,7 +1083,7 @@ impl DurableState {
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-suppressed-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -1157,7 +1157,7 @@ impl DurableState {
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model.suppress(finding, suppression.clone());
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-tag-suppressed-live-{tag_key}-{occurred_at_unix_ms}"
@@ -1225,7 +1225,7 @@ impl DurableState {
                 self.governance.reopen(&finding);
                 self.read_model.reopen(&finding);
             }
-            self.refresh_read_snapshot_caches();
+            self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(SystemEvent {
                 event_id: format!(
                     "durable-state-reopened-many-live-{collection_key}-{occurred_at_unix_ms}"
@@ -2285,8 +2285,30 @@ impl DurableState {
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
+        self.refresh_inventory_snapshot_cache();
+        self.refresh_read_model_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_inventory_and_release_board_snapshot_caches(&mut self) {
+        self.refresh_inventory_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_read_model_and_release_board_snapshot_caches(&mut self) {
+        self.refresh_read_model_snapshot_cache();
+        self.refresh_release_board_snapshot_cache();
+    }
+
+    fn refresh_inventory_snapshot_cache(&mut self) {
         self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+    }
+
+    fn refresh_read_model_snapshot_cache(&mut self) {
         self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+    }
+
+    fn refresh_release_board_snapshot_cache(&mut self) {
         self.release_board_snapshot_cache = Arc::new(crate::build_release_board(
             self.ingestion.inventory(),
             &self.read_model,
