@@ -144,7 +144,7 @@ impl ApiState {
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
     where
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
-        R: FnOnce(&ApiState, &ApiApplication),
+        R: FnOnce(&Self, &ApiApplication),
     {
         let mut service = self.take_service().await;
         let result = operation(&mut service).await;
@@ -325,7 +325,7 @@ async fn register_component(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -345,7 +345,7 @@ async fn register_component_tag(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -371,7 +371,7 @@ async fn register_context_profile(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -392,7 +392,7 @@ async fn add_component_to_tag(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -413,7 +413,7 @@ async fn assign_tag_context_profile(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -439,7 +439,7 @@ async fn register_collection(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -481,7 +481,7 @@ async fn add_component_to_collection(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -501,7 +501,7 @@ async fn remove_component_from_collection(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -522,7 +522,7 @@ async fn configure_collection_source(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -542,7 +542,7 @@ async fn materialize_collection_source(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -563,7 +563,7 @@ async fn configure_collection_scan_schedule(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -584,7 +584,7 @@ async fn bind_artifact(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -605,7 +605,7 @@ async fn assign_context_profile(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -626,7 +626,7 @@ async fn assign_collection_context_profile(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -647,7 +647,7 @@ async fn configure_provider(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_inventory_snapshot(service),
+            ApiState::refresh_inventory_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -687,7 +687,7 @@ async fn record_provider_report(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_read_model_snapshot(service),
+            ApiState::refresh_read_model_snapshot,
         )
         .await?;
     Ok(Json(response))
@@ -1013,7 +1013,7 @@ async fn drain_integration_worker(
                         .map_err(ApiError::from)
                 })
             },
-            |state, service| state.refresh_system_events_snapshot(service),
+            ApiState::refresh_system_events_snapshot,
         )
         .await?;
     Ok(Json(response))
