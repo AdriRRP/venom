@@ -50,6 +50,10 @@ Completed:
     Keep local collection scheduling side-effect free until durable
     materialization succeeds, and derive pending-due state from real durable
     inventory instead of planning clones.
+21. `W109-contextual-risk-model-enrichment`
+    Replace the flat context-pressure sum with deterministic contextual
+    postures that distinguish public-edge, critical-internal, and hardened
+    private workloads without losing predictability.
 
 ## Exit condition
 

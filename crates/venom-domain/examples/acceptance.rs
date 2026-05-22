@@ -580,6 +580,30 @@ async fn venom_durably_registers_internal_context_profile(
 }
 
 #[given(
+    expr = "VENOM durably registers context profile {string} named {string} marked internal, production, mission critical, VPN restricted, and non privileged user"
+)]
+#[when(
+    expr = "VENOM durably registers context profile {string} named {string} marked internal, production, mission critical, VPN restricted, and non privileged user"
+)]
+async fn venom_durably_registers_internal_critical_context_profile(
+    world: &mut AcceptanceWorld,
+    profile_key: String,
+    name: String,
+) {
+    match world.durable_state_mut().register_context_profile(
+        ContextProfileRegistration::overlay(profile_key, name)
+            .with_internet_exposed(false)
+            .with_production(true)
+            .with_mission_critical(true)
+            .with_vpn_restricted(true)
+            .with_non_privileged_user(true),
+    ) {
+        Ok(_) => world.last_durable_error = None,
+        Err(error) => world.last_durable_error = Some(error.as_str().to_owned()),
+    }
+}
+
+#[given(
     expr = "VENOM durably registers context profile {string} named {string} marked internet exposed and mission critical"
 )]
 #[when(

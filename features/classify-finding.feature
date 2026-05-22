@@ -16,6 +16,22 @@ Feature: Classify finding
       And the first contextual active finding risk is "critical"
       And the first contextual active finding context profile is "context:internet-prod"
 
+    Scenario: An internal critical context keeps one medium finding below public-edge criticality
+      Given no managed components
+      And a new durable state
+      And a component "component:payments-api"
+      And an artifact "registry.example/payments@sha256:111"
+      And a provider scan report with vulnerability "CVE-2026-0001" in package "openssl" version "3.0.0" and severity "medium"
+      When VENOM durably registers component "component:payments-api" named "Payments API"
+      And VENOM durably binds artifact "registry.example/payments@sha256:111" to component "component:payments-api"
+      And VENOM durably registers context profile "context:internal-critical" named "Internal Critical" marked internal, production, mission critical, VPN restricted, and non privileged user
+      And VENOM durably assigns context profile "context:internal-critical" to component "component:payments-api"
+      And VENOM durably records the provider scan report
+      And VENOM queries contextual active findings for component "component:payments-api" and artifact "registry.example/payments@sha256:111" with minimum severity "unknown", offset 0, and limit 10
+      Then the first contextual active finding raw severity is "medium"
+      And the first contextual active finding risk is "high"
+      And the first contextual active finding context profile is "context:internal-critical"
+
   Rule: Missing component context keeps the raw risk level
     Scenario: One high finding without context stays high
       Given no managed components
