@@ -87,7 +87,10 @@ impl ContextualActiveFindingProjection {
             finding.severity,
             effective_context.as_ref().map(|context| &context.values),
         );
-        let contextual_rule = contextual_risk_rule(finding.severity, effective_context.as_ref().map(|context| &context.values));
+        let contextual_rule = contextual_risk_rule(
+            finding.severity,
+            effective_context.as_ref().map(|context| &context.values),
+        );
         let singular_profile = effective_context
             .as_ref()
             .and_then(EffectiveContextProfile::singular_profile)

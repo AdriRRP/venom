@@ -508,12 +508,17 @@ impl ApiApplication {
                     local.state.system_events(),
                     local.runtime.system_events(),
                 );
-                venom_domain::operations::system_event_trace::query_system_events(merged.iter(), &query)
+                venom_domain::operations::system_event_trace::query_system_events(
+                    merged.iter(),
+                    &query,
+                )
             }
-            ApiStore::Postgres(postgres) => venom_domain::operations::system_event_trace::query_system_events(
-                postgres.system_events().iter(),
-                &query,
-            ),
+            ApiStore::Postgres(postgres) => {
+                venom_domain::operations::system_event_trace::query_system_events(
+                    postgres.system_events().iter(),
+                    &query,
+                )
+            }
         };
         let mut response = ListSystemEventsResponse::from_page(page);
         response.category = category;

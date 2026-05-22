@@ -5,7 +5,7 @@ use crate::{
     AssignContextProfileResult, AssignTagContextProfileChange, AssignTagContextProfileResult,
     BindArtifactChange, BindArtifactResult, BulkAcceptRiskResult, BulkGovernanceQuery,
     BulkReopenFindingResult, BulkSuppressFindingResult, CollectionRegistration, CollectionSource,
-    CollectionSourceMode, ComponentRegistration, ComponentTagRegistration,
+    CollectionSourceMode, ComponentInventory, ComponentRegistration, ComponentTagRegistration,
     ConfigureCollectionScanScheduleChange, ConfigureCollectionScanScheduleResult,
     ConfigureCollectionSourceChange, ConfigureCollectionSourceResult,
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult, ConfigureProviderChange,
@@ -19,7 +19,7 @@ use crate::{
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
     RemoveCollectionComponentResult, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
     RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
-    SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery, ComponentInventory,
+    SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery,
     findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
