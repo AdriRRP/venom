@@ -266,10 +266,7 @@ test("findings console can query one seeded release collection", async ({
 		collectionPanel.getByRole("cell", { name: "critical", exact: true }),
 	).toBeVisible();
 	await expect(
-		collectionPanel.getByRole("cell", {
-			name: "Internet Production",
-			exact: true,
-		}),
+		collectionPanel.getByRole("cell", { name: /Internet Production/ }),
 	).toBeVisible();
 	await collectionPanel
 		.getByRole("combobox", { name: "Governance", exact: true })

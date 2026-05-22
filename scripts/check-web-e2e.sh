@@ -38,12 +38,31 @@ wait_for_url() {
 require_cmd cargo
 require_cmd npm
 require_cmd curl
+require_cmd lsof
+
+select_free_port() {
+  local requested_port="$1"
+  local port
+
+  for port in $(seq "${requested_port}" "$((requested_port + 199))"); do
+    if lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1; then
+      continue
+    fi
+    if curl -fsS "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+      continue
+    fi
+    echo "${port}"
+    return 0
+  done
+
+  return 1
+}
 
 [[ -f apps/web/package.json ]] || fail "missing apps/web/package.json"
 [[ -f apps/web/playwright.config.ts ]] || fail "missing apps/web/playwright.config.ts"
 
-api_port="${VENOM_E2E_API_PORT:-3300}"
-web_port="${VENOM_E2E_WEB_PORT:-4173}"
+api_port="$(select_free_port "${VENOM_E2E_API_PORT:-3300}")" || fail "no free api port available"
+web_port="$(select_free_port "${VENOM_E2E_WEB_PORT:-4173}")" || fail "no free web port available"
 api_ready_attempts="${VENOM_E2E_API_READY_ATTEMPTS:-120}"
 web_ready_attempts="${VENOM_E2E_WEB_READY_ATTEMPTS:-60}"
 api_url="http://127.0.0.1:${api_port}"
@@ -115,7 +134,7 @@ skip_if_bind_forbidden "${api_pid}" "${api_log}" "api"
 wait_for_url "${api_url}/health" "api" "${api_ready_attempts}" "${api_log}"
 
 VITE_API_TARGET="${api_url}" \
-npm --prefix apps/web run dev -- --host 127.0.0.1 --port "${web_port}" >"${web_log}" 2>&1 &
+npm --prefix apps/web run dev -- --host 127.0.0.1 --port "${web_port}" --strictPort >"${web_log}" 2>&1 &
 web_pid=$!
 
 sleep 1
