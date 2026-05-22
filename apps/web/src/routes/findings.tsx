@@ -172,6 +172,7 @@ function contextSourceLabels(finding: {
 function contextLabel(finding: {
 	context_profile_name: string | null;
 	contextual_posture?: string;
+	contextual_rule?: string;
 	component_context_profile?: { name: string } | null;
 	collection_context_profile?: { name: string } | null;
 	tag_context_profiles?: Array<{ name: string }>;
@@ -181,15 +182,21 @@ function contextLabel(finding: {
 		finding.contextual_posture == null
 			? null
 			: `posture:${finding.contextual_posture}`;
+	const rule =
+		finding.contextual_rule == null ? null : `rule:${finding.contextual_rule}`;
+	const semantics = [posture, rule].filter(
+		(value): value is string => value != null,
+	);
+	const detail = semantics.length === 0 ? null : semantics.join(", ");
 	if (labels.length === 0) {
-		return posture ?? "unassigned";
+		return detail ?? "unassigned";
 	}
 	if (labels.length === 1) {
-		return posture == null ? labels[0] : `${labels[0]} (${posture})`;
+		return detail == null ? labels[0] : `${labels[0]} (${detail})`;
 	}
-	return posture == null
+	return detail == null
 		? `composite (${labels.join(" + ")})`
-		: `composite (${labels.join(" + ")}) (${posture})`;
+		: `composite (${labels.join(" + ")}) (${detail})`;
 }
 
 export function FindingsPage() {

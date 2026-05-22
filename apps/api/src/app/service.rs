@@ -208,21 +208,6 @@ impl ApiReadSnapshot {
         ))
     }
 
-    pub fn list_system_events(
-        &self,
-        request: &ListSystemEventsRequest,
-    ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
-        let query = build_system_events_query(request)?;
-        let category = query.category.map(|value| value.as_str().to_owned());
-        let page = venom_domain::operations::system_event_trace::query_system_events(
-            self.system_events.iter(),
-            &query,
-        );
-        let mut response = ListSystemEventsResponse::from_page(page);
-        response.category = category;
-        Ok(response)
-    }
-
     /// Query one durable scan command status from the compact read-side snapshot.
     ///
     /// # Errors
@@ -459,8 +444,8 @@ impl ApiApplication {
     pub fn read_snapshot(&self) -> ApiReadSnapshot {
         match &self.backend {
             ApiStore::Local(local) => ApiReadSnapshot::new(
-                Arc::new(local.state.ingestion().inventory().clone()),
-                Arc::new(local.state.read_model().clone()),
+                local.state.inventory_snapshot_arc(),
+                local.state.read_model_snapshot_arc(),
                 Arc::new(merge_system_events(
                     local.state.system_events_snapshot_arc().as_ref(),
                     local.runtime.system_events_snapshot_arc().as_ref(),
@@ -479,7 +464,7 @@ impl ApiApplication {
     #[must_use]
     pub fn inventory_snapshot_arc(&self) -> Arc<ComponentInventory> {
         match &self.backend {
-            ApiStore::Local(local) => Arc::new(local.state.ingestion().inventory().clone()),
+            ApiStore::Local(local) => local.state.inventory_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.inventory_snapshot_arc(),
         }
     }
@@ -487,7 +472,7 @@ impl ApiApplication {
     #[must_use]
     pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
         match &self.backend {
-            ApiStore::Local(local) => Arc::new(local.state.read_model().clone()),
+            ApiStore::Local(local) => local.state.read_model_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.read_model_snapshot_arc(),
         }
     }
@@ -509,6 +494,30 @@ impl ApiApplication {
             ApiStore::Local(local) => local.runtime.command_statuses_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot_arc(),
         }
+    }
+
+    pub fn list_system_events(
+        &self,
+        request: &ListSystemEventsRequest,
+    ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
+        let query = build_system_events_query(request)?;
+        let category = query.category.map(|value| value.as_str().to_owned());
+        let page = match &self.backend {
+            ApiStore::Local(local) => {
+                let merged = merge_system_event_queues(
+                    local.state.system_events(),
+                    local.runtime.system_events(),
+                );
+                venom_domain::operations::system_event_trace::query_system_events(merged.iter(), &query)
+            }
+            ApiStore::Postgres(postgres) => venom_domain::operations::system_event_trace::query_system_events(
+                postgres.system_events().iter(),
+                &query,
+            ),
+        };
+        let mut response = ListSystemEventsResponse::from_page(page);
+        response.category = category;
+        Ok(response)
     }
 
     /// Register one managed component through the application boundary.
@@ -1624,19 +1633,32 @@ impl ApiApplication {
                         .map_err(|error| ApiApplicationError::State(error.to_string()))?;
                     enqueued_commands += command_ids.len();
                     last_collection_key = Some(due_scan.collection_key.to_string());
-                    local
-                        .state
-                        .record_collection_scan_materialization(
-                            due_scan.collection_key.as_ref(),
-                            due_scan.next_due_at_unix_ms,
-                            now_unix_ms,
-                            u32::try_from(command_ids.len()).map_err(|_| {
-                                ApiApplicationError::State(
-                                    "collection scheduler command count overflow".to_owned(),
-                                )
-                            })?,
-                        )
-                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                    if let Err(error) = local.state.record_collection_scan_materialization(
+                        due_scan.collection_key.as_ref(),
+                        due_scan.next_due_at_unix_ms,
+                        now_unix_ms,
+                        u32::try_from(command_ids.len()).map_err(|_| {
+                            ApiApplicationError::State(
+                                "collection scheduler command count overflow".to_owned(),
+                            )
+                        })?,
+                    ) {
+                        let pending_due_remaining = local
+                            .state
+                            .ingestion()
+                            .inventory()
+                            .due_collection_keys(now_unix_ms, usize::MAX)
+                            .len();
+                        return Ok(DrainCollectionScanWorkerResponse {
+                            outcome: "partial".to_owned(),
+                            processed_collections,
+                            enqueued_commands,
+                            pending_due_remaining,
+                            last_collection_key,
+                            partial_progress: true,
+                            last_error: Some(error.to_string()),
+                        });
+                    }
                 }
 
                 let pending_due_remaining = local
@@ -1659,6 +1681,8 @@ impl ApiApplication {
                     enqueued_commands,
                     pending_due_remaining,
                     last_collection_key,
+                    partial_progress: false,
+                    last_error: None,
                 })
             }
             ApiStore::Postgres(postgres) => {
@@ -2717,6 +2741,7 @@ pub struct ActiveFindingItem {
     pub severity: String,
     pub contextual_risk: String,
     pub contextual_posture: String,
+    pub contextual_rule: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2740,6 +2765,7 @@ impl ActiveFindingItem {
             severity: severity_name(value.severity).to_owned(),
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             contextual_posture: value.contextual_posture.into(),
+            contextual_rule: value.contextual_rule.into(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -2813,6 +2839,7 @@ pub struct CollectionActiveFindingItem {
     pub severity: String,
     pub contextual_risk: String,
     pub contextual_posture: String,
+    pub contextual_rule: String,
     pub context_profile_key: Option<String>,
     pub context_profile_name: Option<String>,
     pub component_context_profile: Option<ContextProfileRefItem>,
@@ -2836,6 +2863,7 @@ impl CollectionActiveFindingItem {
             severity: severity_name(value.severity).to_owned(),
             contextual_risk: value.contextual_risk.as_str().to_owned(),
             contextual_posture: value.contextual_posture.into(),
+            contextual_rule: value.contextual_rule.into(),
             context_profile_key: value.context_profile_key.map(Into::into),
             context_profile_name: value.context_profile_name.map(Into::into),
             component_context_profile: value
@@ -2899,6 +2927,8 @@ pub struct DrainCollectionScanWorkerResponse {
     pub enqueued_commands: usize,
     pub pending_due_remaining: usize,
     pub last_collection_key: Option<String>,
+    pub partial_progress: bool,
+    pub last_error: Option<String>,
 }
 
 impl From<DrainDueCollectionScansResult> for DrainCollectionScanWorkerResponse {
@@ -2909,6 +2939,8 @@ impl From<DrainDueCollectionScansResult> for DrainCollectionScanWorkerResponse {
             enqueued_commands: value.enqueued_commands,
             pending_due_remaining: value.pending_due_remaining,
             last_collection_key: value.last_collection_key.map(Into::into),
+            partial_progress: value.partial_progress,
+            last_error: value.last_error.map(Into::into),
         }
     }
 }
@@ -3248,6 +3280,23 @@ fn parse_system_event_category(value: &str) -> Result<SystemEventCategory, ApiAp
 }
 
 fn merge_system_events(left: &[SystemEvent], right: &[SystemEvent]) -> Vec<SystemEvent> {
+    let mut merged = left
+        .iter()
+        .cloned()
+        .chain(right.iter().cloned())
+        .collect::<Vec<_>>();
+    merged.sort_by(|a, b| {
+        b.occurred_at_unix_ms
+            .cmp(&a.occurred_at_unix_ms)
+            .then_with(|| b.event_id.cmp(&a.event_id))
+    });
+    merged
+}
+
+fn merge_system_event_queues(
+    left: &std::collections::VecDeque<SystemEvent>,
+    right: &std::collections::VecDeque<SystemEvent>,
+) -> Vec<SystemEvent> {
     let mut merged = left
         .iter()
         .cloned()

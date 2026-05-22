@@ -61,6 +61,7 @@ pub struct ContextualActiveFindingProjection {
     pub severity: Severity,
     pub contextual_risk: ContextualRiskLevel,
     pub contextual_posture: Box<str>,
+    pub contextual_rule: Box<str>,
     pub context_profile_key: Option<Box<str>>,
     pub context_profile_name: Option<Box<str>>,
     pub component_context_profile: Option<ContextProfileRef>,
@@ -86,6 +87,7 @@ impl ContextualActiveFindingProjection {
             finding.severity,
             effective_context.as_ref().map(|context| &context.values),
         );
+        let contextual_rule = contextual_risk_rule(finding.severity, effective_context.as_ref().map(|context| &context.values));
         let singular_profile = effective_context
             .as_ref()
             .and_then(EffectiveContextProfile::singular_profile)
@@ -95,6 +97,7 @@ impl ContextualActiveFindingProjection {
             severity: finding.severity,
             contextual_risk,
             contextual_posture: posture.as_str().into(),
+            contextual_rule: contextual_rule.into(),
             context_profile_key: singular_profile
                 .as_ref()
                 .map(|profile| profile.profile_key.clone()),
@@ -112,6 +115,48 @@ impl ContextualActiveFindingProjection {
             governance_reason: finding.governance_reason,
             governance_until_unix_ms: finding.governance_until_unix_ms,
         }
+    }
+}
+
+fn contextual_risk_rule(
+    severity: Severity,
+    context_profile: Option<&ContextProfileValues>,
+) -> &'static str {
+    let Some(context_profile) = context_profile else {
+        return "raw-severity";
+    };
+    let posture = contextual_posture(*context_profile);
+
+    match severity {
+        Severity::Unknown | Severity::None | Severity::Critical => "raw-severity",
+        Severity::High => match posture {
+            ContextualPosture::HardenedPrivate => "mitigated-private-downgrade",
+            ContextualPosture::PublicEdge
+            | ContextualPosture::PublicCritical
+            | ContextualPosture::CriticalInternal => "critical-surface-escalation",
+            ContextualPosture::Unspecified
+            | ContextualPosture::InternalRestricted
+            | ContextualPosture::ProductionService => "high-baseline",
+        },
+        Severity::Medium => match posture {
+            ContextualPosture::HardenedPrivate => "mitigated-private-downgrade",
+            ContextualPosture::PublicCritical => "public-critical-escalation",
+            ContextualPosture::PublicEdge
+            | ContextualPosture::ProductionService
+            | ContextualPosture::CriticalInternal => "service-surface-escalation",
+            ContextualPosture::Unspecified | ContextualPosture::InternalRestricted => {
+                "medium-baseline"
+            }
+        },
+        Severity::Low => match posture {
+            ContextualPosture::PublicCritical => "public-critical-escalation",
+            ContextualPosture::PublicEdge
+            | ContextualPosture::ProductionService
+            | ContextualPosture::CriticalInternal => "service-surface-escalation",
+            ContextualPosture::Unspecified
+            | ContextualPosture::InternalRestricted
+            | ContextualPosture::HardenedPrivate => "low-baseline",
+        },
     }
 }
 

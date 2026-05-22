@@ -1784,6 +1784,9 @@ export function OperationsPage() {
 								{drainCollectionScanWorkerMutation.data.last_collection_key ??
 									"none"}
 								.
+								{drainCollectionScanWorkerMutation.data.partial_progress
+									? ` Partial progress recorded: ${drainCollectionScanWorkerMutation.data.last_error ?? "unknown scheduler persistence error"}.`
+									: ""}
 							</p>
 						</div>
 					) : null}

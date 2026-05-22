@@ -72,6 +72,21 @@ Completed:
 27. `W115-contextual-risk-explainability`
     Expose the deterministic contextual posture behind each contextual risk
     decision to API and UI consumers.
+28. `W116-http-mutation-lane-splitting`
+    Restore the mutable HTTP application slot before publishing refreshed
+    snapshots and add an explicit inspect path for truthful read-only queries.
+29. `W117-local-read-side-deep-clone-elision`
+    Cache local and Postgres-backed inventory and read-model lanes as shared
+    `Arc` snapshots instead of cloning those structures on demand.
+30. `W118-bounded-system-event-snapshots-with-truthful-querying`
+    Keep `system events` snapshot lanes bounded while serving operator queries
+    from the full local or Postgres-backed durable history.
+31. `W119-local-partial-progress-contracts`
+    Surface partial local scheduler progress explicitly when scan commands are
+    already durable but schedule materialization metadata fails afterward.
+32. `W120-contextual-risk-rule-explainability`
+    Expose the exact deterministic contextual-risk rule that produced each
+    operator-facing risk result.
 
 ## Exit condition
 
