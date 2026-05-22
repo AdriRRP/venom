@@ -292,11 +292,42 @@ impl ContextProfileValues {
     }
 }
 
+/// Provenance of one effective context factor after overlay precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextFactorSource {
+    Component,
+    Tag,
+    Collection,
+}
+
+impl ContextFactorSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Component => "component",
+            Self::Tag => "tag",
+            Self::Collection => "collection",
+        }
+    }
+}
+
+/// Provenance of each effective context trait after overlay precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EffectiveContextFactorSources {
+    pub internet_exposed: Option<ContextFactorSource>,
+    pub production: Option<ContextFactorSource>,
+    pub mission_critical: Option<ContextFactorSource>,
+    pub vpn_restricted: Option<ContextFactorSource>,
+    pub non_privileged_user: Option<ContextFactorSource>,
+}
+
 /// Truthful effective execution context for one managed component scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveContextProfile {
     /// Effective runtime traits after precedence rules are applied.
     pub values: ContextProfileValues,
+    /// Provenance of each effective trait after precedence rules are applied.
+    pub factor_sources: EffectiveContextFactorSources,
     /// Most specific component profile when present.
     pub component_profile: Option<ContextProfileRef>,
     /// Release-scoped default profile when present.
@@ -1797,6 +1828,10 @@ impl ComponentInventory {
 
         Some(EffectiveContextProfile {
             values,
+            factor_sources: Self::component_over_tag_factor_sources(
+                component_profile.as_ref(),
+                tag_values,
+            ),
             component_profile: component_profile
                 .as_ref()
                 .map(ManagedContextProfile::reference),
@@ -1839,6 +1874,10 @@ impl ComponentInventory {
 
         Some(EffectiveContextProfile {
             values,
+            factor_sources: Self::collection_overlay_factor_sources(
+                collection_profile.as_ref(),
+                component_effective_context.as_ref(),
+            ),
             component_profile: component_effective_context
                 .as_ref()
                 .and_then(|effective_context| effective_context.component_profile.clone()),
@@ -2089,6 +2128,77 @@ impl ComponentInventory {
         }
 
         (values, profiles)
+    }
+
+    fn component_over_tag_factor_sources(
+        component_profile: Option<&ManagedContextProfile>,
+        tag_values: Option<ContextProfileValues>,
+    ) -> EffectiveContextFactorSources {
+        EffectiveContextFactorSources {
+            internet_exposed: component_profile
+                .and_then(|profile| profile.internet_exposed)
+                .map(|_| ContextFactorSource::Component)
+                .or(tag_values
+                    .and_then(|values| values.internet_exposed)
+                    .map(|_| ContextFactorSource::Tag)),
+            production: component_profile
+                .and_then(|profile| profile.production)
+                .map(|_| ContextFactorSource::Component)
+                .or(tag_values
+                    .and_then(|values| values.production)
+                    .map(|_| ContextFactorSource::Tag)),
+            mission_critical: component_profile
+                .and_then(|profile| profile.mission_critical)
+                .map(|_| ContextFactorSource::Component)
+                .or(tag_values
+                    .and_then(|values| values.mission_critical)
+                    .map(|_| ContextFactorSource::Tag)),
+            vpn_restricted: component_profile
+                .and_then(|profile| profile.vpn_restricted)
+                .map(|_| ContextFactorSource::Component)
+                .or(tag_values
+                    .and_then(|values| values.vpn_restricted)
+                    .map(|_| ContextFactorSource::Tag)),
+            non_privileged_user: component_profile
+                .and_then(|profile| profile.non_privileged_user)
+                .map(|_| ContextFactorSource::Component)
+                .or(tag_values
+                    .and_then(|values| values.non_privileged_user)
+                    .map(|_| ContextFactorSource::Tag)),
+        }
+    }
+
+    fn collection_overlay_factor_sources(
+        collection_profile: Option<&ManagedContextProfile>,
+        component_effective_context: Option<&EffectiveContextProfile>,
+    ) -> EffectiveContextFactorSources {
+        EffectiveContextFactorSources {
+            internet_exposed: component_effective_context
+                .and_then(|context| context.factor_sources.internet_exposed)
+                .or(collection_profile
+                    .and_then(|profile| profile.internet_exposed)
+                    .map(|_| ContextFactorSource::Collection)),
+            production: component_effective_context
+                .and_then(|context| context.factor_sources.production)
+                .or(collection_profile
+                    .and_then(|profile| profile.production)
+                    .map(|_| ContextFactorSource::Collection)),
+            mission_critical: component_effective_context
+                .and_then(|context| context.factor_sources.mission_critical)
+                .or(collection_profile
+                    .and_then(|profile| profile.mission_critical)
+                    .map(|_| ContextFactorSource::Collection)),
+            vpn_restricted: component_effective_context
+                .and_then(|context| context.factor_sources.vpn_restricted)
+                .or(collection_profile
+                    .and_then(|profile| profile.vpn_restricted)
+                    .map(|_| ContextFactorSource::Collection)),
+            non_privileged_user: component_effective_context
+                .and_then(|context| context.factor_sources.non_privileged_user)
+                .or(collection_profile
+                    .and_then(|profile| profile.non_privileged_user)
+                    .map(|_| ContextFactorSource::Collection)),
+        }
     }
 
     fn first_tag_context_conflict_for_component(

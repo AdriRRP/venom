@@ -63,6 +63,7 @@ pub struct ContextualActiveFindingProjection {
     pub contextual_posture: Box<str>,
     pub contextual_rule: Box<str>,
     pub contextual_factors: Vec<Box<str>>,
+    pub contextual_factor_provenance: Vec<ContextualFactorProvenance>,
     pub context_profile_key: Option<Box<str>>,
     pub context_profile_name: Option<Box<str>>,
     pub component_context_profile: Option<ContextProfileRef>,
@@ -71,6 +72,12 @@ pub struct ContextualActiveFindingProjection {
     pub governance_state: crate::FindingGovernanceState,
     pub governance_reason: Option<Box<str>>,
     pub governance_until_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextualFactorProvenance {
+    pub factor: Box<str>,
+    pub source: Box<str>,
 }
 
 impl ContextualActiveFindingProjection {
@@ -95,6 +102,9 @@ impl ContextualActiveFindingProjection {
         let contextual_factors = effective_context
             .as_ref()
             .map_or_else(Vec::new, |context| contextual_factor_labels(context.values));
+        let contextual_factor_provenance = effective_context
+            .as_ref()
+            .map_or_else(Vec::new, contextual_factor_provenance);
         let singular_profile = effective_context
             .as_ref()
             .and_then(EffectiveContextProfile::singular_profile)
@@ -106,6 +116,7 @@ impl ContextualActiveFindingProjection {
             contextual_posture: posture.as_str().into(),
             contextual_rule: contextual_rule.into(),
             contextual_factors,
+            contextual_factor_provenance,
             context_profile_key: singular_profile
                 .as_ref()
                 .map(|profile| profile.profile_key.clone()),
@@ -138,6 +149,65 @@ fn contextual_factor_labels(values: ContextProfileValues) -> Vec<Box<str>> {
         values.non_privileged_user,
     );
     factors
+}
+
+fn contextual_factor_provenance(
+    effective_context: &EffectiveContextProfile,
+) -> Vec<ContextualFactorProvenance> {
+    let values = effective_context.values;
+    let sources = effective_context.factor_sources;
+    let mut factors = Vec::new();
+
+    push_factor_provenance(
+        &mut factors,
+        "internet-exposed",
+        values.internet_exposed,
+        sources.internet_exposed,
+    );
+    push_factor_provenance(
+        &mut factors,
+        "production",
+        values.production,
+        sources.production,
+    );
+    push_factor_provenance(
+        &mut factors,
+        "mission-critical",
+        values.mission_critical,
+        sources.mission_critical,
+    );
+    push_factor_provenance(
+        &mut factors,
+        "vpn-restricted",
+        values.vpn_restricted,
+        sources.vpn_restricted,
+    );
+    push_factor_provenance(
+        &mut factors,
+        "non-privileged-user",
+        values.non_privileged_user,
+        sources.non_privileged_user,
+    );
+
+    factors
+}
+
+fn push_factor_provenance(
+    factors: &mut Vec<ContextualFactorProvenance>,
+    factor: &'static str,
+    value: Option<bool>,
+    source: Option<crate::ContextFactorSource>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    let Some(source) = source else {
+        return;
+    };
+    factors.push(ContextualFactorProvenance {
+        factor: format!("{factor}:{value}").into_boxed_str(),
+        source: source.as_str().into(),
+    });
 }
 
 fn push_context_factor(factors: &mut Vec<Box<str>>, name: &str, value: Option<bool>) {
@@ -327,9 +397,10 @@ fn contextual_posture(context_profile: ContextProfileValues) -> ContextualPostur
 mod tests {
     use super::{ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level};
     use crate::{
-        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextProfileRef,
-        ContextProfileValues, EffectiveContextProfile, FindingGovernanceState, FindingRef,
-        ManagedContextProfile, PackageCoordinate, Severity,
+        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorSource,
+        ContextProfileRef, ContextProfileValues, EffectiveContextFactorSources,
+        EffectiveContextProfile, FindingGovernanceState, FindingRef, ManagedContextProfile,
+        PackageCoordinate, Severity,
     };
 
     #[test]
@@ -443,6 +514,13 @@ mod tests {
             projection,
             Some(EffectiveContextProfile {
                 values: profile.values(),
+                factor_sources: EffectiveContextFactorSources {
+                    internet_exposed: Some(ContextFactorSource::Component),
+                    production: Some(ContextFactorSource::Component),
+                    mission_critical: Some(ContextFactorSource::Component),
+                    vpn_restricted: None,
+                    non_privileged_user: None,
+                },
                 component_profile: Some(profile.reference()),
                 collection_profile: None,
                 tag_profiles: Vec::new(),
@@ -488,6 +566,13 @@ mod tests {
                     vpn_restricted: None,
                     non_privileged_user: None,
                 },
+                factor_sources: EffectiveContextFactorSources {
+                    internet_exposed: Some(ContextFactorSource::Component),
+                    production: Some(ContextFactorSource::Collection),
+                    mission_critical: Some(ContextFactorSource::Collection),
+                    vpn_restricted: None,
+                    non_privileged_user: None,
+                },
                 component_profile: Some(ContextProfileRef {
                     profile_key: "context:payments-edge".into(),
                     name: "Payments Edge".into(),
@@ -515,6 +600,14 @@ mod tests {
                 .as_ref()
                 .map(|profile| profile.profile_key.as_ref()),
             Some("context:corp-api-baseline")
+        );
+        assert_eq!(
+            contextual
+                .contextual_factor_provenance
+                .iter()
+                .find(|factor| factor.factor.as_ref() == "production:true")
+                .map(|factor| factor.source.as_ref()),
+            Some("collection")
         );
     }
 }
