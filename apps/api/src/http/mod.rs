@@ -197,14 +197,15 @@ impl ApiState {
         let changed = service.refresh_from_remote_if_stale().await?;
         let next_snapshot = changed.then(|| Arc::new(service.read_snapshot()));
         self.restore_service(service).await;
-        if let Some(next_snapshot) = next_snapshot {
-            self.inner
-                .read_snapshot_tx
-                .send_replace(Arc::clone(&next_snapshot));
-            Ok(next_snapshot)
-        } else {
-            Ok(self.read_snapshot())
-        }
+        next_snapshot.map_or_else(
+            || Ok(self.read_snapshot()),
+            |next_snapshot| {
+                self.inner
+                    .read_snapshot_tx
+                    .send_replace(Arc::clone(&next_snapshot));
+                Ok(next_snapshot)
+            },
+        )
     }
 
     fn refresh_inventory_snapshot(service: &ApiApplication) -> SnapshotRefresh {
@@ -354,7 +355,7 @@ impl ApiState {
                                 .map_err(ApiError::from)
                         })
                     },
-                    ApiState::refresh_read_model_command_status_and_system_events_snapshot,
+                    Self::refresh_read_model_command_status_and_system_events_snapshot,
                 )
                 .await?;
             response.outcome = step.outcome.clone();
@@ -411,7 +412,7 @@ impl ApiState {
                                 .map_err(ApiError::from)
                         })
                     },
-                    ApiState::refresh_inventory_command_status_and_system_events_snapshot,
+                    Self::refresh_inventory_command_status_and_system_events_snapshot,
                 )
                 .await?;
             response.outcome = step.outcome.clone();
@@ -469,7 +470,7 @@ impl ApiState {
                                 .map_err(ApiError::from)
                         })
                     },
-                    ApiState::refresh_system_events_snapshot,
+                    Self::refresh_system_events_snapshot,
                 )
                 .await?;
             let has_error = step.last_error.is_some();
