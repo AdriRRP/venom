@@ -1,43 +1,46 @@
-# W109 Contextual Risk Model Enrichment
+# W109. Contextual Risk Model Enrichment
+
+Wave: `W109-contextual-risk-model-enrichment`
+Status: `done`
+BDD impact: `update`
+Agentic impact: `none`
+Infra profile: `none`
 
 ## Goal
 
 Replace the flat contextual-risk sum with deterministic postures that better
 match operator meaning.
 
-## Why
+## Feature paths
 
-The previous model used all context traits, but only as one linear
-`context_pressure` score. That made materially different workloads look too
-similar, especially:
+- `features/classify-finding.feature`
 
-- public edge vs internal critical services
-- hardened private services vs merely unspecified internal workloads
+## Execution lanes
 
-## Scope
+- `unit`
+- `acceptance`
 
-- enrich `contextual_risk_level` with posture-based rules
-- keep deterministic behavior and bounded explainability
-- extend BDD and unit coverage for differentiated internal/public outcomes
+## Owned paths
 
-## Out of scope
+- `crates/venom-domain/src/findings/contextual_risk.rs`
+- `crates/venom-domain/examples/acceptance.rs`
+- `features/classify-finding.feature`
+- `docs/reliability-hardening-plan.md`
 
-- probabilistic scoring
-- external CVSS-like enrichments
-- new context profile fields
+## Slices
 
-## Verification
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W109-S01` | done | distinguish public critical, critical internal, and hardened private workloads with deterministic posture rules | `unit`, `acceptance` |
 
-- targeted domain tests for contextual risk
-- acceptance gate
-- full wave gate
+## Language impact
 
-## Closure notes
+- none
 
-Closed when contextual risk distinguishes at least:
+## Invariant impact
 
-- public critical workloads
-- internal critical workloads
-- hardened private workloads
+`I8`, `I11`
 
-without regressing existing contextual projections or deterministic replay.
+## ADR impact
+
+`none`
