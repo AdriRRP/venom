@@ -65,7 +65,7 @@ pub struct ApiReadSnapshot {
 
 impl ApiReadSnapshot {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
         system_event_index: Arc<SystemEventQueryIndex>,
