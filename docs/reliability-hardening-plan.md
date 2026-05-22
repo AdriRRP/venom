@@ -37,10 +37,13 @@ Completed:
 16. `W104-postgres-scan-request-event-atomicity`
     Persist Postgres scan-command enqueue writes and their operator-facing
     system events in one transaction.
-17. `W106-postgres-read-snapshot-caches`
+17. `W105-http-worker-lock-splitting`
+    Move the API service through an explicit slot so HTTP handlers no longer
+    hold the global service mutex across awaited worker or mutation work.
+18. `W106-postgres-read-snapshot-caches`
     Cache Postgres-backed `system events` and `command statuses` snapshot lanes
     and refresh them only on real mutation paths or rebuild.
-18. `W107-bulk-governance-state-compaction`
+19. `W107-bulk-governance-state-compaction`
     Remove full `FindingGovernance` and `FindingReadModel` clones from bulk
     governance actions in local and Postgres paths.
 
