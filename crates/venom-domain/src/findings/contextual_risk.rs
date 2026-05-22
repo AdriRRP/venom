@@ -79,8 +79,9 @@ impl ContextualActiveFindingProjection {
     ) -> Self {
         let posture = effective_context
             .as_ref()
-            .map(|context| contextual_posture(context.values))
-            .unwrap_or(ContextualPosture::Unspecified);
+            .map_or(ContextualPosture::Unspecified, |context| {
+                contextual_posture(context.values)
+            });
         let contextual_risk = contextual_risk_level(
             finding.severity,
             effective_context.as_ref().map(|context| &context.values),
