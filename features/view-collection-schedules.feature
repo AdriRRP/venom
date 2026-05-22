@@ -34,13 +34,16 @@ Feature: View collection schedules
       And 1 collection schedules are due now
       And the first collection schedule targets collection "release:2026.05"
 
-    Scenario: Materialized schedules expose last run time and command count
-      Given a managed component "component:payments-api" named "Payments API" with artifact "registry.example/payments@sha256:111"
-      And VENOM creates collection "release:2026.05" named "May Release"
-      And VENOM adds component "component:payments-api" to collection "release:2026.05"
-      And VENOM schedules a deterministic collection scan for "release:2026.05" every 60 minutes due at unix ms 1000
-      When VENOM materializes due collection scans at unix ms 1500 with limit 8
-      And VENOM lists collection schedules at unix ms 1500
+    Scenario: Durable materialized schedules expose last run time and command count
+      Given no managed components
+      And a new durable state
+      And VENOM durably registers component "component:payments-api" named "Payments API"
+      And VENOM durably binds artifact "registry.example/payments@sha256:111" to component "component:payments-api"
+      And VENOM durably creates collection "release:2026.05" named "May Release"
+      And VENOM durably adds component "component:payments-api" to collection "release:2026.05"
+      And VENOM durably schedules a deterministic collection scan for "release:2026.05" every 60 minutes due at unix ms 1000
+      When VENOM durably materializes due collection scans at unix ms 1500 with limit 8
+      And VENOM lists durable collection schedules at unix ms 1500
       Then 1 collection schedules are visible
       And 0 collection schedules are due now
       And the first collection schedule targets collection "release:2026.05"

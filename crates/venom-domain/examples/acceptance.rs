@@ -988,6 +988,29 @@ async fn venom_materializes_due_collection_scans(
     );
 }
 
+#[when(expr = "VENOM durably materializes due collection scans at unix ms {int} with limit {int}")]
+async fn venom_durably_materializes_due_collection_scans(
+    world: &mut AcceptanceWorld,
+    now_unix_ms: usize,
+    limit: usize,
+) {
+    let now_unix_ms = u64::try_from(now_unix_ms).expect("current time should fit u64");
+    let mut inventory = world.durable_state_ref().ingestion().inventory().clone();
+    let due_scans = CollectionScanScheduler::new(&mut inventory).collect_due(now_unix_ms, limit);
+    for due_scan in &due_scans {
+        world
+            .durable_state_mut()
+            .record_collection_scan_materialization(
+                due_scan.collection_key.as_ref(),
+                due_scan.next_due_at_unix_ms,
+                now_unix_ms,
+                u32::try_from(due_scan.requests.len()).expect("request count should fit u32"),
+            )
+            .expect("durable collection materialization should persist");
+    }
+    world.last_due_collection_scans = due_scans;
+}
+
 #[when(expr = "VENOM lists collection schedules at unix ms {int}")]
 async fn venom_lists_collection_schedules(world: &mut AcceptanceWorld, now_unix_ms: usize) {
     world.last_collection_operations_summaries =
