@@ -303,6 +303,7 @@ impl ApiState {
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
         let mut service = self.take_service().await;
+        let _ = service.refresh_from_remote_if_stale().await?;
         let result = operation(&mut service).await;
         if result.is_ok() {
             service.mark_remote_change_observed().await?;
@@ -3393,6 +3394,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_write_path_refreshes_remote_findings_before_governance_mutation() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("write_refresh");
+        let primary = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+
+        let response = register_payments_component(primary.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = bind_owned_artifact(primary.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let stale = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("second postgres api state should open"),
+        );
+
+        let response = configure_fixture_provider(primary.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = enqueue_scan_request(primary.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = drain_worker_with_fixture(primary.clone(), 8).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = accept_openssl_risk(stale.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = stale
+            .oneshot(
+                Request::get(
+                    "/findings/active?component_key=component:payments-api&artifact_kind=container-image&artifact_identity=registry.example/payments@sha256:111&governance_state=risk-accepted",
+                )
+                .body(Body::empty())
+                .expect("request should build"),
+            )
+            .await
+            .expect("query request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be valid json");
+        assert_eq!(payload["active_findings"].as_array().map_or(0, Vec::len), 1);
+        assert_eq!(
+            payload["active_findings"][0]["governance_reason"],
+            "Accepted after remote refresh"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_backend_reloads_reopened_finding_as_open() {
         let Some(database_url) = postgres_test_url() else {
             return;
@@ -4222,6 +4283,30 @@ mod tests {
             )
             .await
             .expect("suppression request should succeed")
+    }
+
+    async fn accept_openssl_risk(router: axum::Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::post("/findings/risk-acceptance")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "component_key": "component:payments-api",
+                            "artifact_kind": "container-image",
+                            "artifact_identity": "registry.example/payments@sha256:111",
+                            "vulnerability_id": "CVE-2026-0001",
+                            "package_name": "openssl",
+                            "package_version": "3.0.0",
+                            "package_purl": null,
+                            "reason": "Accepted after remote refresh"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("risk acceptance request should succeed")
     }
 
     async fn enqueue_scan_request(router: axum::Router) -> axum::response::Response {

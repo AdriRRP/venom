@@ -133,6 +133,10 @@ Completed:
 47. `W135-context-factor-identity-explainability`
     Expose the exact identity behind each effective context factor, not only
     whether it came from component, tag, or collection scope.
+48. `W136-postgres-write-path-remote-refresh`
+    Refresh Postgres-backed API write paths from durable state before taking
+    mutable business decisions, so multi-instance writes do not act on stale
+    in-process projections.
 
 ## Exit condition
 
