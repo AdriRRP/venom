@@ -165,7 +165,7 @@ impl PostgresStore {
     /// # Errors
     ///
     /// Returns an error string when the WAL watermark cannot be read.
-    pub async fn mark_remote_change_observed(&mut self) -> Result<(), String> {
+    pub async fn mark_remote_change_observed(&self) -> Result<(), String> {
         self.set_observed_wal_lsn(self.current_wal_lsn().await?);
         Ok(())
     }

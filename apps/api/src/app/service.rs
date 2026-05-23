@@ -596,8 +596,8 @@ impl ApiApplication {
     /// # Errors
     ///
     /// Returns [`ApiApplicationError`] when the Postgres watermark cannot be read.
-    pub async fn mark_remote_change_observed(&mut self) -> Result<(), ApiApplicationError> {
-        match &mut self.backend {
+    pub async fn mark_remote_change_observed(&self) -> Result<(), ApiApplicationError> {
+        match &self.backend {
             ApiStore::Local(_) => Ok(()),
             ApiStore::Postgres(postgres) => postgres
                 .mark_remote_change_observed()
