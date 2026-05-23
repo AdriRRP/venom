@@ -126,7 +126,7 @@ impl CollectionGovernanceAccumulator {
 }
 
 impl BoundedScopedFindingsPage {
-    fn new(offset: usize, limit: usize) -> Self {
+    const fn new(offset: usize, limit: usize) -> Self {
         Self {
             total: 0,
             cap: offset.saturating_add(limit),
@@ -391,12 +391,11 @@ mod tests {
                     PackageCoordinate::new(format!("pkg-{index}"), "1.0.0"),
                 )
                 .with_severity(match index {
-                    0 => Severity::Low,
-                    1 => Severity::Critical,
+                    1 | 4 => Severity::Critical,
                     2 => Severity::High,
                     3 => Severity::Medium,
-                    4 => Severity::Critical,
-                    _ => Severity::High,
+                    5 => Severity::Low,
+                    _ => Severity::Unknown,
                 })
             })
             .collect::<Vec<_>>();
