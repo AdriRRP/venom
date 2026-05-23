@@ -312,13 +312,30 @@ impl ContextFactorSource {
 }
 
 /// Provenance of each effective context trait after overlay precedence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextFactorOrigin {
+    pub source: ContextFactorSource,
+    pub identity: Box<str>,
+}
+
+impl ContextFactorOrigin {
+    #[must_use]
+    pub fn new(source: ContextFactorSource, identity: impl Into<Box<str>>) -> Self {
+        Self {
+            source,
+            identity: identity.into(),
+        }
+    }
+}
+
+/// Provenance of each effective context trait after overlay precedence.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EffectiveContextFactorSources {
-    pub internet_exposed: Option<ContextFactorSource>,
-    pub production: Option<ContextFactorSource>,
-    pub mission_critical: Option<ContextFactorSource>,
-    pub vpn_restricted: Option<ContextFactorSource>,
-    pub non_privileged_user: Option<ContextFactorSource>,
+    pub internet_exposed: Option<ContextFactorOrigin>,
+    pub production: Option<ContextFactorOrigin>,
+    pub mission_critical: Option<ContextFactorOrigin>,
+    pub vpn_restricted: Option<ContextFactorOrigin>,
+    pub non_privileged_user: Option<ContextFactorOrigin>,
 }
 
 /// Truthful effective execution context for one managed component scope.
@@ -1818,7 +1835,8 @@ impl ComponentInventory {
         let component_profile = self
             .assigned_context_profile(component_key)
             .and_then(|profile_key| self.context_profile(profile_key));
-        let (tag_values, tag_profiles) = self.tag_overlay_effective_context(component_key);
+        let (tag_values, tag_profiles, tag_factor_sources) =
+            self.tag_overlay_effective_context_with_provenance(component_key);
         let values = ContextProfileValues::merge(
             tag_values,
             component_profile
@@ -1830,7 +1848,7 @@ impl ComponentInventory {
             values,
             factor_sources: Self::component_over_tag_factor_sources(
                 component_profile.as_ref(),
-                tag_values,
+                tag_factor_sources,
             ),
             component_profile: component_profile
                 .as_ref()
@@ -2109,12 +2127,26 @@ impl ComponentInventory {
         &self,
         component_key: &str,
     ) -> (Option<ContextProfileValues>, Vec<ContextProfileRef>) {
+        let (values, profiles, _) =
+            self.tag_overlay_effective_context_with_provenance(component_key);
+        (values, profiles)
+    }
+
+    fn tag_overlay_effective_context_with_provenance(
+        &self,
+        component_key: &str,
+    ) -> (
+        Option<ContextProfileValues>,
+        Vec<ContextProfileRef>,
+        EffectiveContextFactorSources,
+    ) {
         let Some(record) = self.components.get(component_key) else {
-            return (None, Vec::new());
+            return (None, Vec::new(), EffectiveContextFactorSources::default());
         };
 
         let mut values = None;
         let mut profiles = Vec::new();
+        let mut factor_sources = EffectiveContextFactorSources::default();
 
         for tag_key in &record.tag_keys {
             let Some(profile_key) = self.assigned_tag_context_profile(tag_key.as_ref()) else {
@@ -2125,56 +2157,107 @@ impl ComponentInventory {
             };
             values = ContextProfileValues::merge(values, Some(profile.values()));
             profiles.push(profile.reference());
+            if factor_sources.internet_exposed.is_none() && profile.internet_exposed.is_some() {
+                factor_sources.internet_exposed = Some(ContextFactorOrigin::new(
+                    ContextFactorSource::Tag,
+                    tag_key.clone(),
+                ));
+            }
+            if factor_sources.production.is_none() && profile.production.is_some() {
+                factor_sources.production = Some(ContextFactorOrigin::new(
+                    ContextFactorSource::Tag,
+                    tag_key.clone(),
+                ));
+            }
+            if factor_sources.mission_critical.is_none() && profile.mission_critical.is_some() {
+                factor_sources.mission_critical = Some(ContextFactorOrigin::new(
+                    ContextFactorSource::Tag,
+                    tag_key.clone(),
+                ));
+            }
+            if factor_sources.vpn_restricted.is_none() && profile.vpn_restricted.is_some() {
+                factor_sources.vpn_restricted = Some(ContextFactorOrigin::new(
+                    ContextFactorSource::Tag,
+                    tag_key.clone(),
+                ));
+            }
+            if factor_sources.non_privileged_user.is_none() && profile.non_privileged_user.is_some()
+            {
+                factor_sources.non_privileged_user = Some(ContextFactorOrigin::new(
+                    ContextFactorSource::Tag,
+                    tag_key.clone(),
+                ));
+            }
         }
 
-        (values, profiles)
+        (values, profiles, factor_sources)
     }
 
     fn component_over_tag_factor_sources(
         component_profile: Option<&ManagedContextProfile>,
-        tag_values: Option<ContextProfileValues>,
+        tag_factor_sources: EffectiveContextFactorSources,
     ) -> EffectiveContextFactorSources {
         EffectiveContextFactorSources {
             internet_exposed: component_profile
                 .and_then(|profile| profile.internet_exposed)
-                .map(|_| ContextFactorSource::Component)
-                .or_else(|| {
-                    tag_values
-                        .and_then(|values| values.internet_exposed)
-                        .map(|_| ContextFactorSource::Tag)
-                }),
+                .map(|_| {
+                    ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
+                    )
+                })
+                .or(tag_factor_sources.internet_exposed),
             production: component_profile
                 .and_then(|profile| profile.production)
-                .map(|_| ContextFactorSource::Component)
-                .or_else(|| {
-                    tag_values
-                        .and_then(|values| values.production)
-                        .map(|_| ContextFactorSource::Tag)
-                }),
+                .map(|_| {
+                    ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
+                    )
+                })
+                .or(tag_factor_sources.production),
             mission_critical: component_profile
                 .and_then(|profile| profile.mission_critical)
-                .map(|_| ContextFactorSource::Component)
-                .or_else(|| {
-                    tag_values
-                        .and_then(|values| values.mission_critical)
-                        .map(|_| ContextFactorSource::Tag)
-                }),
+                .map(|_| {
+                    ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
+                    )
+                })
+                .or(tag_factor_sources.mission_critical),
             vpn_restricted: component_profile
                 .and_then(|profile| profile.vpn_restricted)
-                .map(|_| ContextFactorSource::Component)
-                .or_else(|| {
-                    tag_values
-                        .and_then(|values| values.vpn_restricted)
-                        .map(|_| ContextFactorSource::Tag)
-                }),
+                .map(|_| {
+                    ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
+                    )
+                })
+                .or(tag_factor_sources.vpn_restricted),
             non_privileged_user: component_profile
                 .and_then(|profile| profile.non_privileged_user)
-                .map(|_| ContextFactorSource::Component)
-                .or_else(|| {
-                    tag_values
-                        .and_then(|values| values.non_privileged_user)
-                        .map(|_| ContextFactorSource::Tag)
-                }),
+                .map(|_| {
+                    ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        component_profile
+                            .expect("component profile present")
+                            .profile_key
+                            .clone(),
+                    )
+                })
+                .or(tag_factor_sources.non_privileged_user),
         }
     }
 
@@ -2184,39 +2267,79 @@ impl ComponentInventory {
     ) -> EffectiveContextFactorSources {
         EffectiveContextFactorSources {
             internet_exposed: component_effective_context
-                .and_then(|context| context.factor_sources.internet_exposed)
+                .and_then(|context| context.factor_sources.internet_exposed.clone())
                 .or_else(|| {
                     collection_profile
                         .and_then(|profile| profile.internet_exposed)
-                        .map(|_| ContextFactorSource::Collection)
+                        .map(|_| {
+                            ContextFactorOrigin::new(
+                                ContextFactorSource::Collection,
+                                collection_profile
+                                    .expect("collection profile present")
+                                    .profile_key
+                                    .clone(),
+                            )
+                        })
                 }),
             production: component_effective_context
-                .and_then(|context| context.factor_sources.production)
+                .and_then(|context| context.factor_sources.production.clone())
                 .or_else(|| {
                     collection_profile
                         .and_then(|profile| profile.production)
-                        .map(|_| ContextFactorSource::Collection)
+                        .map(|_| {
+                            ContextFactorOrigin::new(
+                                ContextFactorSource::Collection,
+                                collection_profile
+                                    .expect("collection profile present")
+                                    .profile_key
+                                    .clone(),
+                            )
+                        })
                 }),
             mission_critical: component_effective_context
-                .and_then(|context| context.factor_sources.mission_critical)
+                .and_then(|context| context.factor_sources.mission_critical.clone())
                 .or_else(|| {
                     collection_profile
                         .and_then(|profile| profile.mission_critical)
-                        .map(|_| ContextFactorSource::Collection)
+                        .map(|_| {
+                            ContextFactorOrigin::new(
+                                ContextFactorSource::Collection,
+                                collection_profile
+                                    .expect("collection profile present")
+                                    .profile_key
+                                    .clone(),
+                            )
+                        })
                 }),
             vpn_restricted: component_effective_context
-                .and_then(|context| context.factor_sources.vpn_restricted)
+                .and_then(|context| context.factor_sources.vpn_restricted.clone())
                 .or_else(|| {
                     collection_profile
                         .and_then(|profile| profile.vpn_restricted)
-                        .map(|_| ContextFactorSource::Collection)
+                        .map(|_| {
+                            ContextFactorOrigin::new(
+                                ContextFactorSource::Collection,
+                                collection_profile
+                                    .expect("collection profile present")
+                                    .profile_key
+                                    .clone(),
+                            )
+                        })
                 }),
             non_privileged_user: component_effective_context
-                .and_then(|context| context.factor_sources.non_privileged_user)
+                .and_then(|context| context.factor_sources.non_privileged_user.clone())
                 .or_else(|| {
                     collection_profile
                         .and_then(|profile| profile.non_privileged_user)
-                        .map(|_| ContextFactorSource::Collection)
+                        .map(|_| {
+                            ContextFactorOrigin::new(
+                                ContextFactorSource::Collection,
+                                collection_profile
+                                    .expect("collection profile present")
+                                    .profile_key
+                                    .clone(),
+                            )
+                        })
                 }),
         }
     }

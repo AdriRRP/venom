@@ -39,18 +39,19 @@ pub use inventory::{
     ComponentRegistration, ComponentTagRegistration, ConfigureCollectionScanScheduleChange,
     ConfigureCollectionScanScheduleResult, ConfigureCollectionSourceChange,
     ConfigureCollectionSourceResult, ConfigureProviderChange, ConfigureProviderResult,
-    ContextFactorSource, ContextProfileRef, ContextProfileRegistration, ContextProfileValues,
-    EffectiveContextFactorSources, EffectiveContextProfile, ManagedCollection,
-    ManagedCollectionOperationsSummary, ManagedComponentTag, ManagedContextProfile,
-    MaterializeCollectionSourceChange, MaterializeCollectionSourceResult, RegisterCollectionChange,
-    RegisterCollectionResult, RegisterComponentChange, RegisterComponentResult,
-    RegisterComponentTagChange, RegisterComponentTagResult, RegisterContextProfileChange,
-    RegisterContextProfileResult, RemoveCollectionComponentChange, RemoveCollectionComponentResult,
-    TagContextConflict, TagContextField,
+    ContextFactorOrigin, ContextFactorSource, ContextProfileRef, ContextProfileRegistration,
+    ContextProfileValues, EffectiveContextFactorSources, EffectiveContextProfile,
+    ManagedCollection, ManagedCollectionOperationsSummary, ManagedComponentTag,
+    ManagedContextProfile, MaterializeCollectionSourceChange, MaterializeCollectionSourceResult,
+    RegisterCollectionChange, RegisterCollectionResult, RegisterComponentChange,
+    RegisterComponentResult, RegisterComponentTagChange, RegisterComponentTagResult,
+    RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
+    RemoveCollectionComponentResult, TagContextConflict, TagContextField,
 };
 pub use operations::{
     DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
-    SystemEventKind, SystemEventsPage, SystemEventsQuery,
+    SystemEventKind, SystemEventRecentWindows, SystemEventWindowTotals, SystemEventsPage,
+    SystemEventsQuery,
 };
 pub use scanning::{
     CollectionScanBatch, CollectionScanPlanningError, CollectionScanScheduler,

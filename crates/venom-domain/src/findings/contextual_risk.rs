@@ -78,6 +78,7 @@ pub struct ContextualActiveFindingProjection {
 pub struct ContextualFactorProvenance {
     pub factor: Box<str>,
     pub source: Box<str>,
+    pub identity: Box<str>,
 }
 
 impl ContextualActiveFindingProjection {
@@ -155,38 +156,38 @@ fn contextual_factor_provenance(
     effective_context: &EffectiveContextProfile,
 ) -> Vec<ContextualFactorProvenance> {
     let values = effective_context.values;
-    let sources = effective_context.factor_sources;
+    let sources = &effective_context.factor_sources;
     let mut factors = Vec::new();
 
     push_factor_provenance(
         &mut factors,
         "internet-exposed",
         values.internet_exposed,
-        sources.internet_exposed,
+        sources.internet_exposed.clone(),
     );
     push_factor_provenance(
         &mut factors,
         "production",
         values.production,
-        sources.production,
+        sources.production.clone(),
     );
     push_factor_provenance(
         &mut factors,
         "mission-critical",
         values.mission_critical,
-        sources.mission_critical,
+        sources.mission_critical.clone(),
     );
     push_factor_provenance(
         &mut factors,
         "vpn-restricted",
         values.vpn_restricted,
-        sources.vpn_restricted,
+        sources.vpn_restricted.clone(),
     );
     push_factor_provenance(
         &mut factors,
         "non-privileged-user",
         values.non_privileged_user,
-        sources.non_privileged_user,
+        sources.non_privileged_user.clone(),
     );
 
     factors
@@ -196,7 +197,7 @@ fn push_factor_provenance(
     factors: &mut Vec<ContextualFactorProvenance>,
     factor: &'static str,
     value: Option<bool>,
-    source: Option<crate::ContextFactorSource>,
+    source: Option<crate::ContextFactorOrigin>,
 ) {
     let Some(value) = value else {
         return;
@@ -206,7 +207,8 @@ fn push_factor_provenance(
     };
     factors.push(ContextualFactorProvenance {
         factor: format!("{factor}:{value}").into_boxed_str(),
-        source: source.as_str().into(),
+        source: source.source.as_str().into(),
+        identity: source.identity,
     });
 }
 
@@ -397,9 +399,10 @@ fn contextual_posture(context_profile: ContextProfileValues) -> ContextualPostur
 mod tests {
     use super::{ContextualActiveFindingProjection, ContextualRiskLevel, contextual_risk_level};
     use crate::{
-        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorSource, ContextProfileRef,
-        ContextProfileValues, EffectiveContextFactorSources, EffectiveContextProfile,
-        FindingGovernanceState, FindingRef, ManagedContextProfile, PackageCoordinate, Severity,
+        ActiveFindingProjection, ArtifactKind, ArtifactRef, ContextFactorOrigin,
+        ContextFactorSource, ContextProfileRef, ContextProfileValues,
+        EffectiveContextFactorSources, EffectiveContextProfile, FindingGovernanceState, FindingRef,
+        ManagedContextProfile, PackageCoordinate, Severity,
     };
 
     #[test]
@@ -514,9 +517,18 @@ mod tests {
             Some(EffectiveContextProfile {
                 values: profile.values(),
                 factor_sources: EffectiveContextFactorSources {
-                    internet_exposed: Some(ContextFactorSource::Component),
-                    production: Some(ContextFactorSource::Component),
-                    mission_critical: Some(ContextFactorSource::Component),
+                    internet_exposed: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        "context:internet-prod",
+                    )),
+                    production: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        "context:internet-prod",
+                    )),
+                    mission_critical: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        "context:internet-prod",
+                    )),
                     vpn_restricted: None,
                     non_privileged_user: None,
                 },
@@ -566,9 +578,18 @@ mod tests {
                     non_privileged_user: None,
                 },
                 factor_sources: EffectiveContextFactorSources {
-                    internet_exposed: Some(ContextFactorSource::Component),
-                    production: Some(ContextFactorSource::Collection),
-                    mission_critical: Some(ContextFactorSource::Collection),
+                    internet_exposed: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Component,
+                        "context:payments-edge",
+                    )),
+                    production: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Collection,
+                        "context:corp-api-baseline",
+                    )),
+                    mission_critical: Some(ContextFactorOrigin::new(
+                        ContextFactorSource::Collection,
+                        "context:corp-api-baseline",
+                    )),
                     vpn_restricted: None,
                     non_privileged_user: None,
                 },
@@ -605,8 +626,8 @@ mod tests {
                 .contextual_factor_provenance
                 .iter()
                 .find(|factor| factor.factor.as_ref() == "production:true")
-                .map(|factor| factor.source.as_ref()),
-            Some("collection")
+                .map(|factor| (factor.source.as_ref(), factor.identity.as_ref())),
+            Some(("collection", "context:corp-api-baseline"))
         );
     }
 }

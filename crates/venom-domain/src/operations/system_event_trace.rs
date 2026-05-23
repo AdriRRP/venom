@@ -169,6 +169,24 @@ pub struct SystemEventQueryIndex {
     recent_publication_events: Vec<Arc<SystemEvent>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemEventWindowTotals {
+    pub total: usize,
+    pub scheduler_total: usize,
+    pub command_total: usize,
+    pub governance_total: usize,
+    pub publication_total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SystemEventRecentWindows {
+    pub recent_events: Vec<SystemEvent>,
+    pub recent_scheduler_events: Vec<SystemEvent>,
+    pub recent_command_events: Vec<SystemEvent>,
+    pub recent_governance_events: Vec<SystemEvent>,
+    pub recent_publication_events: Vec<SystemEvent>,
+}
+
 impl Default for SystemEventQueryIndex {
     fn default() -> Self {
         Self::new()
@@ -253,6 +271,41 @@ impl SystemEventQueryIndex {
                 &left.recent_publication_events,
                 &right.recent_publication_events,
             ),
+        }
+    }
+
+    #[must_use]
+    pub fn from_recent_windows(
+        totals: SystemEventWindowTotals,
+        windows: SystemEventRecentWindows,
+    ) -> Self {
+        Self {
+            total: totals.total,
+            scheduler_total: totals.scheduler_total,
+            command_total: totals.command_total,
+            governance_total: totals.governance_total,
+            publication_total: totals.publication_total,
+            recent_events: windows.recent_events.into_iter().map(Arc::new).collect(),
+            recent_scheduler_events: windows
+                .recent_scheduler_events
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+            recent_command_events: windows
+                .recent_command_events
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+            recent_governance_events: windows
+                .recent_governance_events
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
+            recent_publication_events: windows
+                .recent_publication_events
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
         }
     }
 

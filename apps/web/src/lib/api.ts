@@ -8,6 +8,7 @@ export type ContextProfileRef = {
 export type ContextualFactorProvenance = {
 	factor: string;
 	source: string;
+	identity: string;
 };
 
 export type ActiveFinding = {

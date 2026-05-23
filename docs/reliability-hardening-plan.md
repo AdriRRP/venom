@@ -102,6 +102,37 @@ Completed:
 37. `W125-context-factor-explainability`
     Expose the exact effective context factors that shaped each deterministic
     contextual-risk result.
+38. `W126-http-write-plane-critical-section-reduction`
+    Rebuild refreshed HTTP snapshots after restoring the mutable application
+    slot instead of while exclusive ownership is still held.
+39. `W127-system-event-refresh-elision`
+    Stop rebuilding inventory and findings lanes when a mutation only changes
+    recent operator-facing system events.
+40. `W128-collection-scan-scheduler-borrowed-inventory`
+    Plan due collection scans from borrowed inventory instead of cloning the
+    full inventory shape on each scheduler pass.
+41. `W129-system-event-index-arc-compaction`
+    Keep bounded recent system-event windows as shared `Arc<SystemEvent>`
+    entries instead of duplicating full values per retained list.
+42. `W130-context-factor-provenance`
+    Expose factor-level contextual provenance so operators can see which scope
+    supplied each effective trait.
+43. `W131-http-write-plane-lane-partitioning`
+    Drain long-running HTTP worker and publication loops one durable step at a
+    time so other write operations can interleave between iterations.
+44. `W132-incremental-read-side-refresh`
+    Refresh inventory-backed and findings-backed snapshot lanes separately so
+    governance and ingestion writes do not deep-clone unrelated read-side data.
+45. `W133-postgres-remote-change-watermark`
+    Refresh Postgres-backed API snapshots when another instance advanced the
+    durable store, using one remote change watermark rather than blind process
+    cache trust.
+46. `W134-postgres-system-event-window-shaping`
+    Rebuild Postgres operator event timelines from truthful totals plus recent
+    windows instead of loading the whole system-event table into memory.
+47. `W135-context-factor-identity-explainability`
+    Expose the exact identity behind each effective context factor, not only
+    whether it came from component, tag, or collection scope.
 
 ## Exit condition
 
