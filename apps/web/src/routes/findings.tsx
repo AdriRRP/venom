@@ -260,12 +260,20 @@ function renderContextCell(finding: {
 	const summary = contextProfileSummary(finding);
 	const semantics = contextSemantics(finding);
 	return (
-		<div>
-			<div>{summary}</div>
-			{semantics.posture ? <div>{semantics.posture}</div> : null}
-			{semantics.rule ? <div>{semantics.rule}</div> : null}
+		<div className="context-cell">
+			<p className="context-summary">{summary}</p>
+			<div className="context-meta">
+				{semantics.posture ? (
+					<span className="context-chip">{semantics.posture}</span>
+				) : null}
+				{semantics.rule ? (
+					<span className="context-chip context-chip-subtle">
+						{semantics.rule}
+					</span>
+				) : null}
+			</div>
 			{semantics.factors.length > 0 ? (
-				<ul>
+				<ul className="context-factor-list">
 					{semantics.factors.map((factor) => (
 						<li key={factor}>{factor}</li>
 					))}

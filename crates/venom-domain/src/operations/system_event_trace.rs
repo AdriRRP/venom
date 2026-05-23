@@ -180,11 +180,11 @@ pub struct SystemEventWindowTotals {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SystemEventRecentWindows {
-    pub recent_events: Vec<SystemEvent>,
-    pub recent_scheduler_events: Vec<SystemEvent>,
-    pub recent_command_events: Vec<SystemEvent>,
-    pub recent_governance_events: Vec<SystemEvent>,
-    pub recent_publication_events: Vec<SystemEvent>,
+    pub recent_events: Vec<Arc<SystemEvent>>,
+    pub recent_scheduler_events: Vec<Arc<SystemEvent>>,
+    pub recent_command_events: Vec<Arc<SystemEvent>>,
+    pub recent_governance_events: Vec<Arc<SystemEvent>>,
+    pub recent_publication_events: Vec<Arc<SystemEvent>>,
 }
 
 impl Default for SystemEventQueryIndex {
@@ -285,27 +285,11 @@ impl SystemEventQueryIndex {
             command_total: totals.command_total,
             governance_total: totals.governance_total,
             publication_total: totals.publication_total,
-            recent_events: windows.recent_events.into_iter().map(Arc::new).collect(),
-            recent_scheduler_events: windows
-                .recent_scheduler_events
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
-            recent_command_events: windows
-                .recent_command_events
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
-            recent_governance_events: windows
-                .recent_governance_events
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
-            recent_publication_events: windows
-                .recent_publication_events
-                .into_iter()
-                .map(Arc::new)
-                .collect(),
+            recent_events: windows.recent_events,
+            recent_scheduler_events: windows.recent_scheduler_events,
+            recent_command_events: windows.recent_command_events,
+            recent_governance_events: windows.recent_governance_events,
+            recent_publication_events: windows.recent_publication_events,
         }
     }
 
