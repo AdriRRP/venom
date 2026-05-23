@@ -137,6 +137,10 @@ Completed:
     Refresh Postgres-backed API write paths from durable state before taking
     mutable business decisions, so multi-instance writes do not act on stale
     in-process projections.
+49. `W137-scoped-active-findings-stream-compaction`
+    Keep one bounded top-k window for active-findings pages instead of
+    materializing and sorting every matching finding in one release-scoped or
+    artifact-scoped query.
 
 ## Exit condition
 

@@ -2,7 +2,8 @@ use crate::{
     ArtifactRef, CollectionScopedArtifact, FindingDecision, FindingGovernanceState, FindingRef,
     PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity, Suppression,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
+use std::cmp::Reverse;
 
 pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
 pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
@@ -286,7 +287,10 @@ impl FindingReadModel {
     pub fn query_active_findings(&self, query: &ActiveFindingsQuery) -> ActiveFindingsPage {
         let offset = query.offset;
         let limit = normalize_page_limit(query.limit);
-        let mut filtered = self
+        let page_bound = offset.saturating_add(limit);
+        let mut total = 0;
+        let mut filtered = BinaryHeap::new();
+        for finding in self
             .active
             .get(&TrackedArtifactKey::new(
                 query.component_key.clone(),
@@ -314,26 +318,42 @@ impl FindingReadModel {
                     .as_deref()
                     .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
             })
-            .collect::<Vec<_>>();
-        filtered.sort_unstable_by_key(|finding| {
-            (
-                std::cmp::Reverse(severity_rank(finding.severity)),
-                finding_dedup_key(finding),
-            )
-        });
+        {
+            total += 1;
+            let key = ActiveFindingPageKey::from_record(finding);
+            if filtered.len() < page_bound {
+                filtered.push(PageCandidate {
+                    key,
+                    value: self.project_active_finding(
+                        query.component_key.clone(),
+                        query.artifact.clone(),
+                        finding,
+                    ),
+                });
+                continue;
+            }
 
-        let total = filtered.len();
+            let should_keep = filtered.peek().is_some_and(|worst| key < worst.key);
+            if should_keep {
+                filtered.pop();
+                filtered.push(PageCandidate {
+                    key,
+                    value: self.project_active_finding(
+                        query.component_key.clone(),
+                        query.artifact.clone(),
+                        finding,
+                    ),
+                });
+            }
+        }
+
+        let mut filtered = filtered.into_vec();
+        filtered.sort_unstable_by(|left, right| left.key.cmp(&right.key));
         let page = filtered
             .into_iter()
             .skip(offset)
             .take(limit)
-            .map(|finding| {
-                self.project_active_finding(
-                    query.component_key.clone(),
-                    query.artifact.clone(),
-                    finding,
-                )
-            })
+            .map(|candidate| candidate.value)
             .collect::<Vec<_>>();
 
         ActiveFindingsPage {
@@ -353,8 +373,24 @@ impl FindingReadModel {
     ) -> ScopedActiveFindingsPage {
         let offset = query.offset;
         let limit = normalize_page_limit(query.limit);
-        let filtered = self.collect_scoped_active_findings(scope, query);
-        let total = filtered.len();
+        let page_bound = offset.saturating_add(limit);
+        let (total, filtered) =
+            self.collect_filtered_scoped_active_findings_page(scope, page_bound, |scope_item, finding| {
+                query
+                    .min_severity
+                    .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
+                    && query.governance_state.is_none_or(|governance_state| {
+                        self.finding_governance_state(
+                            scope_item.component_key.as_ref(),
+                            &scope_item.artifact,
+                            finding,
+                        ) == governance_state
+                    })
+                    && query
+                        .package_name
+                        .as_deref()
+                        .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
+            });
         let page = filtered
             .into_iter()
             .skip(offset)
@@ -464,6 +500,63 @@ impl FindingReadModel {
                 )
             })
             .collect()
+    }
+
+    fn collect_filtered_scoped_active_findings_page(
+        &self,
+        scope: &[CollectionScopedArtifact],
+        page_bound: usize,
+        mut predicate: impl FnMut(&CollectionScopedArtifact, &ActiveFindingRecord) -> bool,
+    ) -> (usize, Vec<ScopedActiveFinding>) {
+        let mut total = 0;
+        let mut filtered = BinaryHeap::new();
+
+        for scope_item in scope {
+            if let Some(findings) = self.active.get(&TrackedArtifactKey::new(
+                scope_item.component_key.clone(),
+                scope_item.artifact.clone(),
+            )) {
+                for finding in findings {
+                    if !predicate(scope_item, finding) {
+                        continue;
+                    }
+
+                    total += 1;
+                    let key = ScopedActiveFindingPageKey::from_item(scope_item, finding);
+                    if filtered.len() < page_bound {
+                        filtered.push(PageCandidate {
+                            key,
+                            value: self.project_active_finding(
+                                scope_item.component_key.clone(),
+                                scope_item.artifact.clone(),
+                                finding,
+                            ),
+                        });
+                        continue;
+                    }
+
+                    let should_keep = filtered.peek().is_some_and(|worst| key < worst.key);
+                    if should_keep {
+                        filtered.pop();
+                        filtered.push(PageCandidate {
+                            key,
+                            value: self.project_active_finding(
+                                scope_item.component_key.clone(),
+                                scope_item.artifact.clone(),
+                                finding,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut filtered = filtered.into_vec();
+        filtered.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        (
+            total,
+            filtered.into_iter().map(|candidate| candidate.value).collect(),
+        )
     }
 
     pub fn visit_scoped_active_findings(
@@ -583,6 +676,80 @@ struct ActiveFindingRecord {
     package_version: Box<str>,
     package_purl: Option<Box<str>>,
     severity: Severity,
+}
+
+#[derive(Debug, Clone)]
+struct PageCandidate<K, V> {
+    key: K,
+    value: V,
+}
+
+impl<K: Ord, V> PartialEq for PageCandidate<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl<K: Ord, V> Eq for PageCandidate<K, V> {}
+
+impl<K: Ord, V> PartialOrd for PageCandidate<K, V> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K: Ord, V> Ord for PageCandidate<K, V> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActiveFindingPageKey {
+    severity: Reverse<u8>,
+    vulnerability_id: Box<str>,
+    package_name: Box<str>,
+    package_version: Box<str>,
+    package_purl: Option<Box<str>>,
+}
+
+impl ActiveFindingPageKey {
+    fn from_record(finding: &ActiveFindingRecord) -> Self {
+        Self {
+            severity: Reverse(severity_rank(finding.severity)),
+            vulnerability_id: finding.vulnerability_id.clone(),
+            package_name: finding.package_name.clone(),
+            package_version: finding.package_version.clone(),
+            package_purl: finding.package_purl.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ScopedActiveFindingPageKey {
+    severity: Reverse<u8>,
+    component_key: Box<str>,
+    artifact_kind: crate::ArtifactKind,
+    artifact_identity: Box<str>,
+    vulnerability_id: Box<str>,
+    package_name: Box<str>,
+    package_version: Box<str>,
+    package_purl: Option<Box<str>>,
+}
+
+impl ScopedActiveFindingPageKey {
+    fn from_item(scope_item: &CollectionScopedArtifact, finding: &ActiveFindingRecord) -> Self {
+        Self {
+            severity: Reverse(severity_rank(finding.severity)),
+            component_key: scope_item.component_key.clone(),
+            artifact_kind: scope_item.artifact.kind,
+            artifact_identity: scope_item.artifact.identity.clone(),
+            vulnerability_id: finding.vulnerability_id.clone(),
+            package_name: finding.package_name.clone(),
+            package_version: finding.package_version.clone(),
+            package_purl: finding.package_purl.clone(),
+        }
+    }
 }
 
 impl ActiveFindingRecord {
@@ -901,6 +1068,64 @@ mod tests {
         );
 
         assert_eq!(cohort.len(), 205);
+    }
+
+    #[test]
+    fn scoped_query_keeps_ordering_and_pagination_without_full_page_materialization() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("busybox", "1.36.0"))
+                .with_severity(Severity::Low),
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::Critical),
+        ]));
+
+        let billing_artifact = ArtifactRef::new(
+            ArtifactKind::ContainerImage,
+            "registry.example/billing@sha256:222",
+        );
+        let billing_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:billing-api",
+            billing_artifact.clone(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0003",
+                PackageCoordinate::new("nghttp2", "1.61"),
+            )
+            .with_severity(Severity::High)],
+        );
+        read_model.record_scan_report(&billing_report);
+
+        let scope = vec![
+            CollectionScopedArtifact {
+                component_key: "component:payments-api".into(),
+                artifact: artifact(),
+            },
+            CollectionScopedArtifact {
+                component_key: "component:billing-api".into(),
+                artifact: billing_artifact,
+            },
+        ];
+
+        let page = read_model.query_scoped_active_findings(
+            &scope,
+            &ScopedActiveFindingsQuery::new().with_offset(1).with_limit(1),
+        );
+
+        assert_eq!(page.total, 3);
+        assert_eq!(page.returned, 1);
+        assert_eq!(page.offset, 1);
+        assert_eq!(page.limit, 1);
+        assert_eq!(
+            page.findings[0].finding.component_key.as_ref(),
+            "component:billing-api"
+        );
+        assert_eq!(
+            page.findings[0].finding.vulnerability_id.as_ref(),
+            "CVE-2026-0003"
+        );
     }
 
     #[test]
