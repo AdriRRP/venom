@@ -4,7 +4,7 @@ Wave: `W142-bulk-cohort-streaming-and-context-explainability`
 Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
-Infra profile: `web`
+Infra profile: `none`
 
 ## Goal
 
