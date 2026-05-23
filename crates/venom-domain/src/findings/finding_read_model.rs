@@ -2,8 +2,8 @@ use crate::{
     ArtifactRef, CollectionScopedArtifact, FindingDecision, FindingGovernanceState, FindingRef,
     PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity, Suppression,
 };
-use std::collections::{BTreeMap, BinaryHeap};
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 
 pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
 pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
@@ -374,8 +374,10 @@ impl FindingReadModel {
         let offset = query.offset;
         let limit = normalize_page_limit(query.limit);
         let page_bound = offset.saturating_add(limit);
-        let (total, filtered) =
-            self.collect_filtered_scoped_active_findings_page(scope, page_bound, |scope_item, finding| {
+        let (total, filtered) = self.collect_filtered_scoped_active_findings_page(
+            scope,
+            page_bound,
+            |scope_item, finding| {
                 query
                     .min_severity
                     .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
@@ -390,7 +392,8 @@ impl FindingReadModel {
                         .package_name
                         .as_deref()
                         .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
-            });
+            },
+        );
         let page = filtered
             .into_iter()
             .skip(offset)
@@ -555,7 +558,10 @@ impl FindingReadModel {
         filtered.sort_unstable_by(|left, right| left.key.cmp(&right.key));
         (
             total,
-            filtered.into_iter().map(|candidate| candidate.value).collect(),
+            filtered
+                .into_iter()
+                .map(|candidate| candidate.value)
+                .collect(),
         )
     }
 
@@ -1090,11 +1096,10 @@ mod tests {
             billing_artifact.clone(),
             SystemTime::UNIX_EPOCH,
             EvidenceFreshness::Deterministic,
-            vec![ReportedFinding::new(
-                "CVE-2026-0003",
-                PackageCoordinate::new("nghttp2", "1.61"),
-            )
-            .with_severity(Severity::High)],
+            vec![
+                ReportedFinding::new("CVE-2026-0003", PackageCoordinate::new("nghttp2", "1.61"))
+                    .with_severity(Severity::High),
+            ],
         );
         read_model.record_scan_report(&billing_report);
 
@@ -1111,7 +1116,9 @@ mod tests {
 
         let page = read_model.query_scoped_active_findings(
             &scope,
-            &ScopedActiveFindingsQuery::new().with_offset(1).with_limit(1),
+            &ScopedActiveFindingsQuery::new()
+                .with_offset(1)
+                .with_limit(1),
         );
 
         assert_eq!(page.total, 3);
