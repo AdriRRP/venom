@@ -1,9 +1,11 @@
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
+pub use crate::infra::postgres_backend::PostgresRemoteChangeProbe;
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
@@ -429,6 +431,41 @@ enum ApiStore {
 struct LocalStore {
     state: DurableState,
     runtime: ScanCommandQueue,
+    merged_system_event_snapshot_cache: StdMutex<Option<MergedSystemEventSnapshot>>,
+}
+
+struct MergedSystemEventSnapshot {
+    state: Arc<SystemEventQueryIndex>,
+    runtime: Arc<SystemEventQueryIndex>,
+    merged: Arc<SystemEventQueryIndex>,
+}
+
+impl LocalStore {
+    fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
+        let state = self.state.system_event_index_snapshot_arc();
+        let runtime = self.runtime.system_event_index_snapshot_arc();
+        let mut cache = self
+            .merged_system_event_snapshot_cache
+            .lock()
+            .expect("merged local system event cache should not be poisoned");
+        if let Some(snapshot) = cache.as_ref()
+            && Arc::ptr_eq(&snapshot.state, &state)
+            && Arc::ptr_eq(&snapshot.runtime, &runtime)
+        {
+            return Arc::clone(&snapshot.merged);
+        }
+
+        let merged = Arc::new(SystemEventQueryIndex::merged(
+            state.as_ref(),
+            runtime.as_ref(),
+        ));
+        *cache = Some(MergedSystemEventSnapshot {
+            state,
+            runtime,
+            merged: Arc::clone(&merged),
+        });
+        merged
+    }
 }
 
 impl ApiApplication {
@@ -446,7 +483,11 @@ impl ApiApplication {
         let runtime = ScanCommandQueue::open(runtime_path)
             .map_err(|error| ApiApplicationError::State(error.to_string()))?;
         Ok(Self {
-            backend: ApiStore::Local(LocalStore { state, runtime }),
+            backend: ApiStore::Local(LocalStore {
+                state,
+                runtime,
+                merged_system_event_snapshot_cache: StdMutex::new(None),
+            }),
         })
     }
 
@@ -468,15 +509,20 @@ impl ApiApplication {
     }
 
     #[must_use]
+    pub fn remote_change_probe(&self) -> Option<PostgresRemoteChangeProbe> {
+        match &self.backend {
+            ApiStore::Local(_) => None,
+            ApiStore::Postgres(postgres) => Some(postgres.remote_change_probe()),
+        }
+    }
+
+    #[must_use]
     pub fn read_snapshot(&self) -> ApiReadSnapshot {
         match &self.backend {
             ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
-                Arc::new(SystemEventQueryIndex::merged(
-                    local.state.system_event_index_snapshot_arc().as_ref(),
-                    local.runtime.system_event_index_snapshot_arc().as_ref(),
-                )),
+                local.system_event_index_snapshot_arc(),
                 local.runtime.command_statuses_snapshot_arc(),
                 local.state.release_board_snapshot_arc(),
             ),
@@ -509,10 +555,7 @@ impl ApiApplication {
     #[must_use]
     pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         match &self.backend {
-            ApiStore::Local(local) => Arc::new(SystemEventQueryIndex::merged(
-                local.state.system_event_index_snapshot_arc().as_ref(),
-                local.runtime.system_event_index_snapshot_arc().as_ref(),
-            )),
+            ApiStore::Local(local) => local.system_event_index_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.system_event_index_snapshot_arc(),
         }
     }

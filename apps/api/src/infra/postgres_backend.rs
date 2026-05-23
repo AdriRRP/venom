@@ -1,6 +1,7 @@
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
@@ -48,7 +49,7 @@ use venom_domain::scanning::{
 pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
-    observed_wal_lsn: Box<str>,
+    observed_wal_lsn: Arc<StdMutex<Box<str>>>,
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: FindingReadModel,
@@ -62,6 +63,12 @@ pub struct PostgresStore {
     system_event_index: SystemEventQueryIndex,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PostgresRemoteChangeProbe {
+    pool: PgPool,
+    observed_wal_lsn: Arc<StdMutex<Box<str>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +123,7 @@ impl PostgresStore {
         let mut backend = Self {
             pool,
             names,
-            observed_wal_lsn: Box::from(""),
+            observed_wal_lsn: Arc::new(StdMutex::new(Box::from(""))),
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
             read_model: FindingReadModel::new(),
@@ -146,7 +153,7 @@ impl PostgresStore {
     /// Returns an error string when the WAL watermark cannot be read or rebuild fails.
     pub async fn refresh_from_remote_if_stale(&mut self) -> Result<bool, String> {
         let current_wal_lsn = self.current_wal_lsn().await?;
-        if current_wal_lsn == self.observed_wal_lsn {
+        if self.observed_wal_lsn() == current_wal_lsn {
             return Ok(false);
         }
         self.rebuild().await?;
@@ -159,8 +166,16 @@ impl PostgresStore {
     ///
     /// Returns an error string when the WAL watermark cannot be read.
     pub async fn mark_remote_change_observed(&mut self) -> Result<(), String> {
-        self.observed_wal_lsn = self.current_wal_lsn().await?;
+        self.set_observed_wal_lsn(self.current_wal_lsn().await?);
         Ok(())
+    }
+
+    #[must_use]
+    pub fn remote_change_probe(&self) -> PostgresRemoteChangeProbe {
+        PostgresRemoteChangeProbe {
+            pool: self.pool.clone(),
+            observed_wal_lsn: Arc::clone(&self.observed_wal_lsn),
+        }
     }
 
     /// Durably register one managed component in Postgres.
@@ -828,14 +843,18 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let (targeted, changed) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            });
+            },
+            |finding| changed.push(finding),
+        );
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -899,14 +918,18 @@ impl PostgresStore {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
-        let (targeted, changed) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            });
+            },
+            |finding| changed.push(finding),
+        );
 
         let accepted = changed.len();
         if accepted > 0 {
@@ -1081,14 +1104,18 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let (targeted, changed_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            });
+            },
+            |finding| changed_findings.push(finding),
+        );
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
@@ -1153,14 +1180,18 @@ impl PostgresStore {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
-        let (targeted, changed) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            });
+            },
+            |finding| changed.push(finding),
+        );
 
         let suppressed = changed.len();
         if suppressed > 0 {
@@ -1224,11 +1255,13 @@ impl PostgresStore {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
-        let (targeted, reopened_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
-                self.governance.decision(finding).is_some()
-            });
+        let mut reopened_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| self.governance.decision(finding).is_some(),
+            |finding| reopened_findings.push(finding),
+        );
 
         let reopened = reopened_findings.len();
         if reopened > 0 {
@@ -1393,7 +1426,7 @@ impl PostgresStore {
                 status: ScanCommandStatus::Pending,
             },
         );
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id.as_ref(), ScanCommandStatus::Pending);
         self.push_system_event(event);
         Ok(command_id)
     }
@@ -1454,6 +1487,7 @@ impl PostgresStore {
         {
             self.push_system_event(event);
             self.order.push(command_id.clone());
+            let snapshot_command_id = command_id.clone();
             self.commands.insert(
                 command_id,
                 ScanCommandRecord {
@@ -1461,8 +1495,11 @@ impl PostgresStore {
                     status: ScanCommandStatus::Pending,
                 },
             );
+            self.set_command_status_snapshot(
+                snapshot_command_id.as_ref(),
+                ScanCommandStatus::Pending,
+            );
         }
-        self.refresh_command_statuses_snapshot_cache();
 
         Ok(command_ids)
     }
@@ -1921,6 +1958,7 @@ impl PostgresStore {
         }
         for (command_id, request) in command_ids.iter().cloned().zip(requests) {
             self.order.push(command_id.clone());
+            let snapshot_command_id = command_id.clone();
             self.commands.insert(
                 command_id,
                 ScanCommandRecord {
@@ -1928,8 +1966,11 @@ impl PostgresStore {
                     status: ScanCommandStatus::Pending,
                 },
             );
+            self.set_command_status_snapshot(
+                snapshot_command_id.as_ref(),
+                ScanCommandStatus::Pending,
+            );
         }
-        self.refresh_command_statuses_snapshot_cache();
     }
 
     fn build_due_collection_system_events(
@@ -2155,7 +2196,10 @@ impl PostgresStore {
             .get_mut(completed.command_id.as_ref())
             .expect("completed scan command missing from postgres runtime");
         command.status = ScanCommandStatus::Completed;
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(
+            completed.command_id.as_ref(),
+            ScanCommandStatus::Completed,
+        );
         self.push_system_event(system_event);
     }
 
@@ -2329,7 +2373,7 @@ impl PostgresStore {
             return Err("failed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Failed;
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id.as_ref(), ScanCommandStatus::Failed);
         let event = SystemEvent {
             event_id: next_system_event_id("scan-command-failed"),
             occurred_at_unix_ms,
@@ -2840,9 +2884,23 @@ impl PostgresStore {
         self.refresh_read_snapshot_caches();
         self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_event_index_snapshot_cache();
-        self.observed_wal_lsn = self.current_wal_lsn().await?;
+        self.set_observed_wal_lsn(self.current_wal_lsn().await?);
 
         Ok(())
+    }
+
+    fn observed_wal_lsn(&self) -> Box<str> {
+        self.observed_wal_lsn
+            .lock()
+            .expect("observed WAL mutex should not be poisoned")
+            .clone()
+    }
+
+    fn set_observed_wal_lsn(&self, wal_lsn: Box<str>) {
+        *self
+            .observed_wal_lsn
+            .lock()
+            .expect("observed WAL mutex should not be poisoned") = wal_lsn;
     }
 
     async fn current_wal_lsn(&self) -> Result<Box<str>, String> {
@@ -3611,6 +3669,10 @@ impl PostgresStore {
         );
     }
 
+    fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
+        Arc::make_mut(&mut self.command_statuses_snapshot_cache).insert(command_id.into(), status);
+    }
+
     async fn insert_system_event(&self, event: &SystemEvent) -> Result<(), String> {
         let mut tx = self
             .pool
@@ -3803,6 +3865,28 @@ impl PostgresStore {
             format!("postgres finding suppression batch upsert failed: {error}")
         })?;
         Ok(())
+    }
+}
+
+impl PostgresRemoteChangeProbe {
+    /// Check whether another writer advanced durable Postgres state since this
+    /// process last observed it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the WAL watermark cannot be read.
+    pub async fn is_stale(&self) -> Result<bool, String> {
+        let current_wal_lsn = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
+            .fetch_one(&self.pool)
+            .await
+            .map(String::into_boxed_str)
+            .map_err(|error| format!("postgres WAL LSN read failed: {error}"))?;
+        let observed = self
+            .observed_wal_lsn
+            .lock()
+            .expect("observed WAL mutex should not be poisoned")
+            .clone();
+        Ok(current_wal_lsn != observed)
     }
 }
 

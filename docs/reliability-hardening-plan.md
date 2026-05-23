@@ -141,6 +141,21 @@ Completed:
     Keep one bounded top-k window for active-findings pages instead of
     materializing and sorting every matching finding in one release-scoped or
     artifact-scoped query.
+50. `W138-http-write-plane-partitioning`
+    Let fresh Postgres-backed HTTP reads check a shared remote-change probe
+    before they contend on the mutable application slot.
+51. `W139-deep-read-side-clone-elision`
+    Update command-status snapshot lanes incrementally on hot-path command
+    transitions instead of rebuilding whole maps each time.
+52. `W140-postgres-remote-refresh-delta-shaping`
+    Reuse the merged local `system events` lane while the underlying state and
+    runtime source arcs are unchanged.
+53. `W141-system-event-index-cost-compaction`
+    Stream matched bulk-governance findings directly into caller-owned durable
+    write shapes instead of building extra intermediate vectors.
+54. `W142-bulk-cohort-streaming-and-context-explainability`
+    Render contextual rule and provenance data in operator UI as readable
+    explanations rather than debug-shaped strings.
 
 ## Exit condition
 

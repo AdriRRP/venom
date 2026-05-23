@@ -433,7 +433,7 @@ impl ScanCommandQueue {
         };
         command.status = ScanCommandStatus::Applying;
         command.captured_report = Some(stored_report);
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id, ScanCommandStatus::Applying);
         Ok(())
     }
 
@@ -483,7 +483,7 @@ impl ScanCommandQueue {
         let component_key = command.request.component_key.clone();
         command.status = ScanCommandStatus::Completed;
         command.captured_report = None;
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(result.command_id.as_ref(), ScanCommandStatus::Completed);
         self.pending_integration_events
             .push_back(pending_integration_event);
         self.push_system_event(SystemEvent {
@@ -538,7 +538,7 @@ impl ScanCommandQueue {
         };
         command.status = ScanCommandStatus::Failed;
         command.captured_report = None;
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(result.command_id.as_ref(), ScanCommandStatus::Failed);
         self.push_system_event(SystemEvent {
             event_id: format!(
                 "scan-command-failed-live-{}-{occurred_at_unix_ms}",
@@ -731,7 +731,7 @@ impl ScanCommandQueue {
         }
         record.status = ScanCommandStatus::Applying;
         record.captured_report = Some(report);
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id, ScanCommandStatus::Applying);
         Ok(())
     }
 
@@ -759,7 +759,7 @@ impl ScanCommandQueue {
                 captured_report: None,
             },
         );
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id.as_ref(), ScanCommandStatus::Pending);
         let component_key = self
             .commands
             .get(command_id.as_ref())
@@ -801,7 +801,6 @@ impl ScanCommandQueue {
         if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
             record.captured_report = None;
         }
-        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-completed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -937,7 +936,7 @@ impl ScanCommandQueue {
             });
         }
         record.status = status;
-        self.refresh_command_statuses_snapshot_cache();
+        self.set_command_status_snapshot(command_id, status);
         Ok(())
     }
 
@@ -974,6 +973,10 @@ impl ScanCommandQueue {
                     captured_report: None,
                 },
             );
+            self.set_command_status_snapshot(
+                command.command_id.as_ref(),
+                ScanCommandStatus::Pending,
+            );
             let collection_key = command
                 .collection_schedule_origin
                 .as_ref()
@@ -992,7 +995,6 @@ impl ScanCommandQueue {
                 detail: None,
             });
         }
-        self.refresh_command_statuses_snapshot_cache();
     }
 
     fn refresh_system_event_index_snapshot_cache(&mut self) {
@@ -1006,6 +1008,10 @@ impl ScanCommandQueue {
                 .map(|(command_id, record)| (command_id.clone(), record.status))
                 .collect(),
         );
+    }
+
+    fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
+        Arc::make_mut(&mut self.command_statuses_snapshot_cache).insert(command_id.into(), status);
     }
 }
 
