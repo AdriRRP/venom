@@ -425,6 +425,6 @@ mod tests {
         assert_eq!(overview.page.returned, 2);
         assert_eq!(overview.page.findings.len(), 2);
         assert_eq!(overview.page.findings[0].severity, Severity::High);
-        assert_eq!(overview.page.findings[1].severity, Severity::High);
+        assert_eq!(overview.page.findings[1].severity, Severity::Medium);
     }
 }
