@@ -4,7 +4,7 @@ Wave: `W143-postgres-system-event-window-batching`
 Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
-Infra profile: `postgres`
+Infra profile: `none`
 
 ## Goal
 
