@@ -3571,8 +3571,7 @@ impl PostgresStore {
     }
 
     async fn load_recent_system_event_windows(&self) -> Result<SystemEventRecentWindows, String> {
-        let limit =
-            i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64");
+        let limit = i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64");
         let rows = sqlx::query_as::<_, SystemEventWindowRow>(&format!(
             concat!(
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",

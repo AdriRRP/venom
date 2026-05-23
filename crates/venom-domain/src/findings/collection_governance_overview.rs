@@ -416,7 +416,9 @@ mod tests {
             &inventory,
             &read_model,
             "release:2026.05",
-            &ScopedActiveFindingsQuery::new().with_offset(2).with_limit(2),
+            &ScopedActiveFindingsQuery::new()
+                .with_offset(2)
+                .with_limit(2),
         )
         .expect("collection overview should exist");
 
