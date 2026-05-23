@@ -71,7 +71,7 @@ const collectionColumns: ColumnDef<CollectionActiveFinding>[] = [
 	},
 	{
 		header: "Context",
-		cell: ({ row }) => contextLabel(row.original),
+		cell: ({ row }) => renderContextCell(row.original),
 	},
 ];
 
@@ -95,7 +95,7 @@ const artifactColumns: ColumnDef<ActiveFinding>[] = [
 	},
 	{
 		header: "Context",
-		cell: ({ row }) => contextLabel(row.original),
+		cell: ({ row }) => renderContextCell(row.original),
 	},
 ];
 
@@ -189,7 +189,7 @@ function formatContextFactorDetail(
 	return `${label} from ${source} ${identity}`;
 }
 
-function contextLabel(finding: {
+function contextProfileSummary(finding: {
 	context_profile_name: string | null;
 	contextual_posture?: string;
 	contextual_rule?: string;
@@ -204,32 +204,75 @@ function contextLabel(finding: {
 	tag_context_profiles?: Array<{ name: string }>;
 }) {
 	const labels = contextSourceLabels(finding);
-	const posture =
-		finding.contextual_posture == null
-			? null
-			: `posture ${finding.contextual_posture}`;
-	const rule =
-		finding.contextual_rule == null ? null : `rule ${finding.contextual_rule}`;
-	const factors =
-		finding.contextual_factor_provenance?.map(({ factor, source, identity }) =>
-			formatContextFactorDetail(factor, source, identity),
-		) ??
-		(finding.contextual_factors ?? []).map((factor) =>
-			formatContextFactorDetail(factor),
-		);
-	const semantics = [posture, rule, ...factors].filter(
-		(value): value is string => value != null,
-	);
-	const detail = semantics.length === 0 ? null : semantics.join(" · ");
 	if (labels.length === 0) {
-		return detail ?? "unassigned";
+		return "Unassigned";
 	}
 	if (labels.length === 1) {
-		return detail == null ? labels[0] : `${labels[0]} (${detail})`;
+		return labels[0];
 	}
-	return detail == null
-		? `composite (${labels.join(" + ")})`
-		: `composite (${labels.join(" + ")}) (${detail})`;
+	return `Composite: ${labels.join(" + ")}`;
+}
+
+function contextSemantics(finding: {
+	contextual_posture?: string;
+	contextual_rule?: string;
+	contextual_factors?: string[];
+	contextual_factor_provenance?: Array<{
+		factor: string;
+		source: string;
+		identity: string;
+	}>;
+}) {
+	return {
+		posture:
+			finding.contextual_posture == null
+				? null
+				: `Posture: ${finding.contextual_posture}`,
+		rule:
+			finding.contextual_rule == null
+				? null
+				: `Rule: ${finding.contextual_rule}`,
+		factors:
+			finding.contextual_factor_provenance?.map(
+				({ factor, source, identity }) =>
+					formatContextFactorDetail(factor, source, identity),
+			) ??
+			(finding.contextual_factors ?? []).map((factor) =>
+				formatContextFactorDetail(factor),
+			),
+	};
+}
+
+function renderContextCell(finding: {
+	context_profile_name: string | null;
+	contextual_posture?: string;
+	contextual_rule?: string;
+	contextual_factors?: string[];
+	contextual_factor_provenance?: Array<{
+		factor: string;
+		source: string;
+		identity: string;
+	}>;
+	component_context_profile?: { name: string } | null;
+	collection_context_profile?: { name: string } | null;
+	tag_context_profiles?: Array<{ name: string }>;
+}) {
+	const summary = contextProfileSummary(finding);
+	const semantics = contextSemantics(finding);
+	return (
+		<div>
+			<div>{summary}</div>
+			{semantics.posture ? <div>{semantics.posture}</div> : null}
+			{semantics.rule ? <div>{semantics.rule}</div> : null}
+			{semantics.factors.length > 0 ? (
+				<ul>
+					{semantics.factors.map((factor) => (
+						<li key={factor}>{factor}</li>
+					))}
+				</ul>
+			) : null}
+		</div>
+	);
 }
 
 export function FindingsPage() {

@@ -156,6 +156,15 @@ Completed:
 54. `W142-bulk-cohort-streaming-and-context-explainability`
     Render contextual rule and provenance data in operator UI as readable
     explanations rather than debug-shaped strings.
+55. `W143-postgres-system-event-window-batching`
+    Rebuild Postgres recent system-event windows from one ranked recent-events
+    query plus truthful totals instead of one recent query per category.
+56. `W144-collection-governance-overview-bounded-page`
+    Keep release-governance pages bounded to the requested offset window while
+    preserving whole-scope health and cohort totals.
+57. `W145-structured-context-explainability`
+    Render contextual profile, posture, rule, and effective factors as
+    structured operator-facing UI content instead of one dense string.
 
 ## Exit condition
 

@@ -37,8 +37,8 @@ use venom_domain::inventory::{
 };
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::operations::{
-    MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory, SystemEventKind,
-    SystemEventRecentWindows, SystemEventWindowTotals,
+    MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventKind, SystemEventRecentWindows,
+    SystemEventWindowTotals,
 };
 use venom_domain::scanning::{
     CollectionScanScheduler, CompletedScanCommand, DueCollectionScan, FailedScanCommand,
@@ -95,6 +95,21 @@ type SystemEventRow = (
     Option<i32>,
     Option<bool>,
     Option<String>,
+);
+type SystemEventWindowRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<bool>,
+    Option<String>,
+    i64,
+    i64,
 );
 
 #[derive(Default)]
@@ -3511,19 +3526,7 @@ impl PostgresStore {
 
     async fn load_system_events(&mut self) -> Result<(), String> {
         let totals = self.load_system_event_totals().await?;
-        let recent_events = self.load_recent_system_events(None).await?;
-        let recent_scheduler_events = self
-            .load_recent_system_events(Some(SystemEventCategory::Scheduler))
-            .await?;
-        let recent_command_events = self
-            .load_recent_system_events(Some(SystemEventCategory::Command))
-            .await?;
-        let recent_governance_events = self
-            .load_recent_system_events(Some(SystemEventCategory::Governance))
-            .await?;
-        let recent_publication_events = self
-            .load_recent_system_events(Some(SystemEventCategory::Publication))
-            .await?;
+        let windows = self.load_recent_system_event_windows().await?;
 
         self.system_event_index = SystemEventQueryIndex::from_recent_windows(
             SystemEventWindowTotals {
@@ -3533,13 +3536,7 @@ impl PostgresStore {
                 governance_total: totals.governance_total,
                 publication_total: totals.publication_total,
             },
-            SystemEventRecentWindows {
-                recent_events,
-                recent_scheduler_events,
-                recent_command_events,
-                recent_governance_events,
-                recent_publication_events,
-            },
+            windows,
         );
         Ok(())
     }
@@ -3573,41 +3570,78 @@ impl PostgresStore {
         Ok(totals)
     }
 
-    async fn load_recent_system_events(
-        &self,
-        category: Option<SystemEventCategory>,
-    ) -> Result<Vec<SystemEvent>, String> {
-        let rows = if let Some(category) = category {
-            sqlx::query_as::<_, SystemEventRow>(&format!(
-                concat!(
-                    "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
-                    "command_id, integration_event_id, finding_count, retryable, detail ",
-                    "FROM {} WHERE category = $1 ",
-                    "ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT $2"
-                ),
-                self.names.system_events
-            ))
-            .bind(category.as_str())
-            .bind(i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| format!("postgres recent system events load failed: {error}"))?
-        } else {
-            sqlx::query_as::<_, SystemEventRow>(&format!(
-                concat!(
-                    "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
-                    "command_id, integration_event_id, finding_count, retryable, detail ",
-                    "FROM {} ORDER BY occurred_at_unix_ms DESC, event_id DESC LIMIT $1"
-                ),
-                self.names.system_events
-            ))
-            .bind(i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| format!("postgres recent system events load failed: {error}"))?
-        };
+    async fn load_recent_system_event_windows(&self) -> Result<SystemEventRecentWindows, String> {
+        let limit =
+            i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64");
+        let rows = sqlx::query_as::<_, SystemEventWindowRow>(&format!(
+            concat!(
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, global_rank, category_rank ",
+                "FROM (",
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, ",
+                "ROW_NUMBER() OVER (ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS global_rank, ",
+                "ROW_NUMBER() OVER (PARTITION BY category ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS category_rank ",
+                "FROM {}",
+                ") ranked ",
+                "WHERE global_rank <= $1 OR category_rank <= $1 ",
+                "ORDER BY occurred_at_unix_ms DESC, event_id DESC"
+            ),
+            self.names.system_events
+        ))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres recent system events load failed: {error}"))?;
 
-        rows.into_iter().map(parse_system_event_row).collect()
+        let mut windows = SystemEventRecentWindows::default();
+        for row in rows {
+            let (
+                event_id,
+                occurred_at_unix_ms,
+                category,
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+                global_rank,
+                category_rank,
+            ) = row;
+            let event = parse_system_event_row((
+                event_id,
+                occurred_at_unix_ms,
+                category.clone(),
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+            ))?;
+            if global_rank <= limit {
+                windows.recent_events.push(event.clone());
+            }
+            if category_rank <= limit {
+                match category.as_str() {
+                    "scheduler" => windows.recent_scheduler_events.push(event),
+                    "command" => windows.recent_command_events.push(event),
+                    "governance" => windows.recent_governance_events.push(event),
+                    "publication" => windows.recent_publication_events.push(event),
+                    _ => {
+                        return Err(format!(
+                            "postgres system events contain unknown category: {category}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(windows)
     }
 
     fn remove_pending_integration_event(&mut self, event_id: &str) {

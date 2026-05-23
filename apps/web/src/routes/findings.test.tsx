@@ -129,6 +129,21 @@ describe("FindingsPage", () => {
 								package_purl: null,
 								severity: "high",
 								contextual_risk: "critical",
+								contextual_posture: "public-edge",
+								contextual_rule:
+									"internet-exposed + production + mission-critical",
+								contextual_factor_provenance: [
+									{
+										factor: "internet-exposed:true",
+										source: "component",
+										identity: "context:internet-prod",
+									},
+									{
+										factor: "production:true",
+										source: "component",
+										identity: "context:internet-prod",
+									},
+								],
 								context_profile_key: "context:internet-prod",
 								context_profile_name: "Internet Production",
 								governance_state: "open",
@@ -206,8 +221,17 @@ describe("FindingsPage", () => {
 		expect(
 			await screen.findByRole("cell", { name: "critical" }),
 		).toBeInTheDocument();
+		expect(await screen.findByText("Internet Production")).toBeInTheDocument();
+		expect(await screen.findByText("Posture: public-edge")).toBeInTheDocument();
 		expect(
-			await screen.findByRole("cell", { name: "Internet Production" }),
+			await screen.findByText(
+				"Rule: internet-exposed + production + mission-critical",
+			),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByText(
+				"Internet Exposed=true from component context:internet-prod",
+			),
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(
