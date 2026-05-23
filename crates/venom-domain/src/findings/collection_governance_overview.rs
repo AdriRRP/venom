@@ -31,7 +31,14 @@ pub struct BulkGovernanceCohortSummary {
 struct CollectionGovernanceAccumulator {
     health: CollectionHealthSummary,
     bulk_governance: BulkGovernanceCohortSummary,
-    page_findings: Vec<ScopedActiveFinding>,
+    page: BoundedScopedFindingsPage,
+}
+
+#[derive(Debug, Default)]
+struct BoundedScopedFindingsPage {
+    total: usize,
+    cap: usize,
+    findings: Vec<ScopedActiveFinding>,
 }
 
 #[must_use]
@@ -42,7 +49,7 @@ pub fn query_collection_governance_overview(
     query: &ScopedActiveFindingsQuery,
 ) -> Option<CollectionGovernanceOverview> {
     let scope = inventory.collection_scoped_artifacts(collection_key)?;
-    let mut accumulator = CollectionGovernanceAccumulator::default();
+    let mut accumulator = CollectionGovernanceAccumulator::new(query);
     let governance_state = query
         .governance_state
         .unwrap_or(FindingGovernanceState::Open);
@@ -66,11 +73,18 @@ pub fn query_collection_governance_overview(
     Some(CollectionGovernanceOverview {
         health: accumulator.health,
         bulk_governance: accumulator.bulk_governance,
-        page: build_scoped_page(accumulator.page_findings, query),
+        page: accumulator.page.into_page(query),
     })
 }
 
 impl CollectionGovernanceAccumulator {
+    fn new(query: &ScopedActiveFindingsQuery) -> Self {
+        Self {
+            page: BoundedScopedFindingsPage::new(query.offset, normalize_page_limit(query.limit)),
+            ..Self::default()
+        }
+    }
+
     fn observe(
         &mut self,
         finding: ScopedActiveFinding,
@@ -106,30 +120,56 @@ impl CollectionGovernanceAccumulator {
         }
 
         if matches_page_filter(&finding, query) {
-            self.page_findings.push(finding);
+            self.page.observe(finding);
         }
     }
 }
 
-fn build_scoped_page(
-    mut findings: Vec<ScopedActiveFinding>,
-    query: &ScopedActiveFindingsQuery,
-) -> ScopedActiveFindingsPage {
-    findings.sort_unstable_by(compare_scoped_findings);
-    let limit = normalize_page_limit(query.limit);
-    let offset = query.offset;
-    let total = findings.len();
-    let findings = findings
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<_>>();
-    ScopedActiveFindingsPage {
-        total,
-        returned: findings.len(),
-        offset,
-        limit,
-        findings,
+impl BoundedScopedFindingsPage {
+    const fn new(offset: usize, limit: usize) -> Self {
+        Self {
+            total: 0,
+            cap: offset.saturating_add(limit),
+            findings: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, finding: ScopedActiveFinding) {
+        self.total += 1;
+        if self.cap == 0 {
+            return;
+        }
+
+        let position = self
+            .findings
+            .binary_search_by(|candidate| compare_scoped_findings(candidate, &finding))
+            .unwrap_or_else(|index| index);
+        if position >= self.cap {
+            return;
+        }
+
+        self.findings.insert(position, finding);
+        if self.findings.len() > self.cap {
+            self.findings.pop();
+        }
+    }
+
+    fn into_page(self, query: &ScopedActiveFindingsQuery) -> ScopedActiveFindingsPage {
+        let limit = normalize_page_limit(query.limit);
+        let offset = query.offset;
+        let findings = self
+            .findings
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        ScopedActiveFindingsPage {
+            total: self.total,
+            returned: findings.len(),
+            offset,
+            limit,
+            findings,
+        }
     }
 }
 
@@ -324,5 +364,67 @@ mod tests {
             overview.page.findings[0].governance_state.as_str(),
             "suppressed"
         );
+    }
+
+    #[test]
+    fn collection_governance_overview_keeps_only_requested_page_window() {
+        let mut inventory = ComponentInventory::default();
+        let _ = inventory.register(ComponentRegistration::new(
+            "component:payments-api",
+            "Payments API",
+        ));
+        let artifact = ArtifactRef::new(
+            ArtifactKind::ContainerImage,
+            "registry.example/payments@sha256:111",
+        );
+        let _ = inventory.bind_artifact("component:payments-api", artifact.clone());
+        let _ = inventory.register_collection(CollectionRegistration::new(
+            "release:2026.05",
+            "May Release",
+        ));
+        let _ = inventory.add_component_to_collection("release:2026.05", "component:payments-api");
+
+        let findings = (0..6)
+            .map(|index| {
+                ReportedFinding::new(
+                    format!("CVE-2026-000{index}"),
+                    PackageCoordinate::new(format!("pkg-{index}"), "1.0.0"),
+                )
+                .with_severity(match index {
+                    1 | 4 => Severity::Critical,
+                    2 => Severity::High,
+                    3 => Severity::Medium,
+                    5 => Severity::Low,
+                    _ => Severity::Unknown,
+                })
+            })
+            .collect::<Vec<_>>();
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact,
+            std::time::SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            findings,
+        );
+
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report);
+
+        let overview = query_collection_governance_overview(
+            &inventory,
+            &read_model,
+            "release:2026.05",
+            &ScopedActiveFindingsQuery::new()
+                .with_offset(2)
+                .with_limit(2),
+        )
+        .expect("collection overview should exist");
+
+        assert_eq!(overview.page.total, 6);
+        assert_eq!(overview.page.returned, 2);
+        assert_eq!(overview.page.findings.len(), 2);
+        assert_eq!(overview.page.findings[0].severity, Severity::High);
+        assert_eq!(overview.page.findings[1].severity, Severity::Medium);
     }
 }
