@@ -803,18 +803,18 @@ impl DurableState {
                     format!("unknown collection: {collection_key}").into_boxed_str(),
                 )
             })?;
-        let (targeted, changed_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            });
-        let changed_findings = changed_findings
-            .into_iter()
-            .map(StoredFindingRef::from)
-            .collect::<Vec<_>>();
+            },
+            |finding| changed_findings.push(StoredFindingRef::from(finding)),
+        );
 
         let accepted = changed_findings.len();
         if accepted > 0 {
@@ -877,18 +877,18 @@ impl DurableState {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
-        let (targeted, changed_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
-            });
-        let changed_findings = changed_findings
-            .into_iter()
-            .map(StoredFindingRef::from)
-            .collect::<Vec<_>>();
+            },
+            |finding| changed_findings.push(StoredFindingRef::from(finding)),
+        );
 
         let accepted = changed_findings.len();
         if accepted > 0 {
@@ -1052,18 +1052,18 @@ impl DurableState {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
-        let (targeted, changed_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            });
-        let changed_findings = changed_findings
-            .into_iter()
-            .map(StoredFindingRef::from)
-            .collect::<Vec<_>>();
+            },
+            |finding| changed_findings.push(StoredFindingRef::from(finding)),
+        );
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
@@ -1126,18 +1126,18 @@ impl DurableState {
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| DurableStateError::MissingTag(tag_key.into()))?;
-        let (targeted, changed_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
+        let mut changed_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| {
                 !matches!(
                     self.governance.decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
-            });
-        let changed_findings = changed_findings
-            .into_iter()
-            .map(StoredFindingRef::from)
-            .collect::<Vec<_>>();
+            },
+            |finding| changed_findings.push(StoredFindingRef::from(finding)),
+        );
 
         let suppressed = changed_findings.len();
         if suppressed > 0 {
@@ -1199,15 +1199,13 @@ impl DurableState {
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| DurableStateError::MissingCollection(collection_key.into()))?;
-        let (targeted, reopened_findings) = self
-            .read_model
-            .collect_bulk_governance_finding_refs_matching(&scope, query, |finding| {
-                self.governance.decision(finding).is_some()
-            });
-        let reopened_findings = reopened_findings
-            .into_iter()
-            .map(StoredFindingRef::from)
-            .collect::<Vec<_>>();
+        let mut reopened_findings = Vec::new();
+        let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
+            &scope,
+            query,
+            |finding| self.governance.decision(finding).is_some(),
+            |finding| reopened_findings.push(StoredFindingRef::from(finding)),
+        );
 
         let reopened = reopened_findings.len();
         if reopened > 0 {

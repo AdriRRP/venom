@@ -158,15 +158,35 @@ function contextSourceLabels(finding: {
 
 	return [
 		...(finding.component_context_profile
-			? [`component:${finding.component_context_profile.name}`]
+			? [`component profile ${finding.component_context_profile.name}`]
 			: []),
 		...(finding.tag_context_profiles ?? []).map(
-			(profile) => `tag:${profile.name}`,
+			(profile) => `tag profile ${profile.name}`,
 		),
 		...(finding.collection_context_profile
-			? [`collection:${finding.collection_context_profile.name}`]
+			? [`collection profile ${finding.collection_context_profile.name}`]
 			: []),
 	];
+}
+
+function titleCaseWords(value: string) {
+	return value
+		.split("-")
+		.map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`)
+		.join(" ");
+}
+
+function formatContextFactorDetail(
+	factor: string,
+	source?: string,
+	identity?: string,
+) {
+	const [name, value] = factor.split(":");
+	const label = `${titleCaseWords(name)}=${value}`;
+	if (source == null || identity == null) {
+		return label;
+	}
+	return `${label} from ${source} ${identity}`;
 }
 
 function contextLabel(finding: {
@@ -187,18 +207,20 @@ function contextLabel(finding: {
 	const posture =
 		finding.contextual_posture == null
 			? null
-			: `posture:${finding.contextual_posture}`;
+			: `posture ${finding.contextual_posture}`;
 	const rule =
-		finding.contextual_rule == null ? null : `rule:${finding.contextual_rule}`;
+		finding.contextual_rule == null ? null : `rule ${finding.contextual_rule}`;
 	const factors =
-		finding.contextual_factor_provenance?.map(
-			({ factor, source, identity }) =>
-				`factor:${factor}@${source}:${identity}`,
-		) ?? (finding.contextual_factors ?? []).map((factor) => `factor:${factor}`);
+		finding.contextual_factor_provenance?.map(({ factor, source, identity }) =>
+			formatContextFactorDetail(factor, source, identity),
+		) ??
+		(finding.contextual_factors ?? []).map((factor) =>
+			formatContextFactorDetail(factor),
+		);
 	const semantics = [posture, rule, ...factors].filter(
 		(value): value is string => value != null,
 	);
-	const detail = semantics.length === 0 ? null : semantics.join(", ");
+	const detail = semantics.length === 0 ? null : semantics.join(" · ");
 	if (labels.length === 0) {
 		return detail ?? "unassigned";
 	}
