@@ -335,18 +335,37 @@ fn merge_recent_events(
     left: &[Arc<SystemEvent>],
     right: &[Arc<SystemEvent>],
 ) -> Vec<Arc<SystemEvent>> {
-    let mut merged = left
-        .iter()
-        .cloned()
-        .chain(right.iter().cloned())
-        .collect::<Vec<_>>();
-    merged.sort_by(|a, b| {
-        b.occurred_at_unix_ms
-            .cmp(&a.occurred_at_unix_ms)
-            .then_with(|| b.event_id.cmp(&a.event_id))
-    });
-    merged.truncate(MAX_SYSTEM_EVENTS_LIMIT);
+    let mut merged = Vec::with_capacity((left.len() + right.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while merged.len() < MAX_SYSTEM_EVENTS_LIMIT
+        && (left_index < left.len() || right_index < right.len())
+    {
+        let take_left = match (left.get(left_index), right.get(right_index)) {
+            (Some(left_event), Some(right_event)) => {
+                compare_recent_event_order(left_event, right_event).is_lt()
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_left {
+            merged.push(Arc::clone(&left[left_index]));
+            left_index += 1;
+        } else {
+            merged.push(Arc::clone(&right[right_index]));
+            right_index += 1;
+        }
+    }
     merged
+}
+
+fn compare_recent_event_order(left: &SystemEvent, right: &SystemEvent) -> std::cmp::Ordering {
+    right
+        .occurred_at_unix_ms
+        .cmp(&left.occurred_at_unix_ms)
+        .then_with(|| right.event_id.cmp(&left.event_id))
 }
 
 #[must_use]

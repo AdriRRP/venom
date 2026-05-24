@@ -409,62 +409,6 @@ impl FindingReadModel {
         }
     }
 
-    #[must_use]
-    pub fn collect_scoped_active_findings(
-        &self,
-        scope: &[CollectionScopedArtifact],
-        query: &ScopedActiveFindingsQuery,
-    ) -> Vec<ScopedActiveFinding> {
-        self.collect_filtered_scoped_active_findings(scope, |scope_item, finding| {
-            query
-                .min_severity
-                .is_none_or(|min| severity_rank(finding.severity) >= severity_rank(min))
-                && query.governance_state.is_none_or(|governance_state| {
-                    self.finding_governance_state(
-                        scope_item.component_key.as_ref(),
-                        &scope_item.artifact,
-                        finding,
-                    ) == governance_state
-                })
-                && query
-                    .package_name
-                    .as_deref()
-                    .is_none_or(|package_name| finding.package_name.as_ref() == package_name)
-        })
-    }
-
-    #[must_use]
-    pub fn collect_bulk_governance_finding_refs(
-        &self,
-        scope: &[CollectionScopedArtifact],
-        query: &BulkGovernanceQuery,
-    ) -> Vec<FindingRef> {
-        let mut findings = Vec::new();
-        self.visit_bulk_governance_finding_refs(scope, query, |finding| {
-            findings.push(finding);
-        });
-        findings
-    }
-
-    #[must_use]
-    pub fn collect_bulk_governance_finding_refs_matching(
-        &self,
-        scope: &[CollectionScopedArtifact],
-        query: &BulkGovernanceQuery,
-        mut keep: impl FnMut(&FindingRef) -> bool,
-    ) -> (usize, Vec<FindingRef>) {
-        let mut findings = Vec::new();
-        let targeted = self.visit_bulk_governance_finding_refs_matching(
-            scope,
-            query,
-            |finding| keep(finding),
-            |finding| {
-                findings.push(finding);
-            },
-        );
-        (targeted, findings)
-    }
-
     pub fn visit_bulk_governance_finding_refs_matching(
         &self,
         scope: &[CollectionScopedArtifact],
@@ -480,47 +424,6 @@ impl FindingReadModel {
             }
         });
         targeted
-    }
-
-    fn collect_filtered_scoped_active_findings(
-        &self,
-        scope: &[CollectionScopedArtifact],
-        mut predicate: impl FnMut(&CollectionScopedArtifact, &ActiveFindingRecord) -> bool,
-    ) -> Vec<ScopedActiveFinding> {
-        let mut filtered = scope
-            .iter()
-            .flat_map(|scope_item| {
-                self.active
-                    .get(&TrackedArtifactKey::new(
-                        scope_item.component_key.clone(),
-                        scope_item.artifact.clone(),
-                    ))
-                    .into_iter()
-                    .flatten()
-                    .map(move |finding| (scope_item, finding))
-            })
-            .filter(|(scope_item, finding)| predicate(scope_item, finding))
-            .collect::<Vec<_>>();
-        filtered.sort_unstable_by_key(|(scope_item, finding)| {
-            (
-                std::cmp::Reverse(severity_rank(finding.severity)),
-                scope_item.component_key.as_ref(),
-                scope_item.artifact.kind,
-                scope_item.artifact.identity.as_ref(),
-                finding_dedup_key(finding),
-            )
-        });
-
-        filtered
-            .into_iter()
-            .map(|(scope_item, finding)| {
-                self.project_active_finding(
-                    scope_item.component_key.clone(),
-                    scope_item.artifact.clone(),
-                    finding,
-                )
-            })
-            .collect()
     }
 
     fn collect_filtered_scoped_active_findings_page(
@@ -1085,13 +988,17 @@ mod tests {
             artifact: artifact(),
         }];
 
-        let cohort = read_model.collect_bulk_governance_finding_refs(
+        let mut cohort = 0;
+        read_model.visit_bulk_governance_finding_refs(
             &scope,
             &BulkGovernanceQuery::new(crate::FindingGovernanceState::Open)
                 .with_min_severity(Severity::Unknown),
+            |_| {
+                cohort += 1;
+            },
         );
 
-        assert_eq!(cohort.len(), 205);
+        assert_eq!(cohort, 205);
     }
 
     #[test]

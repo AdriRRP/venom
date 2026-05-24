@@ -1,7 +1,6 @@
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use venom_domain::findings::finding_provider_contract::{
@@ -49,7 +48,7 @@ use venom_domain::scanning::{
 pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
-    observed_wal_lsn: Arc<StdMutex<Box<str>>>,
+    observed_change_watermark: Arc<AtomicU64>,
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: FindingReadModel,
@@ -68,7 +67,24 @@ pub struct PostgresStore {
 #[derive(Debug, Clone)]
 pub struct PostgresRemoteChangeProbe {
     pool: PgPool,
-    observed_wal_lsn: Arc<StdMutex<Box<str>>>,
+    change_watermark_table: Box<str>,
+    observed_change_watermark: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PostgresReadSnapshotLoader {
+    pool: PgPool,
+    names: TableNames,
+}
+
+#[derive(Debug)]
+pub struct LoadedPostgresReadSnapshot {
+    pub inventory: Arc<ComponentInventory>,
+    pub read_model: Arc<FindingReadModel>,
+    pub release_board: Arc<ReleaseBoard>,
+    pub system_event_index: Arc<SystemEventQueryIndex>,
+    pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    pub change_watermark: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +154,7 @@ impl PostgresStore {
         let mut backend = Self {
             pool,
             names,
-            observed_wal_lsn: Arc::new(StdMutex::new(Box::from(""))),
+            observed_change_watermark: Arc::new(AtomicU64::new(0)),
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
             read_model: FindingReadModel::new(),
@@ -161,14 +177,39 @@ impl PostgresStore {
         Ok(backend)
     }
 
+    fn detached(pool: PgPool, names: TableNames) -> Self {
+        Self {
+            pool,
+            names,
+            observed_change_watermark: Arc::new(AtomicU64::new(0)),
+            ingestion: FindingIngestion::new(),
+            governance: FindingGovernance::new(),
+            read_model: FindingReadModel::new(),
+            inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
+            read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
+            release_board_snapshot_cache: Arc::new(build_release_board(
+                &ComponentInventory::default(),
+                &FindingReadModel::new(),
+            )),
+            integration_runtime_config: None,
+            commands: BTreeMap::new(),
+            order: Vec::new(),
+            pending_integration_events: Vec::new(),
+            system_event_index: SystemEventQueryIndex::new(),
+            system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
+            command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
+        }
+    }
+
     /// Refresh one Postgres-backed in-memory view when another writer advanced the durable store.
     ///
     /// # Errors
     ///
-    /// Returns an error string when the WAL watermark cannot be read or rebuild fails.
+    /// Returns an error string when the schema-local change watermark cannot be
+    /// be read or rebuild fails.
     pub async fn refresh_from_remote_if_stale(&mut self) -> Result<bool, String> {
-        let current_wal_lsn = self.current_wal_lsn().await?;
-        if self.observed_wal_lsn() == current_wal_lsn {
+        let current_change_watermark = self.current_change_watermark().await?;
+        if self.observed_change_watermark() == current_change_watermark {
             return Ok(false);
         }
         self.rebuild().await?;
@@ -179,9 +220,10 @@ impl PostgresStore {
     ///
     /// # Errors
     ///
-    /// Returns an error string when the WAL watermark cannot be read.
+    /// Returns an error string when the schema-local change watermark cannot be
+    /// read.
     pub async fn mark_remote_change_observed(&self) -> Result<(), String> {
-        self.set_observed_wal_lsn(self.current_wal_lsn().await?);
+        self.set_observed_change_watermark(self.current_change_watermark().await?);
         Ok(())
     }
 
@@ -189,7 +231,16 @@ impl PostgresStore {
     pub fn remote_change_probe(&self) -> PostgresRemoteChangeProbe {
         PostgresRemoteChangeProbe {
             pool: self.pool.clone(),
-            observed_wal_lsn: Arc::clone(&self.observed_wal_lsn),
+            change_watermark_table: self.names.change_watermark.clone(),
+            observed_change_watermark: Arc::clone(&self.observed_change_watermark),
+        }
+    }
+
+    #[must_use]
+    pub fn read_snapshot_loader(&self) -> PostgresReadSnapshotLoader {
+        PostgresReadSnapshotLoader {
+            pool: self.pool.clone(),
+            names: self.names.clone(),
         }
     }
 
@@ -2421,6 +2472,7 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
+        self.create_change_watermark_table().await?;
         self.create_components_table().await?;
         self.create_context_profiles_table().await?;
         self.create_component_context_profiles_table().await?;
@@ -2439,7 +2491,93 @@ impl PostgresStore {
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
+        self.install_change_watermark_triggers().await?;
 
+        Ok(())
+    }
+
+    async fn create_change_watermark_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "singleton BOOLEAN PRIMARY KEY DEFAULT TRUE, ",
+                "change_seq BIGINT NOT NULL DEFAULT 0",
+                ")"
+            ),
+            self.names.change_watermark
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark table create failed: {error}"))?;
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} (singleton, change_seq) VALUES (TRUE, 0) ",
+                "ON CONFLICT (singleton) DO NOTHING"
+            ),
+            self.names.change_watermark
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark seed failed: {error}"))?;
+        sqlx::query(&format!(
+            concat!(
+                "CREATE OR REPLACE FUNCTION {}.touch_change_watermark() RETURNS trigger AS $$ ",
+                "BEGIN ",
+                "UPDATE {} SET change_seq = change_seq + 1 WHERE singleton = TRUE; ",
+                "RETURN NULL; ",
+                "END; ",
+                "$$ LANGUAGE plpgsql"
+            ),
+            self.names.schema, self.names.change_watermark
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark function create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn install_change_watermark_triggers(&self) -> Result<(), String> {
+        for table in [
+            self.names.components.as_ref(),
+            self.names.context_profiles.as_ref(),
+            self.names.component_context_profiles.as_ref(),
+            self.names.component_tags.as_ref(),
+            self.names.component_tag_memberships.as_ref(),
+            self.names.collections.as_ref(),
+            self.names.collection_sources.as_ref(),
+            self.names.collection_memberships.as_ref(),
+            self.names.collection_scan_schedules.as_ref(),
+            self.names.artifact_bindings.as_ref(),
+            self.names.provider_runtime_configs.as_ref(),
+            self.names.integration_runtime_config.as_ref(),
+            self.names.provider_reports.as_ref(),
+            self.names.finding_risk_acceptances.as_ref(),
+            self.names.finding_suppressions.as_ref(),
+            self.names.scan_commands.as_ref(),
+            self.names.integration_outbox.as_ref(),
+            self.names.system_events.as_ref(),
+        ] {
+            self.install_change_watermark_trigger(table).await?;
+        }
+        Ok(())
+    }
+
+    async fn install_change_watermark_trigger(&self, qualified_table: &str) -> Result<(), String> {
+        let trigger_name = qualified_table.replace('.', "_");
+        let trigger_name = format!("{trigger_name}_touch_change_watermark");
+        sqlx::query(&format!(
+            "DROP TRIGGER IF EXISTS {trigger_name} ON {qualified_table}"
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark trigger drop failed: {error}"))?;
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger_name} AFTER INSERT OR UPDATE OR DELETE ON {qualified_table} FOR EACH STATEMENT EXECUTE FUNCTION {}.touch_change_watermark()",
+            self.names.schema,
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark trigger create failed: {error}"))?;
         Ok(())
     }
 
@@ -2899,31 +3037,31 @@ impl PostgresStore {
         self.refresh_read_snapshot_caches();
         self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_event_index_snapshot_cache();
-        self.set_observed_wal_lsn(self.current_wal_lsn().await?);
+        self.set_observed_change_watermark(self.current_change_watermark().await?);
 
         Ok(())
     }
 
-    fn observed_wal_lsn(&self) -> Box<str> {
-        self.observed_wal_lsn
-            .lock()
-            .expect("observed WAL mutex should not be poisoned")
-            .clone()
+    fn observed_change_watermark(&self) -> u64 {
+        self.observed_change_watermark.load(Ordering::Relaxed)
     }
 
-    fn set_observed_wal_lsn(&self, wal_lsn: Box<str>) {
-        *self
-            .observed_wal_lsn
-            .lock()
-            .expect("observed WAL mutex should not be poisoned") = wal_lsn;
+    fn set_observed_change_watermark(&self, change_watermark: u64) {
+        self.observed_change_watermark
+            .store(change_watermark, Ordering::Relaxed);
     }
 
-    async fn current_wal_lsn(&self) -> Result<Box<str>, String> {
-        sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
-            .fetch_one(&self.pool)
-            .await
-            .map(String::into_boxed_str)
-            .map_err(|error| format!("postgres WAL LSN read failed: {error}"))
+    async fn current_change_watermark(&self) -> Result<u64, String> {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT change_seq FROM {} WHERE singleton = TRUE",
+            self.names.change_watermark
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark read failed: {error}"))
+        .and_then(|value| {
+            u64::try_from(value).map_err(|_| "postgres change watermark out of range".to_owned())
+        })
     }
 
     async fn load_components(&mut self) -> Result<(), String> {
@@ -3902,24 +4040,48 @@ impl PostgresStore {
 }
 
 impl PostgresRemoteChangeProbe {
-    /// Check whether another writer advanced durable Postgres state since this
-    /// process last observed it.
+    /// Read the current schema-local change watermark observed by Postgres.
     ///
     /// # Errors
     ///
-    /// Returns an error string when the WAL watermark cannot be read.
-    pub async fn is_stale(&self) -> Result<bool, String> {
-        let current_wal_lsn = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
-            .fetch_one(&self.pool)
-            .await
-            .map(String::into_boxed_str)
-            .map_err(|error| format!("postgres WAL LSN read failed: {error}"))?;
-        let observed = self
-            .observed_wal_lsn
-            .lock()
-            .expect("observed WAL mutex should not be poisoned")
-            .clone();
-        Ok(current_wal_lsn != observed)
+    /// Returns an error string when the watermark cannot be read.
+    pub async fn current_change_watermark(&self) -> Result<u64, String> {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT change_seq FROM {} WHERE singleton = TRUE",
+            self.change_watermark_table
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark read failed: {error}"))
+        .and_then(|value| {
+            u64::try_from(value).map_err(|_| "postgres change watermark out of range".to_owned())
+        })
+    }
+
+    #[must_use]
+    pub fn observed_change_watermark(&self) -> u64 {
+        self.observed_change_watermark.load(Ordering::Relaxed)
+    }
+}
+
+impl PostgresReadSnapshotLoader {
+    /// Rebuild one detached Postgres-backed read snapshot without taking the
+    /// live mutable application slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the detached rebuild fails.
+    pub async fn load(&self) -> Result<LoadedPostgresReadSnapshot, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.rebuild().await?;
+        Ok(LoadedPostgresReadSnapshot {
+            inventory: backend.inventory_snapshot_arc(),
+            read_model: backend.read_model_snapshot_arc(),
+            release_board: backend.release_board_snapshot_arc(),
+            system_event_index: backend.system_event_index_snapshot_arc(),
+            command_statuses: backend.command_statuses_snapshot_arc(),
+            change_watermark: backend.observed_change_watermark(),
+        })
     }
 }
 
@@ -3929,9 +4091,10 @@ struct ScanCommandRecord {
     status: ScanCommandStatus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TableNames {
     schema: Box<str>,
+    change_watermark: Box<str>,
     components: Box<str>,
     context_profiles: Box<str>,
     component_context_profiles: Box<str>,
@@ -3956,6 +4119,7 @@ impl TableNames {
     fn new(schema: &str) -> Result<Self, String> {
         let schema = validate_schema_name(schema)?;
         Ok(Self {
+            change_watermark: format!("{schema}.change_watermark").into_boxed_str(),
             components: format!("{schema}.components").into_boxed_str(),
             context_profiles: format!("{schema}.context_profiles").into_boxed_str(),
             component_context_profiles: format!("{schema}.component_context_profiles")
@@ -4228,6 +4392,50 @@ mod tests {
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!("venom_{name}_{nanos}_{counter}")
+    }
+
+    #[tokio::test]
+    async fn postgres_remote_change_probe_ignores_unrelated_schema_writes() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("remote_probe_scope");
+        let backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let probe = backend.remote_change_probe();
+        let observed = probe.observed_change_watermark();
+        assert_eq!(
+            probe.current_change_watermark()
+                .await
+                .expect("watermark should be readable"),
+            observed
+        );
+
+        let unrelated_schema = temp_schema("remote_probe_other");
+        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {unrelated_schema}"))
+            .execute(&backend.pool)
+            .await
+            .expect("unrelated schema should create");
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {unrelated_schema}.noise (id BIGSERIAL PRIMARY KEY, value TEXT NOT NULL)"
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("unrelated table should create");
+        sqlx::query(&format!(
+            "INSERT INTO {unrelated_schema}.noise (value) VALUES ('unrelated')"
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("unrelated row should insert");
+
+        assert_eq!(
+            probe.current_change_watermark()
+                .await
+                .expect("watermark should stay readable"),
+            observed
+        );
     }
 
     fn artifact() -> ArtifactRef {

@@ -1,6 +1,6 @@
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
-pub use crate::infra::postgres_backend::PostgresRemoteChangeProbe;
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
+pub use crate::infra::postgres_backend::{PostgresReadSnapshotLoader, PostgresRemoteChangeProbe};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -513,6 +513,14 @@ impl ApiApplication {
         match &self.backend {
             ApiStore::Local(_) => None,
             ApiStore::Postgres(postgres) => Some(postgres.remote_change_probe()),
+        }
+    }
+
+    #[must_use]
+    pub fn remote_read_snapshot_loader(&self) -> Option<PostgresReadSnapshotLoader> {
+        match &self.backend {
+            ApiStore::Local(_) => None,
+            ApiStore::Postgres(postgres) => Some(postgres.read_snapshot_loader()),
         }
     }
 
