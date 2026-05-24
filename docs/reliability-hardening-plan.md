@@ -165,6 +165,16 @@ Completed:
 57. `W145-structured-context-explainability`
     Render contextual profile, posture, rule, and effective factors as
     structured operator-facing UI content instead of one dense string.
+58. `W146-http-remote-refresh-stampede-control`
+    Let one stale-read refresh path perform the remote Postgres refresh while
+    concurrent fresh readers reuse the result instead of stampeding the mutable
+    application slot.
+59. `W147-postgres-system-event-arc-window-sharing`
+    Share one `Arc<SystemEvent>` across the global and per-category recent
+    Postgres windows instead of duplicating one owned event value per window.
+60. `W148-context-explainability-operator-layout`
+    Present contextual summary, posture, rule, and effective factors in one
+    more structured operator layout instead of plain stacked text.
 
 ## Exit condition
 

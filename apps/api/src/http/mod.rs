@@ -51,6 +51,7 @@ struct ApiStateInner {
     service: Mutex<Option<ApiApplication>>,
     service_ready: Notify,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
+    remote_refresh: Mutex<()>,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
 }
@@ -185,6 +186,7 @@ impl ApiState {
                 service: Mutex::new(Some(service)),
                 service_ready: Notify::new(),
                 remote_change_probe,
+                remote_refresh: Mutex::new(()),
                 read_snapshot_tx,
                 read_snapshot_rx,
             }),
@@ -197,6 +199,12 @@ impl ApiState {
 
     async fn read_snapshot_fresh(&self) -> Result<Arc<ApiReadSnapshot>, ApiError> {
         if let Some(probe) = &self.inner.remote_change_probe {
+            let is_stale = probe.is_stale().await.map_err(ApiError::internal)?;
+            if !is_stale {
+                return Ok(self.read_snapshot());
+            }
+
+            let _refresh_guard = self.inner.remote_refresh.lock().await;
             let is_stale = probe.is_stale().await.map_err(ApiError::internal)?;
             if !is_stale {
                 return Ok(self.read_snapshot());

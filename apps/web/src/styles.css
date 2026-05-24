@@ -302,6 +302,51 @@ table {
 	border-collapse: collapse;
 }
 
+.context-cell {
+	display: grid;
+	gap: 0.45rem;
+	min-width: 18rem;
+}
+
+.context-summary {
+	margin: 0;
+	font-weight: 700;
+	color: #0f172a;
+}
+
+.context-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.4rem;
+}
+
+.context-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.2rem 0.55rem;
+	border-radius: 999px;
+	background: rgba(14, 116, 144, 0.12);
+	color: #155e75;
+	font-size: 0.78rem;
+	font-weight: 700;
+}
+
+.context-chip-subtle {
+	background: rgba(148, 163, 184, 0.16);
+	color: #475569;
+}
+
+.context-factor-list {
+	margin: 0;
+	padding-left: 1rem;
+	color: #475569;
+	font-size: 0.88rem;
+}
+
+.context-factor-list li + li {
+	margin-top: 0.2rem;
+}
+
 th,
 td {
 	text-align: left;

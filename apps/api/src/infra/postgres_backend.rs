@@ -3610,7 +3610,7 @@ impl PostgresStore {
                 global_rank,
                 category_rank,
             ) = row;
-            let event = parse_system_event_row((
+            let event = Arc::new(parse_system_event_row((
                 event_id,
                 occurred_at_unix_ms,
                 category.clone(),
@@ -3622,7 +3622,7 @@ impl PostgresStore {
                 finding_count,
                 retryable,
                 detail,
-            ))?;
+            ))?);
             if global_rank <= limit {
                 windows.recent_events.push(event.clone());
             }
