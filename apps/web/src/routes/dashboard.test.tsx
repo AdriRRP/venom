@@ -1,6 +1,7 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { createTestQueryClient } from "../test/query-client";
 import { DashboardPage } from "./dashboard";
 
 vi.mock("@tanstack/react-router", async () => ({
@@ -86,7 +87,7 @@ describe("DashboardPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<DashboardPage />
 			</QueryClientProvider>,
 		);
