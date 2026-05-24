@@ -4,7 +4,7 @@ Wave: `W149-http-write-plane-real-partitioning`
 Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
-Infra profile: `db`
+Infra profile: `none`
 
 ## Goal
 
@@ -43,4 +43,3 @@ taking the live mutable application slot.
 ## ADR impact
 
 `none`
-

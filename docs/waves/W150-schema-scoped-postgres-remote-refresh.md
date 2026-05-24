@@ -4,7 +4,7 @@ Wave: `W150-schema-scoped-postgres-remote-refresh`
 Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
-Infra profile: `db`
+Infra profile: `none`
 
 ## Goal
 
@@ -41,4 +41,3 @@ the database-global WAL head.
 ## ADR impact
 
 `none`
-

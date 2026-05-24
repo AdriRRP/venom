@@ -4,7 +4,7 @@ Wave: `W151-remote-read-snapshot-watermark-reuse`
 Status: `done`
 BDD impact: `none`
 Agentic impact: `none`
-Infra profile: `db`
+Infra profile: `none`
 
 ## Goal
 
@@ -43,4 +43,3 @@ stays stale.
 ## ADR impact
 
 `none`
-
