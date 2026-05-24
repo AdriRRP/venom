@@ -1,6 +1,7 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { createTestQueryClient } from "../test/query-client";
 import { FindingsPage } from "./findings";
 
 vi.mock("@tanstack/react-router", async () => ({
@@ -20,7 +21,7 @@ vi.mock("@tanstack/react-router", async () => ({
 }));
 
 describe("FindingsPage", () => {
-	it("renders the collection and artifact operator views", () => {
+	it("renders the collection and artifact operator views", async () => {
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
 			const url = String(input);
 			if (url.includes("/health")) {
@@ -67,27 +68,29 @@ describe("FindingsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
 
 		expect(
-			screen.getByRole("heading", {
+			await screen.findByRole("heading", {
 				level: 2,
 				name: "Collection Active Findings",
 			}),
 		).toBeInTheDocument();
 		expect(
-			screen.getByRole("heading", {
+			await screen.findByRole("heading", {
 				level: 2,
 				name: "Artifact Active Findings",
 			}),
 		).toBeInTheDocument();
 		expect(
-			screen.getByText("No active findings for this collection yet."),
+			await screen.findByText("No active findings for this collection yet."),
 		).toBeInTheDocument();
-		expect(screen.getByText("No active findings yet.")).toBeInTheDocument();
+		expect(
+			await screen.findByText("No active findings yet."),
+		).toBeInTheDocument();
 	});
 
 	it("submits the collection query with package and governance filters", async () => {
@@ -173,7 +176,7 @@ describe("FindingsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -334,7 +337,7 @@ describe("FindingsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -488,7 +491,7 @@ describe("FindingsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -643,7 +646,7 @@ describe("FindingsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -773,7 +776,7 @@ describe("FindingsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -906,7 +909,7 @@ describe("FindingsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);
@@ -1042,7 +1045,7 @@ describe("FindingsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<FindingsPage />
 			</QueryClientProvider>,
 		);

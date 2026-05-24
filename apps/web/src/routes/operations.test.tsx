@@ -1,6 +1,7 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { createTestQueryClient } from "../test/query-client";
 import { OperationsPage } from "./operations";
 
 vi.mock("@tanstack/react-router", async () => ({
@@ -26,7 +27,7 @@ describe("OperationsPage", () => {
 		) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -43,6 +44,54 @@ describe("OperationsPage", () => {
 			if (url === "/api/health") {
 				return new Response("ok", { status: 200 });
 			}
+			if (url === "/api/collections") {
+				return new Response(
+					JSON.stringify({
+						managed_collections: 0,
+						collections: [],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/collections/release%3A2026.05") {
+				return new Response(
+					JSON.stringify({
+						collection_key: "release:2026.05",
+						name: "May Release",
+						context_profile_key: null,
+						source: null,
+						scan_schedule: null,
+						health: {
+							total: 0,
+							open: 0,
+							risk_accepted: 0,
+							suppressed: 0,
+							critical_risk: 0,
+							high_risk: 0,
+						},
+						members: [],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/context-profiles") {
+				return new Response(
+					JSON.stringify({
+						managed_context_profiles: 0,
+						profiles: [],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "/api/component-tags") {
+				return new Response(
+					JSON.stringify({
+						managed_component_tags: 0,
+						tags: [],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
 			if (url === "/api/components") {
 				return new Response(
 					JSON.stringify({
@@ -56,7 +105,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -105,7 +154,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -204,7 +253,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -298,7 +347,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -422,7 +471,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -548,7 +597,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -613,7 +662,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -644,7 +693,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);
@@ -746,7 +795,7 @@ describe("OperationsPage", () => {
 		}) as typeof fetch;
 
 		render(
-			<QueryClientProvider client={new QueryClient()}>
+			<QueryClientProvider client={createTestQueryClient()}>
 				<OperationsPage />
 			</QueryClientProvider>,
 		);

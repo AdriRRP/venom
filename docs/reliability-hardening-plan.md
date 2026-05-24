@@ -175,6 +175,22 @@ Completed:
 60. `W148-context-explainability-operator-layout`
     Present contextual summary, posture, rule, and effective factors in one
     more structured operator layout instead of plain stacked text.
+61. `W149-http-write-plane-real-partitioning`
+    Let stale Postgres-backed fresh reads rebuild one detached read snapshot
+    without taking the live mutable application slot.
+62. `W150-schema-scoped-postgres-remote-refresh`
+    Detect remote Postgres changes from one VENOM schema-local watermark instead
+    of the database-global WAL head.
+63. `W151-remote-read-snapshot-watermark-reuse`
+    Reuse one detached remote read snapshot until the schema-local watermark
+    changes again instead of rebuilding on every fresh read while the main write
+    store stays stale.
+64. `W152-event-trace-index-shape-compaction`
+    Merge bounded recent system-event windows directly instead of chain-sort-
+    truncate rebuilds on every local composite refresh.
+65. `W153-bulk-cohort-streaming-paths`
+    Make visitor-based streaming paths the canonical bulk-governance API and
+    remove leftover vector-materializing helpers from the read model surface.
 
 ## Exit condition
 

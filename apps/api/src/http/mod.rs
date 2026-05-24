@@ -36,6 +36,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, watch};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
@@ -51,7 +52,9 @@ struct ApiStateInner {
     service: Mutex<Option<ApiApplication>>,
     service_ready: Notify,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
+    remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
+    remote_snapshot_watermark: AtomicU64,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
 }
@@ -179,6 +182,7 @@ impl ApiState {
 
     fn new(service: ApiApplication) -> Self {
         let remote_change_probe = service.remote_change_probe();
+        let remote_read_snapshot_loader = service.remote_read_snapshot_loader();
         let snapshot = Arc::new(service.read_snapshot());
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
@@ -186,7 +190,9 @@ impl ApiState {
                 service: Mutex::new(Some(service)),
                 service_ready: Notify::new(),
                 remote_change_probe,
+                remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
+                remote_snapshot_watermark: AtomicU64::new(0),
                 read_snapshot_tx,
                 read_snapshot_rx,
             }),
@@ -199,15 +205,45 @@ impl ApiState {
 
     async fn read_snapshot_fresh(&self) -> Result<Arc<ApiReadSnapshot>, ApiError> {
         if let Some(probe) = &self.inner.remote_change_probe {
-            let is_stale = probe.is_stale().await.map_err(ApiError::internal)?;
-            if !is_stale {
+            let current_change_watermark = probe
+                .current_change_watermark()
+                .await
+                .map_err(ApiError::internal)?;
+            if current_change_watermark == probe.observed_change_watermark() {
                 return Ok(self.read_snapshot());
             }
 
             let _refresh_guard = self.inner.remote_refresh.lock().await;
-            let is_stale = probe.is_stale().await.map_err(ApiError::internal)?;
-            if !is_stale {
+            let current_change_watermark = probe
+                .current_change_watermark()
+                .await
+                .map_err(ApiError::internal)?;
+            if current_change_watermark == probe.observed_change_watermark() {
                 return Ok(self.read_snapshot());
+            }
+
+            if self.inner.remote_snapshot_watermark.load(Ordering::Relaxed)
+                == current_change_watermark
+            {
+                return Ok(self.read_snapshot());
+            }
+
+            if let Some(loader) = &self.inner.remote_read_snapshot_loader {
+                let loaded = loader.load().await.map_err(ApiError::internal)?;
+                let next_snapshot = Arc::new(ApiReadSnapshot::new(
+                    loaded.inventory,
+                    loaded.read_model,
+                    loaded.system_event_index,
+                    loaded.command_statuses,
+                    loaded.release_board,
+                ));
+                self.inner
+                    .remote_snapshot_watermark
+                    .store(loaded.change_watermark, Ordering::Relaxed);
+                self.inner
+                    .read_snapshot_tx
+                    .send_replace(Arc::clone(&next_snapshot));
+                return Ok(next_snapshot);
             }
         }
         let mut service = self.take_service().await;
