@@ -1,18 +1,44 @@
-# W152 Event Trace Index Shape Compaction
+# W152. Event Trace Index Shape Compaction
 
-## Why
+Wave: `W152-event-trace-index-shape-compaction`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `none`
 
-Merging local `system event` windows still rebuilt one combined vector through
-`chain + sort + truncate`, which was correct but needlessly allocation-heavy.
+## Goal
 
-## What changed
+Merge bounded recent system-event windows directly instead of chain-sort-
+truncate rebuilds on every local composite refresh.
 
-- Replaced the old merge path with one bounded linear merge over already-sorted
-  recent event windows.
-- Kept the same observable ordering and bounded limit semantics.
+## Feature paths
 
-## Verification
+- `none`
 
-- `cargo test -p venom-domain finding_read_model --all-features`
-- `cargo check -p venom-api --all-features`
+## Execution lanes
+
+- `unit`
+
+## Owned paths
+
+- `crates/venom-domain/src/operations/system_event_trace.rs`
+- `docs/reliability-hardening-plan.md`
+
+## Slices
+
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W152-S01` | done | replace bounded recent-event merge sort with one direct linear merge | `cargo test -p venom-domain finding_read_model --all-features` |
+
+## Language impact
+
+`none`
+
+## Invariant impact
+
+`I8`
+
+## ADR impact
+
+`none`
 

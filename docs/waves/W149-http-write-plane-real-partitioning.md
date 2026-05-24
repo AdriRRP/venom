@@ -1,20 +1,46 @@
-# W149 HTTP Write Plane Real Partitioning
+# W149. HTTP Write Plane Real Partitioning
 
-## Why
+Wave: `W149-http-write-plane-real-partitioning`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `db`
 
-Fresh Postgres-backed reads still contended on the mutable `ApiApplication`
-slot whenever another instance advanced durable state. That kept part of the
-operator read plane serialized behind the live write service.
+## Goal
 
-## What changed
+Let stale Postgres-backed fresh reads rebuild one detached read snapshot without
+taking the live mutable application slot.
 
-- Added one detached Postgres read-snapshot loader for stale fresh reads.
-- Fresh HTTP reads now rebuild one remote snapshot without taking the live
-  mutable application slot.
-- The write path keeps its own durable refresh before mutation, so correctness
-  still lives on the write side.
+## Feature paths
 
-## Verification
+- `none`
 
-- `cargo check -p venom-api --all-features`
+## Execution lanes
+
+- `integration`
+
+## Owned paths
+
+- `apps/api/src/app/service.rs`
+- `apps/api/src/http/mod.rs`
+- `apps/api/src/infra/postgres_backend.rs`
+- `docs/reliability-hardening-plan.md`
+
+## Slices
+
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W149-S01` | done | load stale Postgres-backed fresh reads through one detached snapshot loader instead of the live write slot | `cargo test -p venom-api postgres_backend --all-features` |
+
+## Language impact
+
+`none`
+
+## Invariant impact
+
+`I8, I11`
+
+## ADR impact
+
+`none`
 

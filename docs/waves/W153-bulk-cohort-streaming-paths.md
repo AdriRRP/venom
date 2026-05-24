@@ -1,19 +1,44 @@
-# W153 Bulk Cohort Streaming Paths
+# W153. Bulk Cohort Streaming Paths
 
-## Why
+Wave: `W153-bulk-cohort-streaming-paths`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `none`
 
-The read model still exposed old vector-materializing bulk helpers even though
-the durable write paths had already moved to visitor-style streaming.
+## Goal
 
-## What changed
+Make visitor-based streaming paths the canonical bulk-governance API and remove
+leftover vector-materializing helpers from the read model surface.
 
-- Removed leftover vector-collecting bulk helpers from `FindingReadModel`.
-- Kept visitor-based bulk traversal as the canonical path for governance
-  cohorts.
-- Updated the read-model test to assert full cohort coverage through the
-  streaming visitor path.
+## Feature paths
 
-## Verification
+- `none`
 
-- `cargo test -p venom-domain finding_read_model --all-features`
+## Execution lanes
+
+- `unit`
+
+## Owned paths
+
+- `crates/venom-domain/src/findings/finding_read_model.rs`
+- `docs/reliability-hardening-plan.md`
+
+## Slices
+
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W153-S01` | done | remove vector-collecting bulk helpers and assert full cohort coverage through streaming visitors | `cargo test -p venom-domain finding_read_model --all-features` |
+
+## Language impact
+
+`none`
+
+## Invariant impact
+
+`I8, I11`
+
+## ADR impact
+
+`none`
 
