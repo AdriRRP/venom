@@ -2878,12 +2878,13 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let pid = std::process::id();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("current time should be after unix epoch")
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("venom-{name}-{nanos}-{counter}.jsonl"))
+        std::env::temp_dir().join(format!("venom-{name}-{pid}-{nanos}-{counter}.jsonl"))
     }
 
     fn artifact() -> ArtifactRef {
