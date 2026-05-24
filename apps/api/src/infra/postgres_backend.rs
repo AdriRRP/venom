@@ -4406,7 +4406,8 @@ mod tests {
         let probe = backend.remote_change_probe();
         let observed = probe.observed_change_watermark();
         assert_eq!(
-            probe.current_change_watermark()
+            probe
+                .current_change_watermark()
                 .await
                 .expect("watermark should be readable"),
             observed
@@ -4431,7 +4432,8 @@ mod tests {
         .expect("unrelated row should insert");
 
         assert_eq!(
-            probe.current_change_watermark()
+            probe
+                .current_change_watermark()
                 .await
                 .expect("watermark should stay readable"),
             observed
