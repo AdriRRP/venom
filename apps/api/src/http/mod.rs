@@ -403,10 +403,17 @@ impl ApiState {
         if let Some(next_snapshot) = next_snapshot {
             self.publish_snapshot(next_snapshot, remote_change_watermark);
         }
-        if let Some(error) = mark_remote_change_result {
-            return Err(ApiError::from(error));
+        match result {
+            Ok(value) => {
+                if let Some(_error) = mark_remote_change_result {
+                    // The business write is already durable at this point. Preserve the truthful
+                    // success result and let later fresh-read revalidation recover the remote
+                    // watermark if this observation probe failed.
+                }
+                Ok(value)
+            }
+            Err(error) => Err(error),
         }
-        result
     }
 
     async fn drain_worker_until_idle(
@@ -1529,7 +1536,9 @@ impl axum::response::IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use super::ApiError;
     use super::ApiState;
+    use super::ComponentRegistrationRequest;
     use super::build_router;
     use super::remote_snapshot_is_current;
     use super::should_publish_remote_snapshot;
@@ -1538,6 +1547,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use serde_json::json;
+    use sqlx::PgPool;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
@@ -3584,6 +3594,62 @@ mod tests {
             payload["active_findings"][0]["governance_reason"],
             "Accepted after remote refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_mutation_returns_success_after_committed_write_even_if_watermark_probe_fails() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("write_success_veracity");
+        let state = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("postgres api state should open");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("postgres pool should connect");
+        let operation_pool = pool.clone();
+        let change_watermark_table = format!("{schema}.change_watermark");
+        let components_table = format!("{schema}.components");
+
+        let response = match state
+            .mutate(
+                move |service| {
+                    let pool = operation_pool.clone();
+                    let change_watermark_table = change_watermark_table.clone();
+                    Box::pin(async move {
+                        let response = service
+                            .register_component(ComponentRegistrationRequest {
+                                component_key: "component:payments-api".to_owned(),
+                                name: "Payments API".to_owned(),
+                            })
+                            .await
+                            .map_err(ApiError::from)?;
+                        sqlx::query(&format!("DROP TABLE {change_watermark_table}"))
+                            .execute(&pool)
+                            .await
+                            .expect("dropping change watermark table should succeed");
+                        Ok(response)
+                    })
+                },
+                ApiState::refresh_inventory_snapshot,
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => panic!("committed write must still return success: {}", error.message),
+        };
+        assert_eq!(response.change, "registered");
+        assert_eq!(response.managed_components, 1);
+
+        let persisted_components: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {components_table} WHERE component_key = $1"
+        ))
+        .bind("component:payments-api")
+        .fetch_one(&pool)
+        .await
+        .expect("component row count should load");
+        assert_eq!(persisted_components, 1);
     }
 
     #[tokio::test]
