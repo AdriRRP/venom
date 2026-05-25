@@ -3597,7 +3597,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_mutation_returns_success_after_committed_write_even_if_watermark_probe_fails() {
+    async fn postgres_mutation_returns_success_after_committed_write_even_if_watermark_probe_fails()
+    {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
