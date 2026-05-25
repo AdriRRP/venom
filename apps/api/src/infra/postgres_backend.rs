@@ -4062,6 +4062,11 @@ impl PostgresRemoteChangeProbe {
     pub fn observed_change_watermark(&self) -> u64 {
         self.observed_change_watermark.load(Ordering::Relaxed)
     }
+
+    pub fn observe_change_watermark(&self, change_watermark: u64) {
+        self.observed_change_watermark
+            .fetch_max(change_watermark, Ordering::Relaxed);
+    }
 }
 
 impl PostgresReadSnapshotLoader {

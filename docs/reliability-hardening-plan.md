@@ -204,6 +204,10 @@ Completed:
 69. `W157-post-success-write-veracity`
     Keep HTTP write responses truthful when one Postgres-backed mutation already
     committed but the trailing remote-change observation probe fails afterward.
+70. `W158-detached-read-watermark-promotion`
+    Promote the shared observed Postgres change watermark after one detached
+    fresh read succeeds so the next live write does not pay the same remote
+    refresh again.
 
 ## Exit condition
 
