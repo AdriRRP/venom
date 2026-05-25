@@ -2763,7 +2763,11 @@ impl ListSystemEventsResponse {
             total: page.total,
             returned: page.returned,
             limit: page.limit,
-            events: page.events.into_iter().map(SystemEventItem::from).collect(),
+            events: page
+                .events
+                .into_iter()
+                .map(|event| SystemEventItem::from(event.as_ref()))
+                .collect(),
         }
     }
 }
@@ -2783,22 +2787,22 @@ pub struct SystemEventItem {
     pub detail: Option<String>,
 }
 
-impl From<SystemEvent> for SystemEventItem {
-    fn from(value: SystemEvent) -> Self {
+impl From<&SystemEvent> for SystemEventItem {
+    fn from(value: &SystemEvent) -> Self {
         let category = value.category().as_str().to_owned();
         let kind = value.kind.as_str().to_owned();
         Self {
-            event_id: value.event_id.into(),
+            event_id: value.event_id.to_string(),
             occurred_at_unix_ms: value.occurred_at_unix_ms,
             category,
             kind,
-            collection_key: value.collection_key.map(Into::into),
-            component_key: value.component_key.map(Into::into),
-            command_id: value.command_id.map(Into::into),
-            integration_event_id: value.integration_event_id.map(Into::into),
+            collection_key: value.collection_key.as_deref().map(str::to_owned),
+            component_key: value.component_key.as_deref().map(str::to_owned),
+            command_id: value.command_id.as_deref().map(str::to_owned),
+            integration_event_id: value.integration_event_id.as_deref().map(str::to_owned),
             finding_count: value.finding_count,
             retryable: value.retryable,
-            detail: value.detail.map(Into::into),
+            detail: value.detail.as_deref().map(str::to_owned),
         }
     }
 }

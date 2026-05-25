@@ -208,6 +208,10 @@ Completed:
     Promote the shared observed Postgres change watermark after one detached
     fresh read succeeds so the next live write does not pay the same remote
     refresh again.
+71. `W159-system-event-page-arc-sharing`
+    Keep indexed `system events` queries on shared `Arc<SystemEvent>` entries
+    until the API DTO projection layer instead of cloning full events
+    immediately on every query.
 
 ## Exit condition
 

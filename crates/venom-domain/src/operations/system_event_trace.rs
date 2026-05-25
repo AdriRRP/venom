@@ -151,7 +151,7 @@ pub struct SystemEventsPage {
     pub total: usize,
     pub returned: usize,
     pub limit: usize,
-    pub events: Vec<SystemEvent>,
+    pub events: Vec<Arc<SystemEvent>>,
 }
 
 /// One bounded, truthful query index over operator-facing system events.
@@ -313,7 +313,7 @@ impl SystemEventQueryIndex {
         let events = source
             .iter()
             .take(limit)
-            .map(|event| event.as_ref().clone())
+            .map(Arc::clone)
             .collect::<Vec<_>>();
         SystemEventsPage {
             total,
@@ -384,7 +384,7 @@ pub fn query_system_events<'a>(
     }) {
         total += 1;
         if returned_events.len() < limit {
-            returned_events.push(event.clone());
+            returned_events.push(Arc::new(event.clone()));
         }
     }
 

@@ -1401,6 +1401,9 @@ impl PostgresStore {
                 ),
             )
             .events
+            .into_iter()
+            .map(|event| event.as_ref().clone())
+            .collect()
     }
 
     #[must_use]
