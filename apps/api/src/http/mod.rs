@@ -233,6 +233,7 @@ impl ApiState {
 
             if let Some(loader) = &self.inner.remote_read_snapshot_loader {
                 let loaded = loader.load().await.map_err(ApiError::internal)?;
+                probe.observe_change_watermark(loaded.change_watermark);
                 let published_watermark =
                     self.inner.remote_snapshot_watermark.load(Ordering::Relaxed);
                 if !should_publish_remote_snapshot(loaded.change_watermark, published_watermark) {
@@ -3593,6 +3594,58 @@ mod tests {
         assert_eq!(
             payload["active_findings"][0]["governance_reason"],
             "Accepted after remote refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_fresh_read_promotes_the_observed_change_watermark() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_fresh_read_watermark");
+        let primary = build_router(
+            ApiState::open_postgres(&database_url, &schema)
+                .await
+                .expect("postgres api state should open"),
+        );
+        let stale = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("second postgres api state should open");
+
+        let response = register_payments_component(primary.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let current_watermark = stale
+            .inner
+            .remote_change_probe
+            .as_ref()
+            .expect("postgres state should expose one remote probe")
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable");
+        assert!(
+            current_watermark
+                > stale
+                    .inner
+                    .remote_change_probe
+                    .as_ref()
+                    .expect("postgres state should expose one remote probe")
+                    .observed_change_watermark()
+        );
+
+        match stale.read_snapshot_fresh().await {
+            Ok(_) => {}
+            Err(error) => panic!("fresh read should succeed: {}", error.message),
+        }
+
+        assert_eq!(
+            stale
+                .inner
+                .remote_change_probe
+                .as_ref()
+                .expect("postgres state should expose one remote probe")
+                .observed_change_watermark(),
+            current_watermark
         );
     }
 
