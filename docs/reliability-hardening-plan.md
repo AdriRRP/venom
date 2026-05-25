@@ -201,6 +201,9 @@ Completed:
     Always restore the live `ApiApplication` slot before returning errors from
     refresh or watermark-observation paths, and publish the freshest visible
     snapshot after successful writes or remote refreshes.
+69. `W157-post-success-write-veracity`
+    Keep HTTP write responses truthful when one Postgres-backed mutation already
+    committed but the trailing remote-change observation probe fails afterward.
 
 ## Exit condition
 
