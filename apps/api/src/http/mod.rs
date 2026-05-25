@@ -3597,7 +3597,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_mutation_returns_success_after_committed_write_even_if_watermark_probe_fails() {
+    async fn postgres_mutation_returns_success_after_committed_write_even_if_watermark_probe_fails(
+    ) {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
@@ -3637,7 +3638,10 @@ mod tests {
             .await
         {
             Ok(response) => response,
-            Err(error) => panic!("committed write must still return success: {}", error.message),
+            Err(error) => panic!(
+                "committed write must still return success: {}",
+                error.message
+            ),
         };
         assert_eq!(response.change, "registered");
         assert_eq!(response.managed_components, 1);
