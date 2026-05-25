@@ -191,6 +191,16 @@ Completed:
 65. `W153-bulk-cohort-streaming-paths`
     Make visitor-based streaming paths the canonical bulk-governance API and
     remove leftover vector-materializing helpers from the read model surface.
+66. `W154-remote-read-snapshot-monotonicity`
+    Publish detached Postgres-backed fresh-read snapshots only when their
+    change watermark is newer than the snapshot already visible to operators.
+67. `W155-fresh-read-watermark-fast-path`
+    Reuse one already-published detached Postgres read snapshot without taking
+    the remote refresh lane when the schema-local watermark has not advanced.
+68. `W156-api-service-slot-restoration-hardening`
+    Always restore the live `ApiApplication` slot before returning errors from
+    refresh or watermark-observation paths, and publish the freshest visible
+    snapshot after successful writes or remote refreshes.
 
 ## Exit condition
 
