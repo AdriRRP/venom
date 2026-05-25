@@ -614,6 +614,14 @@ impl ApiApplication {
         }
     }
 
+    #[must_use]
+    pub fn observed_remote_change_watermark(&self) -> Option<u64> {
+        match &self.backend {
+            ApiStore::Local(_) => None,
+            ApiStore::Postgres(postgres) => Some(postgres.observed_change_watermark()),
+        }
+    }
+
     /// Register one managed component through the application boundary.
     ///
     /// # Errors

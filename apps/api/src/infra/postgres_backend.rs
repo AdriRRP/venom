@@ -3042,7 +3042,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    fn observed_change_watermark(&self) -> u64 {
+    pub fn observed_change_watermark(&self) -> u64 {
         self.observed_change_watermark.load(Ordering::Relaxed)
     }
 

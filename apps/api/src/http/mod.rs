@@ -181,6 +181,7 @@ impl ApiState {
     }
 
     fn new(service: ApiApplication) -> Self {
+        let remote_snapshot_watermark = service.observed_remote_change_watermark().unwrap_or(0);
         let remote_change_probe = service.remote_change_probe();
         let remote_read_snapshot_loader = service.remote_read_snapshot_loader();
         let snapshot = Arc::new(service.read_snapshot());
@@ -192,7 +193,7 @@ impl ApiState {
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
-                remote_snapshot_watermark: AtomicU64::new(0),
+                remote_snapshot_watermark: AtomicU64::new(remote_snapshot_watermark),
                 read_snapshot_tx,
                 read_snapshot_rx,
             }),
@@ -209,7 +210,11 @@ impl ApiState {
                 .current_change_watermark()
                 .await
                 .map_err(ApiError::internal)?;
-            if current_change_watermark == probe.observed_change_watermark() {
+            if remote_snapshot_is_current(
+                current_change_watermark,
+                probe.observed_change_watermark(),
+                self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
+            ) {
                 return Ok(self.read_snapshot());
             }
 
@@ -218,18 +223,21 @@ impl ApiState {
                 .current_change_watermark()
                 .await
                 .map_err(ApiError::internal)?;
-            if current_change_watermark == probe.observed_change_watermark() {
-                return Ok(self.read_snapshot());
-            }
-
-            if self.inner.remote_snapshot_watermark.load(Ordering::Relaxed)
-                == current_change_watermark
-            {
+            if remote_snapshot_is_current(
+                current_change_watermark,
+                probe.observed_change_watermark(),
+                self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
+            ) {
                 return Ok(self.read_snapshot());
             }
 
             if let Some(loader) = &self.inner.remote_read_snapshot_loader {
                 let loaded = loader.load().await.map_err(ApiError::internal)?;
+                let published_watermark =
+                    self.inner.remote_snapshot_watermark.load(Ordering::Relaxed);
+                if !should_publish_remote_snapshot(loaded.change_watermark, published_watermark) {
+                    return Ok(self.read_snapshot());
+                }
                 let next_snapshot = Arc::new(ApiReadSnapshot::new(
                     loaded.inventory,
                     loaded.read_model,
@@ -237,28 +245,41 @@ impl ApiState {
                     loaded.command_statuses,
                     loaded.release_board,
                 ));
-                self.inner
-                    .remote_snapshot_watermark
-                    .store(loaded.change_watermark, Ordering::Relaxed);
-                self.inner
-                    .read_snapshot_tx
-                    .send_replace(Arc::clone(&next_snapshot));
+                self.publish_snapshot(Arc::clone(&next_snapshot), Some(loaded.change_watermark));
                 return Ok(next_snapshot);
             }
         }
         let mut service = self.take_service().await;
-        let changed = service.refresh_from_remote_if_stale().await?;
+        let changed = match service.refresh_from_remote_if_stale().await {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.restore_service(service).await;
+                return Err(ApiError::from(error));
+            }
+        };
         let next_snapshot = changed.then(|| Arc::new(service.read_snapshot()));
+        let remote_change_watermark = service.observed_remote_change_watermark();
         self.restore_service(service).await;
         next_snapshot.map_or_else(
             || Ok(self.read_snapshot()),
             |next_snapshot| {
-                self.inner
-                    .read_snapshot_tx
-                    .send_replace(Arc::clone(&next_snapshot));
+                self.publish_snapshot(Arc::clone(&next_snapshot), remote_change_watermark);
                 Ok(next_snapshot)
             },
         )
+    }
+
+    fn publish_snapshot(
+        &self,
+        snapshot: Arc<ApiReadSnapshot>,
+        remote_change_watermark: Option<u64>,
+    ) {
+        if let Some(change_watermark) = remote_change_watermark {
+            self.inner
+                .remote_snapshot_watermark
+                .store(change_watermark, Ordering::Relaxed);
+        }
+        self.inner.read_snapshot_tx.send_replace(snapshot);
     }
 
     fn refresh_inventory_snapshot(service: &ApiApplication) -> SnapshotRefresh {
@@ -356,16 +377,35 @@ impl ApiState {
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
         let mut service = self.take_service().await;
-        let _ = service.refresh_from_remote_if_stale().await?;
+        let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.restore_service(service).await;
+                return Err(ApiError::from(error));
+            }
+        };
         let result = operation(&mut service).await;
-        if result.is_ok() {
-            service.mark_remote_change_observed().await?;
-        }
-        let next_snapshot = refresh(&service);
+        let mark_remote_change_result = if result.is_ok() {
+            service.mark_remote_change_observed().await.err()
+        } else {
+            None
+        };
+        let next_snapshot = if refresh_from_remote_changed {
+            Some(Arc::new(service.read_snapshot()))
+        } else if result.is_ok() {
+            let current_snapshot = self.read_snapshot();
+            Some(refresh(&service).apply(&current_snapshot))
+        } else {
+            None
+        };
+        let remote_change_watermark = service.observed_remote_change_watermark();
         self.restore_service(service).await;
-        let current_snapshot = self.read_snapshot();
-        let next_snapshot = next_snapshot.apply(&current_snapshot);
-        self.inner.read_snapshot_tx.send_replace(next_snapshot);
+        if let Some(next_snapshot) = next_snapshot {
+            self.publish_snapshot(next_snapshot, remote_change_watermark);
+        }
+        if let Some(error) = mark_remote_change_result {
+            return Err(ApiError::from(error));
+        }
         result
     }
 
@@ -543,6 +583,22 @@ impl ApiState {
 
         Ok(response)
     }
+}
+
+const fn remote_snapshot_is_current(
+    current_change_watermark: u64,
+    observed_change_watermark: u64,
+    published_snapshot_watermark: u64,
+) -> bool {
+    current_change_watermark == observed_change_watermark
+        || current_change_watermark == published_snapshot_watermark
+}
+
+const fn should_publish_remote_snapshot(
+    loaded_change_watermark: u64,
+    published_snapshot_watermark: u64,
+) -> bool {
+    loaded_change_watermark > published_snapshot_watermark
 }
 
 pub fn build_router(state: ApiState) -> Router {
@@ -1475,6 +1531,8 @@ impl axum::response::IntoResponse for ApiError {
 mod tests {
     use super::ApiState;
     use super::build_router;
+    use super::remote_snapshot_is_current;
+    use super::should_publish_remote_snapshot;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -1506,6 +1564,28 @@ mod tests {
 
     fn postgres_test_url() -> Option<String> {
         std::env::var("VENOM_TEST_POSTGRES_URL").ok()
+    }
+
+    #[test]
+    fn remote_snapshot_is_current_when_published_detached_watermark_matches() {
+        assert!(remote_snapshot_is_current(8, 7, 8));
+    }
+
+    #[test]
+    fn remote_snapshot_is_current_when_live_store_observed_watermark_matches() {
+        assert!(remote_snapshot_is_current(8, 8, 7));
+    }
+
+    #[test]
+    fn stale_remote_snapshot_is_not_current() {
+        assert!(!remote_snapshot_is_current(8, 7, 6));
+    }
+
+    #[test]
+    fn detached_snapshot_publication_is_monotonic() {
+        assert!(should_publish_remote_snapshot(9, 8));
+        assert!(!should_publish_remote_snapshot(8, 8));
+        assert!(!should_publish_remote_snapshot(7, 8));
     }
 
     #[tokio::test]
