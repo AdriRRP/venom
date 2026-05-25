@@ -3617,7 +3617,6 @@ mod tests {
             .mutate(
                 move |service| {
                     let pool = operation_pool.clone();
-                    let change_watermark_table = change_watermark_table.clone();
                     Box::pin(async move {
                         let response = service
                             .register_component(ComponentRegistrationRequest {
