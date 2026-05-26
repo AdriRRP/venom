@@ -265,90 +265,89 @@ impl SystemEventQueryIndex {
             command_total: left.command_total + right.command_total,
             governance_total: left.governance_total + right.governance_total,
             publication_total: left.publication_total + right.publication_total,
-            ..Self::from_recent_windows(
-                SystemEventWindowTotals {
-                    total: left.total + right.total,
-                    scheduler_total: left.scheduler_total + right.scheduler_total,
-                    command_total: left.command_total + right.command_total,
-                    governance_total: left.governance_total + right.governance_total,
-                    publication_total: left.publication_total + right.publication_total,
-                },
-                SystemEventRecentWindows {
-                    recent_events: merge_recent_events(
-                        &left
-                            .query(&SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT))
-                            .events,
-                        &right
-                            .query(&SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT))
-                            .events,
-                    ),
-                    recent_scheduler_events: merge_recent_events(
-                        &left
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Scheduler)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                        &right
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Scheduler)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                    ),
-                    recent_command_events: merge_recent_events(
-                        &left
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Command)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                        &right
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Command)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                    ),
-                    recent_governance_events: merge_recent_events(
-                        &left
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Governance)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                        &right
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Governance)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                    ),
-                    recent_publication_events: merge_recent_events(
-                        &left
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Publication)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                        &right
-                            .query(
-                                &SystemEventsQuery::new()
-                                    .with_category(SystemEventCategory::Publication)
-                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
-                            )
-                            .events,
-                    ),
-                },
+            ..Self::from_recent_id_windows(
+                &left.retained_events,
+                &right.retained_events,
+                merge_recent_event_ids(
+                    &left.recent_events,
+                    &left.retained_events,
+                    &right.recent_events,
+                    &right.retained_events,
+                ),
+                merge_recent_event_ids(
+                    &left.recent_scheduler_events,
+                    &left.retained_events,
+                    &right.recent_scheduler_events,
+                    &right.retained_events,
+                ),
+                merge_recent_event_ids(
+                    &left.recent_command_events,
+                    &left.retained_events,
+                    &right.recent_command_events,
+                    &right.retained_events,
+                ),
+                merge_recent_event_ids(
+                    &left.recent_governance_events,
+                    &left.retained_events,
+                    &right.recent_governance_events,
+                    &right.retained_events,
+                ),
+                merge_recent_event_ids(
+                    &left.recent_publication_events,
+                    &left.retained_events,
+                    &right.recent_publication_events,
+                    &right.retained_events,
+                ),
             )
         }
+    }
+
+    fn from_recent_id_windows(
+        left_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+        right_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+        recent_events: Vec<Box<str>>,
+        recent_scheduler_events: Vec<Box<str>>,
+        recent_command_events: Vec<Box<str>>,
+        recent_governance_events: Vec<Box<str>>,
+        recent_publication_events: Vec<Box<str>>,
+    ) -> Self {
+        let mut index = Self::new();
+        load_recent_id_window(
+            &mut index.retained_events,
+            &mut index.recent_events,
+            recent_events,
+            left_retained,
+            right_retained,
+        );
+        load_recent_id_window(
+            &mut index.retained_events,
+            &mut index.recent_scheduler_events,
+            recent_scheduler_events,
+            left_retained,
+            right_retained,
+        );
+        load_recent_id_window(
+            &mut index.retained_events,
+            &mut index.recent_command_events,
+            recent_command_events,
+            left_retained,
+            right_retained,
+        );
+        load_recent_id_window(
+            &mut index.retained_events,
+            &mut index.recent_governance_events,
+            recent_governance_events,
+            left_retained,
+            right_retained,
+        );
+        load_recent_id_window(
+            &mut index.retained_events,
+            &mut index.recent_publication_events,
+            recent_publication_events,
+            left_retained,
+            right_retained,
+        );
+        index
     }
 
     #[must_use]
@@ -456,6 +455,25 @@ fn load_recent_window(
     }
 }
 
+fn load_recent_id_window(
+    retained_events: &mut BTreeMap<Box<str>, Arc<SystemEvent>>,
+    target: &mut Vec<Box<str>>,
+    event_ids: Vec<Box<str>>,
+    left_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+    right_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+) {
+    for event_id in event_ids {
+        let event = left_retained
+            .get(event_id.as_ref())
+            .or_else(|| right_retained.get(event_id.as_ref()))
+            .expect("merged recent system event id should resolve in one retained window");
+        retained_events
+            .entry(event_id.clone())
+            .or_insert_with(|| Arc::clone(event));
+        target.push(event_id);
+    }
+}
+
 fn push_bounded_id(events: &mut Vec<Box<str>>, event_id: Box<str>) {
     if events.len() == MAX_SYSTEM_EVENTS_LIMIT {
         events.pop();
@@ -463,18 +481,28 @@ fn push_bounded_id(events: &mut Vec<Box<str>>, event_id: Box<str>) {
     events.insert(0, event_id);
 }
 
-fn merge_recent_events(
-    left: &[Arc<SystemEvent>],
-    right: &[Arc<SystemEvent>],
-) -> Vec<Arc<SystemEvent>> {
-    let mut merged = Vec::with_capacity((left.len() + right.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
+fn merge_recent_event_ids(
+    left_ids: &[Box<str>],
+    left_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+    right_ids: &[Box<str>],
+    right_retained: &BTreeMap<Box<str>, Arc<SystemEvent>>,
+) -> Vec<Box<str>> {
+    let mut merged =
+        Vec::with_capacity((left_ids.len() + right_ids.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
     let mut left_index = 0;
     let mut right_index = 0;
 
     while merged.len() < MAX_SYSTEM_EVENTS_LIMIT
-        && (left_index < left.len() || right_index < right.len())
+        && (left_index < left_ids.len() || right_index < right_ids.len())
     {
-        let take_left = match (left.get(left_index), right.get(right_index)) {
+        let take_left = match (
+            left_ids
+                .get(left_index)
+                .and_then(|event_id| left_retained.get(event_id.as_ref())),
+            right_ids
+                .get(right_index)
+                .and_then(|event_id| right_retained.get(event_id.as_ref())),
+        ) {
             (Some(left_event), Some(right_event)) => {
                 compare_recent_event_order(left_event, right_event).is_lt()
             }
@@ -483,13 +511,14 @@ fn merge_recent_events(
             (None, None) => break,
         };
         if take_left {
-            merged.push(Arc::clone(&left[left_index]));
+            merged.push(left_ids[left_index].clone());
             left_index += 1;
         } else {
-            merged.push(Arc::clone(&right[right_index]));
+            merged.push(right_ids[right_index].clone());
             right_index += 1;
         }
     }
+
     merged
 }
 
@@ -532,13 +561,28 @@ pub fn query_system_events<'a>(
 mod tests {
     use super::{
         DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
-        SystemEventKind, SystemEventsQuery, query_system_events,
+        SystemEventKind, SystemEventQueryIndex, SystemEventsQuery, query_system_events,
     };
 
     fn event(event_id: &str, kind: SystemEventKind) -> SystemEvent {
         SystemEvent {
             event_id: event_id.into(),
             occurred_at_unix_ms: 1,
+            kind,
+            collection_key: None,
+            component_key: None,
+            command_id: None,
+            integration_event_id: None,
+            finding_count: None,
+            retryable: None,
+            detail: None,
+        }
+    }
+
+    fn timed_event(event_id: &str, occurred_at_unix_ms: u64, kind: SystemEventKind) -> SystemEvent {
+        SystemEvent {
+            event_id: event_id.into(),
+            occurred_at_unix_ms,
             kind,
             collection_key: None,
             component_key: None,
@@ -602,5 +646,41 @@ mod tests {
     fn system_events_query_uses_default_limit() {
         let query = SystemEventsQuery::new();
         assert_eq!(query.normalized_limit(), DEFAULT_SYSTEM_EVENTS_LIMIT);
+    }
+
+    #[test]
+    fn merged_index_keeps_recent_order_without_query_rebuilds() {
+        let left = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-001", 1, SystemEventKind::FindingRiskAccepted),
+                timed_event("event-003", 3, SystemEventKind::ScanCommandCompleted),
+            ]
+            .iter(),
+        );
+        let right = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-002", 2, SystemEventKind::FindingSuppressed),
+                timed_event(
+                    "event-004",
+                    4,
+                    SystemEventKind::IntegrationEventPublished,
+                ),
+            ]
+            .iter(),
+        );
+
+        let merged = SystemEventQueryIndex::merged(&left, &right);
+        let page = merged.query(&SystemEventsQuery::new().with_limit(4));
+
+        let ordered_ids = page
+            .events
+            .iter()
+            .map(|event| event.event_id.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec!["event-004", "event-003", "event-002", "event-001"]
+        );
+        assert_eq!(page.total, 4);
     }
 }

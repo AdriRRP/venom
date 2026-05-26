@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Mutex, Notify, RwLock, watch};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
 
@@ -50,6 +50,9 @@ pub struct ApiState {
 
 struct ApiStateInner {
     services: ApiServiceSet,
+    write_consistency_barrier: RwLock<()>,
+    local_runtime_mutation_barrier: Mutex<()>,
+    local_change_epoch: AtomicU64,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
@@ -62,10 +65,10 @@ struct ApiStateInner {
 struct ServiceSlot {
     service: Mutex<Option<ApiApplication>>,
     ready: Notify,
+    observed_local_change_epoch: AtomicU64,
 }
 
 enum ApiServiceSet {
-    Single(Box<ServiceSlot>),
     Partitioned(Box<PartitionedServiceSlots>),
 }
 
@@ -183,9 +186,19 @@ impl ApiState {
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, String> {
-        let service = ApiApplication::open_local(state_path, runtime_path)
+        let state_path = state_path.into();
+        let runtime_path = runtime_path.into();
+        let state_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
             .map_err(|error| error.to_string())?;
-        Ok(Self::new_single(service))
+        let runtime_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
+            .map_err(|error| error.to_string())?;
+        let publication_service = ApiApplication::open_local(state_path, runtime_path)
+            .map_err(|error| error.to_string())?;
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            publication_service,
+        ))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -210,29 +223,6 @@ impl ApiState {
         ))
     }
 
-    fn new_single(service: ApiApplication) -> Self {
-        let remote_snapshot_watermark = service.observed_remote_change_watermark().unwrap_or(0);
-        let remote_change_probe = service.remote_change_probe();
-        let remote_read_snapshot_loader = service.remote_read_snapshot_loader();
-        let snapshot = Arc::new(service.read_snapshot());
-        let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
-        Self {
-            inner: Arc::new(ApiStateInner {
-                services: ApiServiceSet::Single(Box::new(ServiceSlot {
-                    service: Mutex::new(Some(service)),
-                    ready: Notify::new(),
-                })),
-                remote_change_probe,
-                remote_read_snapshot_loader,
-                remote_refresh: Mutex::new(()),
-                remote_snapshot_watermark: AtomicU64::new(remote_snapshot_watermark),
-                remote_observation_degraded: AtomicBool::new(false),
-                read_snapshot_tx,
-                read_snapshot_rx,
-            }),
-        }
-    }
-
     fn new_partitioned(
         state_service: ApiApplication,
         runtime_service: ApiApplication,
@@ -251,16 +241,22 @@ impl ApiState {
                     state: ServiceSlot {
                         service: Mutex::new(Some(state_service)),
                         ready: Notify::new(),
+                        observed_local_change_epoch: AtomicU64::new(0),
                     },
                     runtime: ServiceSlot {
                         service: Mutex::new(Some(runtime_service)),
                         ready: Notify::new(),
+                        observed_local_change_epoch: AtomicU64::new(0),
                     },
                     publication: ServiceSlot {
                         service: Mutex::new(Some(publication_service)),
                         ready: Notify::new(),
+                        observed_local_change_epoch: AtomicU64::new(0),
                     },
                 })),
+                write_consistency_barrier: RwLock::new(()),
+                local_runtime_mutation_barrier: Mutex::new(()),
+                local_change_epoch: AtomicU64::new(0),
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -456,7 +452,6 @@ impl ApiState {
 
     fn slot_for_lane(&self, lane: ApiMutationLane) -> &ServiceSlot {
         match &self.inner.services {
-            ApiServiceSet::Single(slot) => slot.as_ref(),
             ApiServiceSet::Partitioned(slots) => match lane {
                 ApiMutationLane::State => &slots.state,
                 ApiMutationLane::Runtime => &slots.runtime,
@@ -483,6 +478,28 @@ impl ApiState {
         *guard = Some(service);
         drop(guard);
         slot.ready.notify_waiters();
+    }
+
+    async fn refresh_local_service_if_stale(
+        &self,
+        lane: ApiMutationLane,
+        service: &mut ApiApplication,
+    ) -> Result<(), ApiError> {
+        if self.inner.remote_read_snapshot_loader.is_some() {
+            return Ok(());
+        }
+
+        let slot = self.slot_for_lane(lane);
+        let observed_epoch = slot.observed_local_change_epoch.load(Ordering::Relaxed);
+        let current_epoch = self.inner.local_change_epoch.load(Ordering::Relaxed);
+        if observed_epoch >= current_epoch {
+            return Ok(());
+        }
+
+        service.reload_local_from_disk().map_err(ApiError::from)?;
+        slot.observed_local_change_epoch
+            .store(current_epoch, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
@@ -522,7 +539,28 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
+        let _write_consistency_guard = match lane {
+            ApiMutationLane::State => Some(self.inner.write_consistency_barrier.write().await),
+            ApiMutationLane::Runtime | ApiMutationLane::Publication => None,
+        };
+        let _read_consistency_guard = match lane {
+            ApiMutationLane::State => None,
+            ApiMutationLane::Runtime | ApiMutationLane::Publication => {
+                Some(self.inner.write_consistency_barrier.read().await)
+            }
+        };
+        let _local_runtime_mutation_guard = if self.inner.remote_read_snapshot_loader.is_none()
+            && matches!(
+                lane,
+                ApiMutationLane::Runtime | ApiMutationLane::Publication
+            ) {
+            Some(self.inner.local_runtime_mutation_barrier.lock().await)
+        } else {
+            None
+        };
         let mut service = self.take_service(lane).await;
+        self.refresh_local_service_if_stale(lane, &mut service)
+            .await?;
         let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
             Err(error) => {
@@ -578,6 +616,16 @@ impl ApiState {
             None
         };
         self.restore_service(lane, service).await;
+        if self.inner.remote_read_snapshot_loader.is_none() && result.is_ok() {
+            let next_epoch = self
+                .inner
+                .local_change_epoch
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            self.slot_for_lane(lane)
+                .observed_local_change_epoch
+                .store(next_epoch, Ordering::Relaxed);
+        }
         if let Some(next_snapshot) = next_snapshot {
             self.publish_snapshot(next_snapshot, remote_change_watermark);
         }

@@ -90,6 +90,16 @@ const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 2;
 const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 3;
 const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 4;
 const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 5;
+const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 6;
+const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 7;
+const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY
+    | CHANGE_LANE_READ_MODEL
+    | CHANGE_LANE_COMMAND_STATUSES
+    | CHANGE_LANE_SYSTEM_EVENTS
+    | CHANGE_LANE_INTEGRATION_OUTBOX
+    | CHANGE_LANE_INTEGRATION_RUNTIME
+    | CHANGE_LANE_COLLECTION_SCHEDULES
+    | CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainDueCollectionScansResult {
@@ -211,6 +221,13 @@ impl PostgresStore {
             .await?;
         if lane_mask & CHANGE_LANE_INVENTORY != 0 {
             self.refresh_inventory_from_remote().await?;
+        } else {
+            if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
+                self.refresh_collection_scan_schedules_from_remote().await?;
+            }
+            if lane_mask & CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS != 0 {
+                self.refresh_provider_runtime_configs_from_remote().await?;
+            }
         }
         if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
             self.refresh_read_model_from_remote().await?;
@@ -2590,8 +2607,8 @@ impl PostgresStore {
             CHANGE_LANE_INVENTORY,
             CHANGE_LANE_INVENTORY,
             CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_COLLECTION_SCHEDULES,
+            CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS,
             CHANGE_LANE_INTEGRATION_RUNTIME,
             CHANGE_LANE_READ_MODEL,
             CHANGE_LANE_READ_MODEL,
@@ -3144,7 +3161,19 @@ impl PostgresStore {
         since_change_watermark: u64,
         current_change_watermark: u64,
     ) -> Result<i32, String> {
-        sqlx::query_scalar::<_, Option<i32>>(&format!(
+        let earliest_retained_change_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MIN(change_seq) FROM {}",
+            self.names.change_journal
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change journal coverage read failed: {error}"))?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| "postgres change journal minimum change_seq out of range".to_owned())
+        })
+        .transpose()?;
+        let lane_mask = sqlx::query_scalar::<_, Option<i32>>(&format!(
             concat!(
                 "SELECT COALESCE(bit_or(lane_mask), 0) FROM {} ",
                 "WHERE change_seq > $1 AND change_seq <= $2"
@@ -3162,7 +3191,16 @@ impl PostgresStore {
         .fetch_one(&self.pool)
         .await
         .map_err(|error| format!("postgres change journal read failed: {error}"))
-        .map(Option::unwrap_or_default)
+        .map(Option::unwrap_or_default)?;
+        if change_journal_gap_requires_full_refresh(
+            since_change_watermark,
+            current_change_watermark,
+            earliest_retained_change_seq,
+        ) {
+            Ok(CHANGE_LANE_ALL)
+        } else {
+            Ok(lane_mask)
+        }
     }
 
     async fn current_change_watermark(&self) -> Result<u64, String> {
@@ -3192,6 +3230,18 @@ impl PostgresStore {
         backend.load_artifact_bindings().await?;
         backend.load_provider_runtime_configs().await?;
         self.ingestion = backend.ingestion;
+        self.refresh_inventory_snapshot_cache();
+        Ok(())
+    }
+
+    async fn refresh_collection_scan_schedules_from_remote(&mut self) -> Result<(), String> {
+        self.load_collection_scan_schedules().await?;
+        self.refresh_inventory_snapshot_cache();
+        Ok(())
+    }
+
+    async fn refresh_provider_runtime_configs_from_remote(&mut self) -> Result<(), String> {
+        self.load_provider_runtime_configs().await?;
         self.refresh_inventory_snapshot_cache();
         Ok(())
     }
@@ -4252,7 +4302,18 @@ impl PostgresReadSnapshotLoader {
         let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
             self.load_inventory_snapshot().await?
         } else {
-            base_inventory
+            let inventory = if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
+                self.load_collection_schedule_inventory_snapshot(base_inventory)
+                    .await?
+            } else {
+                base_inventory
+            };
+            if lane_mask & CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS != 0 {
+                self.load_provider_runtime_inventory_snapshot(inventory)
+                    .await?
+            } else {
+                inventory
+            }
         };
         let read_model = if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
             self.load_read_model_snapshot(Arc::clone(&inventory))
@@ -4298,7 +4359,19 @@ impl PostgresReadSnapshotLoader {
         since_change_watermark: u64,
         current_change_watermark: u64,
     ) -> Result<i32, String> {
-        sqlx::query_scalar::<_, Option<i32>>(&format!(
+        let earliest_retained_change_seq = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MIN(change_seq) FROM {}",
+            self.names.change_journal
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change journal coverage read failed: {error}"))?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| "postgres change journal minimum change_seq out of range".to_owned())
+        })
+        .transpose()?;
+        let lane_mask = sqlx::query_scalar::<_, Option<i32>>(&format!(
             concat!(
                 "SELECT COALESCE(bit_or(lane_mask), 0) FROM {} ",
                 "WHERE change_seq > $1 AND change_seq <= $2"
@@ -4316,7 +4389,16 @@ impl PostgresReadSnapshotLoader {
         .fetch_one(&self.pool)
         .await
         .map_err(|error| format!("postgres change journal read failed: {error}"))
-        .map(Option::unwrap_or_default)
+        .map(Option::unwrap_or_default)?;
+        if change_journal_gap_requires_full_refresh(
+            since_change_watermark,
+            current_change_watermark,
+            earliest_retained_change_seq,
+        ) {
+            Ok(CHANGE_LANE_ALL)
+        } else {
+            Ok(lane_mask)
+        }
     }
 
     async fn load_inventory_snapshot(&self) -> Result<Arc<ComponentInventory>, String> {
@@ -4331,6 +4413,28 @@ impl PostgresReadSnapshotLoader {
         backend.load_collection_memberships().await?;
         backend.load_collection_scan_schedules().await?;
         backend.load_artifact_bindings().await?;
+        backend.load_provider_runtime_configs().await?;
+        backend.refresh_inventory_snapshot_cache();
+        Ok(backend.inventory_snapshot_arc())
+    }
+
+    async fn load_collection_schedule_inventory_snapshot(
+        &self,
+        inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
+        backend.load_collection_scan_schedules().await?;
+        backend.refresh_inventory_snapshot_cache();
+        Ok(backend.inventory_snapshot_arc())
+    }
+
+    async fn load_provider_runtime_inventory_snapshot(
+        &self,
+        inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
         backend.load_provider_runtime_configs().await?;
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
@@ -4368,6 +4472,20 @@ impl PostgresReadSnapshotLoader {
 struct ScanCommandRecord {
     request: ScanRequest,
     status: ScanCommandStatus,
+}
+
+const fn change_journal_gap_requires_full_refresh(
+    since_change_watermark: u64,
+    current_change_watermark: u64,
+    earliest_retained_change_seq: Option<u64>,
+) -> bool {
+    if current_change_watermark <= since_change_watermark {
+        return false;
+    }
+    match earliest_retained_change_seq {
+        Some(earliest_retained) => earliest_retained > since_change_watermark.saturating_add(1),
+        None => true,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4650,6 +4768,7 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 #[cfg(test)]
 mod tests {
     use super::PostgresStore;
+    use super::change_journal_gap_requires_full_refresh;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -4674,6 +4793,17 @@ mod tests {
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!("venom_{name}_{nanos}_{counter}")
+    }
+
+    #[test]
+    fn change_journal_gap_requires_full_refresh_after_retention_hole() {
+        assert!(change_journal_gap_requires_full_refresh(12, 32, Some(18)));
+    }
+
+    #[test]
+    fn change_journal_gap_does_not_require_full_refresh_when_coverage_is_contiguous() {
+        assert!(!change_journal_gap_requires_full_refresh(12, 32, Some(13)));
+        assert!(!change_journal_gap_requires_full_refresh(12, 12, Some(13)));
     }
 
     #[tokio::test]

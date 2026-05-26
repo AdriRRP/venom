@@ -455,6 +455,8 @@ enum ApiStore {
 }
 
 struct LocalStore {
+    state_path: PathBuf,
+    runtime_path: PathBuf,
     state: DurableState,
     runtime: ScanCommandQueue,
     merged_system_event_snapshot_cache: StdMutex<Option<MergedSystemEventSnapshot>>,
@@ -504,12 +506,16 @@ impl ApiApplication {
         state_path: impl Into<PathBuf>,
         runtime_path: impl Into<PathBuf>,
     ) -> Result<Self, ApiApplicationError> {
-        let state = DurableState::open(state_path)
+        let state_path = state_path.into();
+        let runtime_path = runtime_path.into();
+        let state = DurableState::open(state_path.clone())
             .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-        let runtime = ScanCommandQueue::open(runtime_path)
+        let runtime = ScanCommandQueue::open(runtime_path.clone())
             .map_err(|error| ApiApplicationError::State(error.to_string()))?;
         Ok(Self {
             backend: ApiStore::Local(LocalStore {
+                state_path,
+                runtime_path,
                 state,
                 runtime,
                 merged_system_event_snapshot_cache: StdMutex::new(None),
@@ -634,6 +640,29 @@ impl ApiApplication {
         match &self.backend {
             ApiStore::Local(_) => None,
             ApiStore::Postgres(postgres) => Some(postgres.observed_change_watermark()),
+        }
+    }
+
+    /// Reload one local file-backed application view from durable history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiApplicationError`] when the local durable state or runtime
+    /// cannot be reopened from disk.
+    pub fn reload_local_from_disk(&mut self) -> Result<(), ApiApplicationError> {
+        match &mut self.backend {
+            ApiStore::Local(local) => {
+                local.state = DurableState::open(local.state_path.clone())
+                    .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                local.runtime = ScanCommandQueue::open(local.runtime_path.clone())
+                    .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                *local
+                    .merged_system_event_snapshot_cache
+                    .lock()
+                    .expect("merged local system event cache should not be poisoned") = None;
+                Ok(())
+            }
+            ApiStore::Postgres(_) => Ok(()),
         }
     }
 
