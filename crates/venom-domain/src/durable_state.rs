@@ -2238,14 +2238,16 @@ impl DurableState {
         let finding = finding.into_domain();
         self.governance
             .replay_risk_acceptance(finding.clone(), acceptance.clone());
-        self.read_model_mut().replay_risk_acceptance(finding, acceptance);
+        self.read_model_mut()
+            .replay_risk_acceptance(finding, acceptance);
     }
 
     fn apply_finding_suppressed(&mut self, finding: StoredFindingRef, suppression: Suppression) {
         let finding = finding.into_domain();
         self.governance
             .replay_suppression(finding.clone(), suppression.clone());
-        self.read_model_mut().replay_suppression(finding, suppression);
+        self.read_model_mut()
+            .replay_suppression(finding, suppression);
     }
 
     fn apply_finding_reopened(&mut self, finding: &StoredFindingRef) {

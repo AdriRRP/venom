@@ -3522,7 +3522,8 @@ impl PostgresStore {
             };
             self.governance
                 .replay_risk_acceptance(finding.clone(), acceptance.clone());
-            self.read_model_mut().replay_risk_acceptance(finding, acceptance);
+            self.read_model_mut()
+                .replay_risk_acceptance(finding, acceptance);
         }
 
         Ok(())
@@ -3577,7 +3578,8 @@ impl PostgresStore {
             let suppression = Suppression::new(reason);
             self.governance
                 .replay_suppression(finding.clone(), suppression.clone());
-            self.read_model_mut().replay_suppression(finding, suppression);
+            self.read_model_mut()
+                .replay_suppression(finding, suppression);
         }
 
         Ok(())
