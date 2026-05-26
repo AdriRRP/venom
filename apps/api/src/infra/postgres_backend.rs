@@ -59,7 +59,6 @@ pub struct PostgresStore {
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: Vec<PendingIntegrationEvent>,
-    system_event_index: SystemEventQueryIndex,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
@@ -168,7 +167,6 @@ impl PostgresStore {
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: Vec::new(),
-            system_event_index: SystemEventQueryIndex::new(),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         };
@@ -195,7 +193,6 @@ impl PostgresStore {
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: Vec::new(),
-            system_event_index: SystemEventQueryIndex::new(),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         }
@@ -3017,7 +3014,7 @@ impl PostgresStore {
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
-        self.system_event_index = SystemEventQueryIndex::new();
+        self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
 
         self.load_components().await?;
@@ -3039,7 +3036,6 @@ impl PostgresStore {
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
         self.refresh_read_snapshot_caches();
-        self.refresh_system_event_index_snapshot_cache();
         self.set_observed_change_watermark(self.current_change_watermark().await?);
 
         Ok(())
@@ -3666,16 +3662,17 @@ impl PostgresStore {
         let totals = self.load_system_event_totals().await?;
         let windows = self.load_recent_system_event_windows().await?;
 
-        self.system_event_index = SystemEventQueryIndex::from_recent_windows(
-            SystemEventWindowTotals {
-                total: totals.total,
-                scheduler_total: totals.scheduler_total,
-                command_total: totals.command_total,
-                governance_total: totals.governance_total,
-                publication_total: totals.publication_total,
-            },
-            windows,
-        );
+        self.system_event_index_snapshot_cache =
+            Arc::new(SystemEventQueryIndex::from_recent_windows(
+                SystemEventWindowTotals {
+                    total: totals.total,
+                    scheduler_total: totals.scheduler_total,
+                    command_total: totals.command_total,
+                    governance_total: totals.governance_total,
+                    publication_total: totals.publication_total,
+                },
+                windows,
+            ));
         Ok(())
     }
 
@@ -3792,8 +3789,7 @@ impl PostgresStore {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_event_index.push_newest(event);
-        self.refresh_system_event_index_snapshot_cache();
+        Arc::make_mut(&mut self.system_event_index_snapshot_cache).push_newest(event);
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
@@ -3825,10 +3821,6 @@ impl PostgresStore {
             self.ingestion.inventory(),
             &self.read_model,
         ));
-    }
-
-    fn refresh_system_event_index_snapshot_cache(&mut self) {
-        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 
     fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {

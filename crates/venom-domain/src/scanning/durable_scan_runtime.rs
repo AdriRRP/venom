@@ -27,7 +27,6 @@ pub struct ScanCommandQueue {
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
-    system_event_index: SystemEventQueryIndex,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
 }
@@ -55,7 +54,6 @@ impl ScanCommandQueue {
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: VecDeque::new(),
-            system_event_index: SystemEventQueryIndex::new(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
         };
@@ -206,7 +204,7 @@ impl ScanCommandQueue {
 
     #[must_use]
     pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        self.system_event_index.query(query)
+        self.system_event_index_snapshot_cache.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.
@@ -564,7 +562,7 @@ impl ScanCommandQueue {
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
-        self.system_event_index = SystemEventQueryIndex::new();
+        self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
 
         for (line_index, line) in reader.lines().enumerate() {
@@ -580,8 +578,6 @@ impl ScanCommandQueue {
             })?;
             self.apply_event(event, line_index + 1)?;
         }
-
-        self.refresh_system_event_index_snapshot_cache();
 
         Ok(())
     }
@@ -956,8 +952,7 @@ impl ScanCommandQueue {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_event_index.push_newest(event);
-        self.refresh_system_event_index_snapshot_cache();
+        Arc::make_mut(&mut self.system_event_index_snapshot_cache).push_newest(event);
     }
 
     fn apply_enqueued_batch(
@@ -998,10 +993,6 @@ impl ScanCommandQueue {
                 detail: None,
             });
         }
-    }
-
-    fn refresh_system_event_index_snapshot_cache(&mut self) {
-        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 
     fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
