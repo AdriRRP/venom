@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { PropsWithChildren } from "react";
 
-export type ApiHealthState = "healthy" | "unhealthy" | "loading";
+export type ApiHealthState = "healthy" | "degraded" | "unhealthy" | "loading";
 export type AppShellView = "dashboard" | "findings" | "operations" | "events";
 
 type AppShellProps = PropsWithChildren<{
@@ -74,6 +74,8 @@ function healthLabel(value: ApiHealthState): string {
 	switch (value) {
 		case "healthy":
 			return "Healthy";
+		case "degraded":
+			return "Degraded";
 		case "unhealthy":
 			return "Unhealthy";
 		case "loading":

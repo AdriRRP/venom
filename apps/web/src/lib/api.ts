@@ -1,4 +1,4 @@
-export type ApiHealthState = "healthy" | "unhealthy";
+export type ApiHealthState = "healthy" | "degraded" | "unhealthy";
 
 export type ContextProfileRef = {
 	profile_key: string;
@@ -610,7 +610,14 @@ export type DrainCollectionScanWorkerResponse = {
 
 export async function fetchApiHealth(): Promise<ApiHealthState> {
 	const response = await fetch("/api/health");
-	return response.ok ? "healthy" : "unhealthy";
+	if (!response.ok) {
+		return "unhealthy";
+	}
+	const health = (await response.text()).trim().toLowerCase();
+	if (health === "degraded") {
+		return "degraded";
+	}
+	return "healthy";
 }
 
 export async function fetchActiveFindings(

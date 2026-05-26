@@ -218,6 +218,9 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W162-api-health-degraded-observation`
+    Surface post-write remote-watermark observation drift as explicit degraded
+    API health instead of silently swallowing the operator signal.
 
 ## Exit condition
 
