@@ -228,6 +228,10 @@ Completed:
     Keep the live inventory under shared `Arc<ComponentInventory>` ownership so
     inventory snapshot refreshes reuse the source structure instead of deep
     cloning the full inventory on each relevant mutation.
+77. `W165-read-model-source-arc-sharing`
+    Keep the live `FindingReadModel` under shared `Arc` ownership so read-model
+    snapshot refreshes reuse the source structure instead of cloning the full
+    projection on each relevant mutation.
 
 ## Exit condition
 
