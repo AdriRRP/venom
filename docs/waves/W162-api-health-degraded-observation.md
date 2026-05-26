@@ -1,4 +1,10 @@
-# W162-api-health-degraded-observation
+# W162. API Health Degraded Observation
+
+Wave: `W162-api-health-degraded-observation`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `none`
 
 ## Goal
 
@@ -6,48 +12,48 @@ Make post-write remote observation drift visible to operators instead of
 silently preserving `healthy` API status after the business write already
 succeeded.
 
-## Why
+## Feature paths
 
-`W157` made write responses truthful by returning success even when the trailing
-remote watermark observation failed. That fixed false error responses, but it
-left a quieter operator gap: the shell still showed the API as healthy even
-though fresh remote alignment had not been re-established yet.
+- `none`
 
-## Scope
+## Execution lanes
 
-- track remote observation degradation in HTTP API state
-- expose degraded API health from `/health`
-- surface degraded health in the web shell
+- `unit`
+- `web`
 
-## Out of scope
+## Owned paths
 
-- full write-plane partitioning
-- incremental Postgres detached refresh
-- deeper structured contextual explainability
+- `apps/api/src/http/mod.rs`
+- `apps/web/src/app/app-shell.tsx`
+- `apps/web/src/lib/api.ts`
+- `apps/web/src/routes/dashboard.tsx`
+- `apps/web/src/routes/events.tsx`
+- `apps/web/src/routes/findings.tsx`
+- `apps/web/src/routes/operations.tsx`
+- `apps/web/src/styles.css`
+- `docs/reliability-hardening-plan.md`
 
 ## Slices
 
-### W162-S01
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W162-S01` | done | degrade API health when remote watermark observation is stale after one durable write and clear it once alignment is re-established | `cargo test -p venom-api api_health_reports_degraded_when_remote_observation_is_stale --all-features`, `npm --prefix apps/web run check` |
 
-Status: done
+## Language impact
 
-- record remote observation degradation when a successful write cannot update
-  the remote probe
-- clear degradation when a later refresh or successful probe observation
-  re-establishes alignment
-- expose `degraded` from `/health`
-- render degraded health explicitly in the shell
+`none`
 
-## Verification
+## Invariant impact
 
-- `cargo test -p venom-api api_health_reports_degraded_when_remote_observation_is_stale --all-features`
-- `npm --prefix apps/web run check`
-- `./scripts/check-wave.sh --wave W162-api-health-degraded-observation`
+`I2`, `I9`
 
-## Agentic impact
+## ADR impact
 
-None.
+`none`
 
-## Documentation impact
+## Notes
 
-- update the reliability hardening plan with the new corrective wave
+`W157` fixed false error responses after successful durable writes, but it left
+the operator shell blind to the follow-up probe failure. This wave keeps the
+truthful success contract while surfacing the degraded coordination state
+explicitly through `/health` and the shell.
