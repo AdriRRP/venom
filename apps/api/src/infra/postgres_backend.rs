@@ -3018,6 +3018,7 @@ impl PostgresStore {
         self.order.clear();
         self.pending_integration_events.clear();
         self.system_event_index = SystemEventQueryIndex::new();
+        self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
 
         self.load_components().await?;
         self.load_context_profiles().await?;
@@ -3038,7 +3039,6 @@ impl PostgresStore {
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
         self.refresh_read_snapshot_caches();
-        self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_event_index_snapshot_cache();
         self.set_observed_change_watermark(self.current_change_watermark().await?);
 
@@ -3632,19 +3632,16 @@ impl PostgresStore {
             commands
         {
             let command_id = command_id.into_boxed_str();
+            let status = parse_scan_command_status(&status)?;
             let request = ScanRequest::new(
                 component_key,
                 ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
                 parse_freshness(&freshness)?,
             );
             self.order.push(command_id.clone());
-            self.commands.insert(
-                command_id,
-                ScanCommandRecord {
-                    request,
-                    status: parse_scan_command_status(&status)?,
-                },
-            );
+            self.set_command_status_snapshot(command_id.as_ref(), status);
+            self.commands
+                .insert(command_id, ScanCommandRecord { request, status });
         }
 
         Ok(())
@@ -3832,15 +3829,6 @@ impl PostgresStore {
 
     fn refresh_system_event_index_snapshot_cache(&mut self) {
         self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
-    }
-
-    fn refresh_command_statuses_snapshot_cache(&mut self) {
-        self.command_statuses_snapshot_cache = Arc::new(
-            self.commands
-                .iter()
-                .map(|(command_id, record)| (command_id.clone(), record.status))
-                .collect(),
-        );
     }
 
     fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
@@ -4857,6 +4845,13 @@ mod tests {
             .expect("postgres backend should reopen");
         assert_eq!(
             reopened.command_status(command_id.as_ref()),
+            Some(ScanCommandStatus::Completed)
+        );
+        assert_eq!(
+            reopened
+                .command_statuses_snapshot()
+                .get(command_id.as_ref())
+                .copied(),
             Some(ScanCommandStatus::Completed)
         );
         assert_eq!(reopened.pending_integration_events().len(), 2);
