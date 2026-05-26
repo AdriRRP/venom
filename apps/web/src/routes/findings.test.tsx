@@ -241,8 +241,8 @@ describe("FindingsPage", () => {
 			await screen.findByRole("cell", { name: "Internet Exposed" }),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByRole("cell", { name: "true" }),
-		).toBeInTheDocument();
+			(await screen.findAllByRole("cell", { name: "true" })).length,
+		).toBeGreaterThan(0);
 		expect(
 			await screen.findByRole("cell", { name: "component" }),
 		).toBeInTheDocument();
