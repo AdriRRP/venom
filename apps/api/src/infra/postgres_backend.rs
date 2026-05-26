@@ -3809,7 +3809,7 @@ impl PostgresStore {
     }
 
     fn refresh_inventory_snapshot_cache(&mut self) {
-        self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+        self.inventory_snapshot_cache = self.ingestion.inventory_arc();
     }
 
     fn refresh_read_model_snapshot_cache(&mut self) {
@@ -4357,6 +4357,7 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 #[cfg(test)]
 mod tests {
     use super::PostgresStore;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::{
@@ -4426,6 +4427,40 @@ mod tests {
                 .expect("watermark should stay readable"),
             observed
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_inventory_snapshot_cache_reuses_live_inventory_arc() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("inventory_arc");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+
+        let snapshot_before = backend.inventory_snapshot_arc();
+        let live_before = backend.ingestion.inventory_arc();
+        assert!(Arc::ptr_eq(&snapshot_before, &live_before));
+
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+
+        let snapshot_after = backend.inventory_snapshot_arc();
+        let live_after = backend.ingestion.inventory_arc();
+        assert!(Arc::ptr_eq(&snapshot_after, &live_after));
+        assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
+        assert!(!snapshot_before.component_owns_artifact("component:payments-api", &artifact()));
+        assert!(snapshot_after.component_owns_artifact("component:payments-api", &artifact()));
     }
 
     fn artifact() -> ArtifactRef {
