@@ -225,16 +225,29 @@ describe("FindingsPage", () => {
 			await screen.findByRole("cell", { name: "critical" }),
 		).toBeInTheDocument();
 		expect(await screen.findByText("Internet Production")).toBeInTheDocument();
-		expect(await screen.findByText("Posture: public-edge")).toBeInTheDocument();
+		expect(await screen.findByText("Posture")).toBeInTheDocument();
+		expect(await screen.findByText("public-edge")).toBeInTheDocument();
+		expect(await screen.findByText("Rule")).toBeInTheDocument();
 		expect(
 			await screen.findByText(
-				"Rule: internet-exposed + production + mission-critical",
+				"internet-exposed + production + mission-critical",
 			),
 		).toBeInTheDocument();
+		expect(await screen.findByText("Effective Factors")).toBeInTheDocument();
 		expect(
-			await screen.findByText(
-				"Internet Exposed=true from component context:internet-prod",
-			),
+			await screen.findByRole("columnheader", { name: "Factor" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "Internet Exposed" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "true" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "component" }),
+		).toBeInTheDocument();
+		expect(
+			await screen.findByRole("cell", { name: "context:internet-prod" }),
 		).toBeInTheDocument();
 		expect(
 			await screen.findByText(

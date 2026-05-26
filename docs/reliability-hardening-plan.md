@@ -221,6 +221,9 @@ Completed:
 74. `W162-api-health-degraded-observation`
     Surface post-write remote-watermark observation drift as explicit degraded
     API health instead of silently swallowing the operator signal.
+75. `W163-contextual-audit-surface`
+    Render contextual posture, rule, and effective factor provenance as a
+    structured operator audit surface instead of mixed text fragments.
 
 ## Exit condition
 
