@@ -65,7 +65,7 @@ struct ServiceSlot {
 }
 
 enum ApiServiceSet {
-    Single(ServiceSlot),
+    Single(Box<ServiceSlot>),
     Partitioned(Box<PartitionedServiceSlots>),
 }
 
@@ -218,10 +218,10 @@ impl ApiState {
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
             inner: Arc::new(ApiStateInner {
-                services: ApiServiceSet::Single(ServiceSlot {
+                services: ApiServiceSet::Single(Box::new(ServiceSlot {
                     service: Mutex::new(Some(service)),
                     ready: Notify::new(),
-                }),
+                })),
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -456,7 +456,7 @@ impl ApiState {
 
     fn slot_for_lane(&self, lane: ApiMutationLane) -> &ServiceSlot {
         match &self.inner.services {
-            ApiServiceSet::Single(slot) => slot,
+            ApiServiceSet::Single(slot) => slot.as_ref(),
             ApiServiceSet::Partitioned(slots) => match lane {
                 ApiMutationLane::State => &slots.state,
                 ApiMutationLane::Runtime => &slots.runtime,
