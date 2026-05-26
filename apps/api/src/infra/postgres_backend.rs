@@ -51,7 +51,7 @@ pub struct PostgresStore {
     observed_change_watermark: Arc<AtomicU64>,
     ingestion: FindingIngestion,
     governance: FindingGovernance,
-    read_model: FindingReadModel,
+    read_model: Arc<FindingReadModel>,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
     release_board_snapshot_cache: Arc<ReleaseBoard>,
@@ -156,7 +156,7 @@ impl PostgresStore {
             observed_change_watermark: Arc::new(AtomicU64::new(0)),
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
-            read_model: FindingReadModel::new(),
+            read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             release_board_snapshot_cache: Arc::new(build_release_board(
@@ -182,7 +182,7 @@ impl PostgresStore {
             observed_change_watermark: Arc::new(AtomicU64::new(0)),
             ingestion: FindingIngestion::new(),
             governance: FindingGovernance::new(),
-            read_model: FindingReadModel::new(),
+            read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             release_board_snapshot_cache: Arc::new(build_release_board(
@@ -766,11 +766,11 @@ impl PostgresStore {
         report: &ProviderScanReport,
     ) -> Result<FindingChangeSet, String> {
         let mut candidate_ingestion = self.ingestion.clone();
-        let mut candidate_read_model = self.read_model.clone();
+        let mut candidate_read_model = self.read_model_arc();
         let change_set = candidate_ingestion
             .record_scan_report(report)
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
-        candidate_read_model.record_scan_report(report);
+        Arc::make_mut(&mut candidate_read_model).record_scan_report(report);
         let pending_integration_event = PendingIntegrationEvent::finding_changes_observed(
             report.component_key.clone(),
             report.artifact.clone(),
@@ -850,7 +850,7 @@ impl PostgresStore {
         }
 
         let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
+        let mut candidate_read_model = self.read_model_arc();
         let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
         if result.change == AcceptRiskChange::Accepted {
             let component_key = finding.component_key.clone();
@@ -879,7 +879,7 @@ impl PostgresStore {
                 format!("postgres finding risk acceptance commit failed: {error}")
             })?;
 
-            candidate_read_model.accept_risk(finding, acceptance);
+            Arc::make_mut(&mut candidate_read_model).accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -950,7 +950,7 @@ impl PostgresStore {
             for finding in &changed {
                 self.governance
                     .accept_risk(finding.clone(), acceptance.clone());
-                self.read_model
+                self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1024,7 +1024,7 @@ impl PostgresStore {
             for finding in &changed {
                 self.governance
                     .accept_risk(finding.clone(), acceptance.clone());
-                self.read_model
+                self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1054,7 +1054,7 @@ impl PostgresStore {
         }
 
         let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
+        let mut candidate_read_model = self.read_model_arc();
         let result = candidate_governance.reopen(&finding);
         if result.change == ReopenFindingChange::Reopened {
             let component_key = finding.component_key.clone();
@@ -1084,7 +1084,7 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres finding reopen commit failed: {error}"))?;
 
-            candidate_read_model.reopen(&finding);
+            Arc::make_mut(&mut candidate_read_model).reopen(&finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1110,7 +1110,7 @@ impl PostgresStore {
         }
 
         let mut candidate_governance = self.governance.clone();
-        let mut candidate_read_model = self.read_model.clone();
+        let mut candidate_read_model = self.read_model_arc();
         let result = candidate_governance.suppress(finding.clone(), suppression.clone());
         if result.change == SuppressFindingChange::Suppressed {
             let component_key = finding.component_key.clone();
@@ -1140,7 +1140,7 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("postgres finding suppression commit failed: {error}"))?;
 
-            candidate_read_model.suppress(finding, suppression);
+            Arc::make_mut(&mut candidate_read_model).suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1212,7 +1212,7 @@ impl PostgresStore {
             for finding in &changed_findings {
                 self.governance
                     .suppress(finding.clone(), suppression.clone());
-                self.read_model
+                self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1287,7 +1287,7 @@ impl PostgresStore {
             for finding in &changed {
                 self.governance
                     .suppress(finding.clone(), suppression.clone());
-                self.read_model
+                self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
@@ -1359,7 +1359,7 @@ impl PostgresStore {
 
             for finding in &reopened_findings {
                 self.governance.reopen(finding);
-                self.read_model.reopen(finding);
+                self.read_model_mut().reopen(finding);
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.push_system_event(event);
@@ -1375,6 +1375,20 @@ impl PostgresStore {
     #[must_use]
     pub fn read_model_snapshot_arc(&self) -> Arc<FindingReadModel> {
         Arc::clone(&self.read_model_snapshot_cache)
+    }
+
+    #[must_use]
+    pub fn read_model(&self) -> &FindingReadModel {
+        self.read_model.as_ref()
+    }
+
+    #[must_use]
+    pub fn read_model_arc(&self) -> Arc<FindingReadModel> {
+        Arc::clone(&self.read_model)
+    }
+
+    fn read_model_mut(&mut self) -> &mut FindingReadModel {
+        Arc::make_mut(&mut self.read_model)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1872,11 +1886,11 @@ impl PostgresStore {
         }
 
         let mut candidate_ingestion = self.ingestion.clone();
-        let mut candidate_read_model = self.read_model.clone();
+        let mut candidate_read_model = self.read_model_arc();
         let change_set = candidate_ingestion
             .record_scan_report(&report)
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
-        candidate_read_model.record_scan_report(&report);
+        Arc::make_mut(&mut candidate_read_model).record_scan_report(&report);
         let findings_reported = report.findings.len();
         let finding_changes_event = PendingIntegrationEvent::finding_changes_observed(
             request.component_key.clone(),
@@ -3009,7 +3023,7 @@ impl PostgresStore {
     async fn rebuild(&mut self) -> Result<(), String> {
         self.ingestion = FindingIngestion::new();
         self.governance = FindingGovernance::new();
-        self.read_model = FindingReadModel::new();
+        self.read_model = Arc::new(FindingReadModel::new());
         self.integration_runtime_config = None;
         self.commands.clear();
         self.order.clear();
@@ -3444,7 +3458,7 @@ impl PostgresStore {
                 .map_err(|error| {
                     format!("postgres provider report replay failed: {}", error.as_str())
                 })?;
-            self.read_model.record_scan_report(&report);
+            self.read_model_mut().record_scan_report(&report);
         }
 
         Ok(())
@@ -3508,7 +3522,8 @@ impl PostgresStore {
             };
             self.governance
                 .replay_risk_acceptance(finding.clone(), acceptance.clone());
-            self.read_model.replay_risk_acceptance(finding, acceptance);
+            self.read_model_mut()
+                .replay_risk_acceptance(finding, acceptance);
         }
 
         Ok(())
@@ -3563,7 +3578,8 @@ impl PostgresStore {
             let suppression = Suppression::new(reason);
             self.governance
                 .replay_suppression(finding.clone(), suppression.clone());
-            self.read_model.replay_suppression(finding, suppression);
+            self.read_model_mut()
+                .replay_suppression(finding, suppression);
         }
 
         Ok(())
@@ -3813,13 +3829,13 @@ impl PostgresStore {
     }
 
     fn refresh_read_model_snapshot_cache(&mut self) {
-        self.read_model_snapshot_cache = Arc::new(self.read_model.clone());
+        self.read_model_snapshot_cache = self.read_model_arc();
     }
 
     fn refresh_release_board_snapshot_cache(&mut self) {
         self.release_board_snapshot_cache = Arc::new(build_release_board(
             self.ingestion.inventory(),
-            &self.read_model,
+            self.read_model(),
         ));
     }
 
@@ -4461,6 +4477,62 @@ mod tests {
         assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
         assert!(!snapshot_before.component_owns_artifact("component:payments-api", &artifact()));
         assert!(snapshot_after.component_owns_artifact("component:payments-api", &artifact()));
+    }
+
+    #[tokio::test]
+    async fn postgres_read_model_snapshot_cache_reuses_live_read_model_arc() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("read_model_arc");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+
+        let snapshot_before = backend.read_model_snapshot_arc();
+        let live_before = backend.read_model_arc();
+        assert!(Arc::ptr_eq(&snapshot_before, &live_before));
+
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let snapshot_after = backend.read_model_snapshot_arc();
+        let live_after = backend.read_model_arc();
+        assert!(Arc::ptr_eq(&snapshot_after, &live_after));
+        assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
+        assert_eq!(
+            snapshot_before.active_finding_count("component:payments-api", &artifact()),
+            0
+        );
+        assert_eq!(
+            snapshot_after.active_finding_count("component:payments-api", &artifact()),
+            1
+        );
     }
 
     fn artifact() -> ArtifactRef {
