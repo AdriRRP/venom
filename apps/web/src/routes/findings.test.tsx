@@ -222,20 +222,34 @@ describe("FindingsPage", () => {
 			),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByRole("cell", { name: "critical" }),
-		).toBeInTheDocument();
+			(await screen.findAllByRole("cell", { name: "critical" })).length,
+		).toBeGreaterThan(0);
 		expect(await screen.findByText("Internet Production")).toBeInTheDocument();
-		expect(await screen.findByText("Posture: public-edge")).toBeInTheDocument();
+		expect(await screen.findByText("Posture")).toBeInTheDocument();
+		expect(await screen.findByText("public-edge")).toBeInTheDocument();
+		expect(await screen.findByText("Rule")).toBeInTheDocument();
 		expect(
 			await screen.findByText(
-				"Rule: internet-exposed + production + mission-critical",
+				"internet-exposed + production + mission-critical",
 			),
+		).toBeInTheDocument();
+		expect(await screen.findByText("Effective Factors")).toBeInTheDocument();
+		expect(
+			await screen.findByRole("columnheader", { name: "Factor" }),
 		).toBeInTheDocument();
 		expect(
-			await screen.findByText(
-				"Internet Exposed=true from component context:internet-prod",
-			),
-		).toBeInTheDocument();
+			(await screen.findAllByRole("cell", { name: "Internet Exposed" })).length,
+		).toBeGreaterThan(0);
+		expect(
+			(await screen.findAllByRole("cell", { name: "true" })).length,
+		).toBeGreaterThan(0);
+		expect(
+			(await screen.findAllByRole("cell", { name: "component" })).length,
+		).toBeGreaterThan(0);
+		expect(
+			(await screen.findAllByRole("cell", { name: "context:internet-prod" }))
+				.length,
+		).toBeGreaterThan(0);
 		expect(
 			await screen.findByText(
 				"Health: 3 active - 1 open - 1 risk accepted - 1 suppressed - 1 critical risk - 1 high risk",
