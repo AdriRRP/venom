@@ -244,8 +244,8 @@ describe("FindingsPage", () => {
 			(await screen.findAllByRole("cell", { name: "true" })).length,
 		).toBeGreaterThan(0);
 		expect(
-			await screen.findByRole("cell", { name: "component" }),
-		).toBeInTheDocument();
+			(await screen.findAllByRole("cell", { name: "component" })).length,
+		).toBeGreaterThan(0);
 		expect(
 			await screen.findByRole("cell", { name: "context:internet-prod" }),
 		).toBeInTheDocument();
