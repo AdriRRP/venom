@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use venom_domain::durable_state::DurableState;
 use venom_domain::findings::{
@@ -15,7 +16,7 @@ use venom_domain::findings::{
     FindingGovernanceState, FindingProvider, FindingProviderError, FindingProviderErrorKind,
     FindingReadModel, FindingRef, PackageCoordinate, ProviderScanReport, ReleaseBoard,
     ReleaseDashboard, ReopenFindingResult, ReportedFinding, RiskAcceptance, ScanRequest,
-    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression,
+    ScopedActiveFindingsQuery, Severity, SuppressFindingResult, Suppression, build_release_board,
     build_release_dashboard, contextualize_active_findings,
     contextualize_collection_active_findings, query_collection_governance_overview,
 };
@@ -56,13 +57,13 @@ impl core::fmt::Display for ApiApplicationError {
 
 impl std::error::Error for ApiApplicationError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     system_event_index: Arc<SystemEventQueryIndex>,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
-    release_board: Arc<ReleaseBoard>,
+    release_board: Mutex<Option<Arc<ReleaseBoard>>>,
 }
 
 impl ApiReadSnapshot {
@@ -72,44 +73,35 @@ impl ApiReadSnapshot {
         read_model: Arc<FindingReadModel>,
         system_event_index: Arc<SystemEventQueryIndex>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
-        release_board: Arc<ReleaseBoard>,
     ) -> Self {
         Self {
             inventory,
             read_model,
             system_event_index,
             command_statuses,
-            release_board,
+            release_board: Mutex::new(None),
         }
     }
 
     #[must_use]
-    pub fn with_inventory_and_release_board_arcs(
-        &self,
-        inventory: Arc<ComponentInventory>,
-        release_board: Arc<ReleaseBoard>,
-    ) -> Self {
+    pub fn with_inventory_arc(&self, inventory: Arc<ComponentInventory>) -> Self {
         Self {
             inventory,
             read_model: Arc::clone(&self.read_model),
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
-            release_board,
+            release_board: Mutex::new(None),
         }
     }
 
     #[must_use]
-    pub fn with_read_model_and_release_board_arcs(
-        &self,
-        read_model: Arc<FindingReadModel>,
-        release_board: Arc<ReleaseBoard>,
-    ) -> Self {
+    pub fn with_read_model_arc(&self, read_model: Arc<FindingReadModel>) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model,
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
-            release_board,
+            release_board: Mutex::new(None),
         }
     }
 
@@ -123,7 +115,7 @@ impl ApiReadSnapshot {
             read_model: Arc::clone(&self.read_model),
             system_event_index,
             command_statuses: Arc::clone(&self.command_statuses),
-            release_board: Arc::clone(&self.release_board),
+            release_board: Mutex::new(None),
         }
     }
 
@@ -137,8 +129,42 @@ impl ApiReadSnapshot {
             read_model: Arc::clone(&self.read_model),
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses,
-            release_board: Arc::clone(&self.release_board),
+            release_board: Mutex::new(None),
         }
+    }
+
+    fn release_board_arc(&self) -> Arc<ReleaseBoard> {
+        let mut cache = self
+            .release_board
+            .lock()
+            .expect("release board cache should not be poisoned");
+        if let Some(board) = cache.as_ref() {
+            return Arc::clone(board);
+        }
+
+        let board = Arc::new(build_release_board(&self.inventory, &self.read_model));
+        *cache = Some(Arc::clone(&board));
+        board
+    }
+
+    #[must_use]
+    pub(crate) fn inventory_arc(&self) -> Arc<ComponentInventory> {
+        Arc::clone(&self.inventory)
+    }
+
+    #[must_use]
+    pub(crate) fn read_model_arc(&self) -> Arc<FindingReadModel> {
+        Arc::clone(&self.read_model)
+    }
+
+    #[must_use]
+    pub(crate) fn system_event_index_arc(&self) -> Arc<SystemEventQueryIndex> {
+        Arc::clone(&self.system_event_index)
+    }
+
+    #[must_use]
+    pub(crate) fn command_statuses_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
+        Arc::clone(&self.command_statuses)
     }
 
     /// Query the current system-event trace from the indexed read-side snapshot.
@@ -200,8 +226,8 @@ impl ApiReadSnapshot {
     /// Returns [`ApiApplicationError`] when the current system time cannot be read.
     pub fn list_collections(&self) -> Result<ListCollectionsResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
-        let collections = self
-            .release_board
+        let release_board = self.release_board_arc();
+        let collections = release_board
             .collections
             .iter()
             .map(|collection| CollectionSummary {
@@ -233,7 +259,7 @@ impl ApiReadSnapshot {
     pub fn release_dashboard(&self) -> Result<ReleaseDashboardResponse, ApiApplicationError> {
         let now_unix_ms = current_unix_millis()?;
         Ok(ReleaseDashboardResponse::from_dashboard(
-            build_release_dashboard(&self.release_board, now_unix_ms),
+            build_release_dashboard(&self.release_board_arc(), now_unix_ms),
         ))
     }
 
@@ -409,7 +435,7 @@ impl ApiReadSnapshot {
     }
 
     fn collection_health_summary(&self, collection_key: &str) -> CollectionHealthItem {
-        self.release_board
+        self.release_board_arc()
             .collections
             .iter()
             .find(|collection| collection.collection_key.as_ref() == collection_key)
@@ -532,14 +558,12 @@ impl ApiApplication {
                 local.state.read_model_snapshot_arc(),
                 local.system_event_index_snapshot_arc(),
                 local.runtime.command_statuses_snapshot_arc(),
-                local.state.release_board_snapshot_arc(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
                 postgres.system_event_index_snapshot_arc(),
                 postgres.command_statuses_snapshot_arc(),
-                postgres.release_board_snapshot_arc(),
             ),
         }
     }
@@ -575,15 +599,6 @@ impl ApiApplication {
             ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot_arc(),
         }
     }
-
-    #[must_use]
-    pub fn release_board_snapshot_arc(&self) -> Arc<ReleaseBoard> {
-        match &self.backend {
-            ApiStore::Local(local) => local.state.release_board_snapshot_arc(),
-            ApiStore::Postgres(postgres) => postgres.release_board_snapshot_arc(),
-        }
-    }
-
     /// Refresh one Postgres-backed in-memory view when the durable store advanced in another instance.
     ///
     /// # Errors

@@ -49,8 +49,7 @@ pub struct ApiState {
 }
 
 struct ApiStateInner {
-    service: Mutex<Option<ApiApplication>>,
-    service_ready: Notify,
+    services: ApiServiceSet,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
@@ -58,6 +57,29 @@ struct ApiStateInner {
     remote_observation_degraded: AtomicBool,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
+}
+
+struct ServiceSlot {
+    service: Mutex<Option<ApiApplication>>,
+    ready: Notify,
+}
+
+enum ApiServiceSet {
+    Single(Box<ServiceSlot>),
+    Partitioned(Box<PartitionedServiceSlots>),
+}
+
+struct PartitionedServiceSlots {
+    state: ServiceSlot,
+    runtime: ServiceSlot,
+    publication: ServiceSlot,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ApiMutationLane {
+    State,
+    Runtime,
+    Publication,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,20 +99,17 @@ impl ApiHealthStatus {
 
 enum SnapshotRefresh {
     Unchanged,
-    InventoryAndReleaseBoard {
+    Inventory {
         inventory: Arc<venom_domain::ComponentInventory>,
-        release_board: Arc<venom_domain::ReleaseBoard>,
     },
-    ReadModelAndReleaseBoard {
+    ReadModel {
         read_model: Arc<venom_domain::FindingReadModel>,
-        release_board: Arc<venom_domain::ReleaseBoard>,
     },
     SystemEvents {
         system_events: Arc<SystemEventQueryIndex>,
     },
     CombinedReadModelAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
-        release_board: Arc<venom_domain::ReleaseBoard>,
         system_events: Arc<SystemEventQueryIndex>,
     },
     CombinedCommandStatusesAndSystemEvents {
@@ -99,13 +118,11 @@ enum SnapshotRefresh {
     },
     CombinedInventoryCommandStatusesAndSystemEvents {
         inventory: Arc<venom_domain::ComponentInventory>,
-        release_board: Arc<venom_domain::ReleaseBoard>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
         system_events: Arc<SystemEventQueryIndex>,
     },
     CombinedReadModelCommandStatusesAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
-        release_board: Arc<venom_domain::ReleaseBoard>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
         system_events: Arc<SystemEventQueryIndex>,
     },
@@ -115,26 +132,16 @@ impl SnapshotRefresh {
     fn apply(self, current: &Arc<ApiReadSnapshot>) -> Arc<ApiReadSnapshot> {
         match self {
             Self::Unchanged => Arc::clone(current),
-            Self::InventoryAndReleaseBoard {
-                inventory,
-                release_board,
-            } => Arc::new(current.with_inventory_and_release_board_arcs(inventory, release_board)),
-            Self::ReadModelAndReleaseBoard {
-                read_model,
-                release_board,
-            } => {
-                Arc::new(current.with_read_model_and_release_board_arcs(read_model, release_board))
-            }
+            Self::Inventory { inventory } => Arc::new(current.with_inventory_arc(inventory)),
+            Self::ReadModel { read_model } => Arc::new(current.with_read_model_arc(read_model)),
             Self::SystemEvents { system_events } => {
                 Arc::new(current.with_system_event_index_arc(system_events))
             }
             Self::CombinedReadModelAndSystemEvents {
                 read_model,
-                release_board,
                 system_events,
             } => {
-                let next =
-                    current.with_read_model_and_release_board_arcs(read_model, release_board);
+                let next = current.with_read_model_arc(read_model);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
             Self::CombinedCommandStatusesAndSystemEvents {
@@ -146,22 +153,19 @@ impl SnapshotRefresh {
             }
             Self::CombinedInventoryCommandStatusesAndSystemEvents {
                 inventory,
-                release_board,
                 command_statuses,
                 system_events,
             } => {
-                let next = current.with_inventory_and_release_board_arcs(inventory, release_board);
+                let next = current.with_inventory_arc(inventory);
                 let next = next.with_command_statuses_arc(command_statuses);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
             Self::CombinedReadModelCommandStatusesAndSystemEvents {
                 read_model,
-                release_board,
                 command_statuses,
                 system_events,
             } => {
-                let next =
-                    current.with_read_model_and_release_board_arcs(read_model, release_board);
+                let next = current.with_read_model_arc(read_model);
                 let next = next.with_command_statuses_arc(command_statuses);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
@@ -181,7 +185,7 @@ impl ApiState {
     ) -> Result<Self, String> {
         let service = ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
-        Ok(Self::new(service))
+        Ok(Self::new_single(service))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -190,13 +194,23 @@ impl ApiState {
     ///
     /// Returns an error string when the Postgres durable backend cannot be opened.
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
-        let service = ApiApplication::open_postgres(database_url, schema)
+        let state_service = ApiApplication::open_postgres(database_url, schema)
             .await
             .map_err(|error| error.to_string())?;
-        Ok(Self::new(service))
+        let runtime_service = ApiApplication::open_postgres(database_url, schema)
+            .await
+            .map_err(|error| error.to_string())?;
+        let publication_service = ApiApplication::open_postgres(database_url, schema)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            publication_service,
+        ))
     }
 
-    fn new(service: ApiApplication) -> Self {
+    fn new_single(service: ApiApplication) -> Self {
         let remote_snapshot_watermark = service.observed_remote_change_watermark().unwrap_or(0);
         let remote_change_probe = service.remote_change_probe();
         let remote_read_snapshot_loader = service.remote_read_snapshot_loader();
@@ -204,8 +218,49 @@ impl ApiState {
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
             inner: Arc::new(ApiStateInner {
-                service: Mutex::new(Some(service)),
-                service_ready: Notify::new(),
+                services: ApiServiceSet::Single(Box::new(ServiceSlot {
+                    service: Mutex::new(Some(service)),
+                    ready: Notify::new(),
+                })),
+                remote_change_probe,
+                remote_read_snapshot_loader,
+                remote_refresh: Mutex::new(()),
+                remote_snapshot_watermark: AtomicU64::new(remote_snapshot_watermark),
+                remote_observation_degraded: AtomicBool::new(false),
+                read_snapshot_tx,
+                read_snapshot_rx,
+            }),
+        }
+    }
+
+    fn new_partitioned(
+        state_service: ApiApplication,
+        runtime_service: ApiApplication,
+        publication_service: ApiApplication,
+    ) -> Self {
+        let remote_snapshot_watermark = state_service
+            .observed_remote_change_watermark()
+            .unwrap_or(0);
+        let remote_change_probe = state_service.remote_change_probe();
+        let remote_read_snapshot_loader = state_service.remote_read_snapshot_loader();
+        let snapshot = Arc::new(state_service.read_snapshot());
+        let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
+        Self {
+            inner: Arc::new(ApiStateInner {
+                services: ApiServiceSet::Partitioned(Box::new(PartitionedServiceSlots {
+                    state: ServiceSlot {
+                        service: Mutex::new(Some(state_service)),
+                        ready: Notify::new(),
+                    },
+                    runtime: ServiceSlot {
+                        service: Mutex::new(Some(runtime_service)),
+                        ready: Notify::new(),
+                    },
+                    publication: ServiceSlot {
+                        service: Mutex::new(Some(publication_service)),
+                        ready: Notify::new(),
+                    },
+                })),
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -271,7 +326,17 @@ impl ApiState {
             }
 
             if let Some(loader) = &self.inner.remote_read_snapshot_loader {
-                let loaded = loader.load().await.map_err(ApiError::internal)?;
+                let current_snapshot = self.read_snapshot();
+                let loaded = loader
+                    .load(
+                        self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
+                        current_snapshot.inventory_arc(),
+                        current_snapshot.read_model_arc(),
+                        current_snapshot.system_event_index_arc(),
+                        current_snapshot.command_statuses_arc(),
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
                 probe.observe_change_watermark(loaded.change_watermark);
                 self.inner
                     .remote_observation_degraded
@@ -286,23 +351,22 @@ impl ApiState {
                     loaded.read_model,
                     loaded.system_event_index,
                     loaded.command_statuses,
-                    loaded.release_board,
                 ));
                 self.publish_snapshot(Arc::clone(&next_snapshot), Some(loaded.change_watermark));
                 return Ok(next_snapshot);
             }
         }
-        let mut service = self.take_service().await;
+        let mut service = self.take_service(ApiMutationLane::State).await;
         let changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
             Err(error) => {
-                self.restore_service(service).await;
+                self.restore_service(ApiMutationLane::State, service).await;
                 return Err(ApiError::from(error));
             }
         };
         let next_snapshot = changed.then(|| Arc::new(service.read_snapshot()));
         let remote_change_watermark = service.observed_remote_change_watermark();
-        self.restore_service(service).await;
+        self.restore_service(ApiMutationLane::State, service).await;
         next_snapshot.map_or_else(
             || Ok(self.read_snapshot()),
             |next_snapshot| {
@@ -326,16 +390,14 @@ impl ApiState {
     }
 
     fn refresh_inventory_snapshot(service: &ApiApplication) -> SnapshotRefresh {
-        SnapshotRefresh::InventoryAndReleaseBoard {
+        SnapshotRefresh::Inventory {
             inventory: service.inventory_snapshot_arc(),
-            release_board: service.release_board_snapshot_arc(),
         }
     }
 
     fn refresh_read_model_snapshot(service: &ApiApplication) -> SnapshotRefresh {
-        SnapshotRefresh::ReadModelAndReleaseBoard {
+        SnapshotRefresh::ReadModel {
             read_model: service.read_model_snapshot_arc(),
-            release_board: service.release_board_snapshot_arc(),
         }
     }
 
@@ -353,14 +415,12 @@ impl ApiState {
         let snapshot = Self::refresh_read_model_snapshot(service);
         let system_events = service.system_event_index_snapshot_arc();
         match snapshot {
-            SnapshotRefresh::ReadModelAndReleaseBoard {
-                read_model,
-                release_board,
-            } => SnapshotRefresh::CombinedReadModelAndSystemEvents {
-                read_model,
-                release_board,
-                system_events,
-            },
+            SnapshotRefresh::ReadModel { read_model } => {
+                SnapshotRefresh::CombinedReadModelAndSystemEvents {
+                    read_model,
+                    system_events,
+                }
+            }
             _ => unreachable!("read-model refresh must produce a read-model lane"),
         }
     }
@@ -379,7 +439,6 @@ impl ApiState {
     ) -> SnapshotRefresh {
         SnapshotRefresh::CombinedInventoryCommandStatusesAndSystemEvents {
             inventory: service.inventory_snapshot_arc(),
-            release_board: service.release_board_snapshot_arc(),
             command_statuses: service.command_statuses_snapshot_arc(),
             system_events: service.system_event_index_snapshot_arc(),
         }
@@ -390,28 +449,40 @@ impl ApiState {
     ) -> SnapshotRefresh {
         SnapshotRefresh::CombinedReadModelCommandStatusesAndSystemEvents {
             read_model: service.read_model_snapshot_arc(),
-            release_board: service.release_board_snapshot_arc(),
             command_statuses: service.command_statuses_snapshot_arc(),
             system_events: service.system_event_index_snapshot_arc(),
         }
     }
 
-    async fn take_service(&self) -> ApiApplication {
+    fn slot_for_lane(&self, lane: ApiMutationLane) -> &ServiceSlot {
+        match &self.inner.services {
+            ApiServiceSet::Single(slot) => slot.as_ref(),
+            ApiServiceSet::Partitioned(slots) => match lane {
+                ApiMutationLane::State => &slots.state,
+                ApiMutationLane::Runtime => &slots.runtime,
+                ApiMutationLane::Publication => &slots.publication,
+            },
+        }
+    }
+
+    async fn take_service(&self, lane: ApiMutationLane) -> ApiApplication {
+        let slot = self.slot_for_lane(lane);
         loop {
-            let mut guard = self.inner.service.lock().await;
+            let mut guard = slot.service.lock().await;
             if let Some(service) = guard.take() {
                 return service;
             }
             drop(guard);
-            self.inner.service_ready.notified().await;
+            slot.ready.notified().await;
         }
     }
 
-    async fn restore_service(&self, service: ApiApplication) {
-        let mut guard = self.inner.service.lock().await;
+    async fn restore_service(&self, lane: ApiMutationLane, service: ApiApplication) {
+        let slot = self.slot_for_lane(lane);
+        let mut guard = slot.service.lock().await;
         *guard = Some(service);
         drop(guard);
-        self.inner.service_ready.notify_waiters();
+        slot.ready.notify_waiters();
     }
 
     async fn mutate<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
@@ -419,11 +490,43 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        let mut service = self.take_service().await;
+        self.mutate_on_lane(ApiMutationLane::State, operation, refresh)
+            .await
+    }
+
+    async fn mutate_runtime<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
+    where
+        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
+        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
+    {
+        self.mutate_on_lane(ApiMutationLane::Runtime, operation, refresh)
+            .await
+    }
+
+    async fn mutate_publication<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
+    where
+        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
+        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
+    {
+        self.mutate_on_lane(ApiMutationLane::Publication, operation, refresh)
+            .await
+    }
+
+    async fn mutate_on_lane<T, F, R>(
+        &self,
+        lane: ApiMutationLane,
+        operation: F,
+        refresh: R,
+    ) -> Result<T, ApiError>
+    where
+        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
+        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
+    {
+        let mut service = self.take_service(lane).await;
         let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
             Err(error) => {
-                self.restore_service(service).await;
+                self.restore_service(lane, service).await;
                 return Err(ApiError::from(error));
             }
         };
@@ -442,7 +545,31 @@ impl ApiState {
                 .remote_observation_degraded
                 .store(true, Ordering::Relaxed);
         }
-        let next_snapshot = if refresh_from_remote_changed {
+        let mut remote_change_watermark = service.observed_remote_change_watermark();
+        let next_snapshot = if let Some(loader) = &self.inner.remote_read_snapshot_loader {
+            if refresh_from_remote_changed || result.is_ok() {
+                let current_snapshot = self.read_snapshot();
+                let loaded = loader
+                    .load(
+                        self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
+                        current_snapshot.inventory_arc(),
+                        current_snapshot.read_model_arc(),
+                        current_snapshot.system_event_index_arc(),
+                        current_snapshot.command_statuses_arc(),
+                    )
+                    .await
+                    .map_err(ApiError::internal)?;
+                remote_change_watermark = Some(loaded.change_watermark);
+                Some(Arc::new(ApiReadSnapshot::new(
+                    loaded.inventory,
+                    loaded.read_model,
+                    loaded.system_event_index,
+                    loaded.command_statuses,
+                )))
+            } else {
+                None
+            }
+        } else if refresh_from_remote_changed {
             Some(Arc::new(service.read_snapshot()))
         } else if result.is_ok() {
             let current_snapshot = self.read_snapshot();
@@ -450,8 +577,7 @@ impl ApiState {
         } else {
             None
         };
-        let remote_change_watermark = service.observed_remote_change_watermark();
-        self.restore_service(service).await;
+        self.restore_service(lane, service).await;
         if let Some(next_snapshot) = next_snapshot {
             self.publish_snapshot(next_snapshot, remote_change_watermark);
         }
@@ -495,7 +621,7 @@ impl ApiState {
 
         for _ in 0..max_commands {
             let step = self
-                .mutate(
+                .mutate_runtime(
                     |service| {
                         let request = DrainWorkerCommand {
                             max_commands: Some(1),
@@ -553,7 +679,7 @@ impl ApiState {
 
         for _ in 0..max_collections {
             let step = self
-                .mutate(
+                .mutate_runtime(
                     |service| {
                         let request = DrainCollectionScanWorkerCommand {
                             max_collections: Some(1),
@@ -609,7 +735,7 @@ impl ApiState {
 
         for _ in 0..max_events {
             let step = self
-                .mutate(
+                .mutate_publication(
                     |service| {
                         let request = DrainIntegrationWorkerCommand {
                             max_events: Some(1),
@@ -822,7 +948,7 @@ async fn register_component(
     Json(request): Json<ComponentRegistrationRequest>,
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
     let response = state
-        .mutate(
+        .mutate_runtime(
             |service| {
                 Box::pin(async move {
                     service
@@ -842,7 +968,7 @@ async fn register_component_tag(
     Json(request): Json<ComponentTagRegistrationRequest>,
 ) -> Result<Json<RegisterComponentTagResponse>, ApiError> {
     let response = state
-        .mutate(
+        .mutate_runtime(
             |service| {
                 Box::pin(async move {
                     service
@@ -870,7 +996,7 @@ async fn register_context_profile(
     Json(request): Json<ContextProfileRegistrationRequest>,
 ) -> Result<Json<RegisterContextProfileResponse>, ApiError> {
     let response = state
-        .mutate(
+        .mutate_runtime(
             |service| {
                 Box::pin(async move {
                     service

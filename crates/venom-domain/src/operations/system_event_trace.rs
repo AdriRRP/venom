@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Default number of recent operator-facing system events returned in one query.
@@ -162,11 +163,12 @@ pub struct SystemEventQueryIndex {
     command_total: usize,
     governance_total: usize,
     publication_total: usize,
-    recent_events: Vec<Arc<SystemEvent>>,
-    recent_scheduler_events: Vec<Arc<SystemEvent>>,
-    recent_command_events: Vec<Arc<SystemEvent>>,
-    recent_governance_events: Vec<Arc<SystemEvent>>,
-    recent_publication_events: Vec<Arc<SystemEvent>>,
+    retained_events: BTreeMap<Box<str>, Arc<SystemEvent>>,
+    recent_events: Vec<Box<str>>,
+    recent_scheduler_events: Vec<Box<str>>,
+    recent_command_events: Vec<Box<str>>,
+    recent_governance_events: Vec<Box<str>>,
+    recent_publication_events: Vec<Box<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -202,6 +204,7 @@ impl SystemEventQueryIndex {
             command_total: 0,
             governance_total: 0,
             publication_total: 0,
+            retained_events: BTreeMap::new(),
             recent_events: Vec::new(),
             recent_scheduler_events: Vec::new(),
             recent_command_events: Vec::new(),
@@ -224,26 +227,34 @@ impl SystemEventQueryIndex {
     }
 
     fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
+        let event_id = event.event_id.clone();
+        self.retained_events.insert(event_id.clone(), event);
         self.total += 1;
-        match event.category() {
+        match self
+            .retained_events
+            .get(event_id.as_ref())
+            .expect("retained system event should exist")
+            .category()
+        {
             SystemEventCategory::Scheduler => {
                 self.scheduler_total += 1;
-                push_bounded(&mut self.recent_scheduler_events, event.clone());
+                push_bounded_id(&mut self.recent_scheduler_events, event_id.clone());
             }
             SystemEventCategory::Command => {
                 self.command_total += 1;
-                push_bounded(&mut self.recent_command_events, event.clone());
+                push_bounded_id(&mut self.recent_command_events, event_id.clone());
             }
             SystemEventCategory::Governance => {
                 self.governance_total += 1;
-                push_bounded(&mut self.recent_governance_events, event.clone());
+                push_bounded_id(&mut self.recent_governance_events, event_id.clone());
             }
             SystemEventCategory::Publication => {
                 self.publication_total += 1;
-                push_bounded(&mut self.recent_publication_events, event.clone());
+                push_bounded_id(&mut self.recent_publication_events, event_id.clone());
             }
         }
-        push_bounded(&mut self.recent_events, event);
+        push_bounded_id(&mut self.recent_events, event_id);
+        self.retain_only_windowed_events();
     }
 
     #[must_use]
@@ -254,23 +265,89 @@ impl SystemEventQueryIndex {
             command_total: left.command_total + right.command_total,
             governance_total: left.governance_total + right.governance_total,
             publication_total: left.publication_total + right.publication_total,
-            recent_events: merge_recent_events(&left.recent_events, &right.recent_events),
-            recent_scheduler_events: merge_recent_events(
-                &left.recent_scheduler_events,
-                &right.recent_scheduler_events,
-            ),
-            recent_command_events: merge_recent_events(
-                &left.recent_command_events,
-                &right.recent_command_events,
-            ),
-            recent_governance_events: merge_recent_events(
-                &left.recent_governance_events,
-                &right.recent_governance_events,
-            ),
-            recent_publication_events: merge_recent_events(
-                &left.recent_publication_events,
-                &right.recent_publication_events,
-            ),
+            ..Self::from_recent_windows(
+                SystemEventWindowTotals {
+                    total: left.total + right.total,
+                    scheduler_total: left.scheduler_total + right.scheduler_total,
+                    command_total: left.command_total + right.command_total,
+                    governance_total: left.governance_total + right.governance_total,
+                    publication_total: left.publication_total + right.publication_total,
+                },
+                SystemEventRecentWindows {
+                    recent_events: merge_recent_events(
+                        &left
+                            .query(&SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT))
+                            .events,
+                        &right
+                            .query(&SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT))
+                            .events,
+                    ),
+                    recent_scheduler_events: merge_recent_events(
+                        &left
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Scheduler)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                        &right
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Scheduler)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                    ),
+                    recent_command_events: merge_recent_events(
+                        &left
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Command)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                        &right
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Command)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                    ),
+                    recent_governance_events: merge_recent_events(
+                        &left
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Governance)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                        &right
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Governance)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                    ),
+                    recent_publication_events: merge_recent_events(
+                        &left
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Publication)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                        &right
+                            .query(
+                                &SystemEventsQuery::new()
+                                    .with_category(SystemEventCategory::Publication)
+                                    .with_limit(MAX_SYSTEM_EVENTS_LIMIT),
+                            )
+                            .events,
+                    ),
+                },
+            )
         }
     }
 
@@ -279,18 +356,46 @@ impl SystemEventQueryIndex {
         totals: SystemEventWindowTotals,
         windows: SystemEventRecentWindows,
     ) -> Self {
-        Self {
+        let mut index = Self {
             total: totals.total,
             scheduler_total: totals.scheduler_total,
             command_total: totals.command_total,
             governance_total: totals.governance_total,
             publication_total: totals.publication_total,
-            recent_events: windows.recent_events,
-            recent_scheduler_events: windows.recent_scheduler_events,
-            recent_command_events: windows.recent_command_events,
-            recent_governance_events: windows.recent_governance_events,
-            recent_publication_events: windows.recent_publication_events,
-        }
+            retained_events: BTreeMap::new(),
+            recent_events: Vec::new(),
+            recent_scheduler_events: Vec::new(),
+            recent_command_events: Vec::new(),
+            recent_governance_events: Vec::new(),
+            recent_publication_events: Vec::new(),
+        };
+        load_recent_window(
+            &mut index.retained_events,
+            &mut index.recent_events,
+            windows.recent_events,
+        );
+        load_recent_window(
+            &mut index.retained_events,
+            &mut index.recent_scheduler_events,
+            windows.recent_scheduler_events,
+        );
+        load_recent_window(
+            &mut index.retained_events,
+            &mut index.recent_command_events,
+            windows.recent_command_events,
+        );
+        load_recent_window(
+            &mut index.retained_events,
+            &mut index.recent_governance_events,
+            windows.recent_governance_events,
+        );
+        load_recent_window(
+            &mut index.retained_events,
+            &mut index.recent_publication_events,
+            windows.recent_publication_events,
+        );
+        index.retain_only_windowed_events();
+        index
     }
 
     #[must_use]
@@ -313,7 +418,7 @@ impl SystemEventQueryIndex {
         let events = source
             .iter()
             .take(limit)
-            .map(Arc::clone)
+            .filter_map(|event_id| self.retained_events.get(event_id.as_ref()).map(Arc::clone))
             .collect::<Vec<_>>();
         SystemEventsPage {
             total,
@@ -322,13 +427,40 @@ impl SystemEventQueryIndex {
             events,
         }
     }
+    fn retain_only_windowed_events(&mut self) {
+        let mut retained_ids = BTreeSet::<Box<str>>::new();
+        for event_id in self
+            .recent_events
+            .iter()
+            .chain(self.recent_scheduler_events.iter())
+            .chain(self.recent_command_events.iter())
+            .chain(self.recent_governance_events.iter())
+            .chain(self.recent_publication_events.iter())
+        {
+            retained_ids.insert(event_id.clone());
+        }
+        self.retained_events
+            .retain(|event_id, _| retained_ids.contains(event_id));
+    }
 }
 
-fn push_bounded(events: &mut Vec<Arc<SystemEvent>>, event: Arc<SystemEvent>) {
+fn load_recent_window(
+    retained_events: &mut BTreeMap<Box<str>, Arc<SystemEvent>>,
+    target: &mut Vec<Box<str>>,
+    events: Vec<Arc<SystemEvent>>,
+) {
+    for event in events {
+        let event_id = event.event_id.clone();
+        retained_events.entry(event_id.clone()).or_insert(event);
+        target.push(event_id);
+    }
+}
+
+fn push_bounded_id(events: &mut Vec<Box<str>>, event_id: Box<str>) {
     if events.len() == MAX_SYSTEM_EVENTS_LIMIT {
         events.pop();
     }
-    events.insert(0, event);
+    events.insert(0, event_id);
 }
 
 fn merge_recent_events(

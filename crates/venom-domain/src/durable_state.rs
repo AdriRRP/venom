@@ -46,7 +46,6 @@ pub struct DurableState {
     read_model: Arc<FindingReadModel>,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
-    release_board_snapshot_cache: Arc<crate::ReleaseBoard>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
@@ -78,10 +77,6 @@ impl DurableState {
             read_model: Arc::new(FindingReadModel::default()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::default()),
-            release_board_snapshot_cache: Arc::new(crate::build_release_board(
-                &ComponentInventory::default(),
-                &FindingReadModel::default(),
-            )),
             integration_runtime_config: None,
             applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
@@ -122,7 +117,10 @@ impl DurableState {
 
     #[must_use]
     pub fn release_board_snapshot_arc(&self) -> Arc<crate::ReleaseBoard> {
-        Arc::clone(&self.release_board_snapshot_cache)
+        Arc::new(crate::build_release_board(
+            self.ingestion.inventory(),
+            self.read_model(),
+        ))
     }
 
     #[must_use]
@@ -2294,17 +2292,14 @@ impl DurableState {
     fn refresh_read_snapshot_caches(&mut self) {
         self.refresh_inventory_snapshot_cache();
         self.refresh_read_model_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_inventory_and_release_board_snapshot_caches(&mut self) {
         self.refresh_inventory_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_read_model_and_release_board_snapshot_caches(&mut self) {
         self.refresh_read_model_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_inventory_snapshot_cache(&mut self) {
@@ -2313,13 +2308,6 @@ impl DurableState {
 
     fn refresh_read_model_snapshot_cache(&mut self) {
         self.read_model_snapshot_cache = self.read_model_arc();
-    }
-
-    fn refresh_release_board_snapshot_cache(&mut self) {
-        self.release_board_snapshot_cache = Arc::new(crate::build_release_board(
-            self.ingestion.inventory(),
-            self.read_model(),
-        ));
     }
 }
 
