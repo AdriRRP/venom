@@ -176,20 +176,14 @@ function titleCaseWords(value: string) {
 		.join(" ");
 }
 
-function formatContextFactorDetail(
-	factor: string,
-	source?: string,
-	identity?: string,
-) {
-	const [name, value] = factor.split(":");
-	const label = `${titleCaseWords(name)}=${value}`;
-	if (source == null || identity == null) {
-		return label;
-	}
-	return `${label} from ${source} ${identity}`;
-}
+type ContextFactorAuditRow = {
+	label: string;
+	value: string;
+	source: string | null;
+	identity: string | null;
+};
 
-function contextProfileSummary(finding: {
+type ContextAuditFinding = {
 	context_profile_name: string | null;
 	contextual_posture?: string;
 	contextual_rule?: string;
@@ -202,7 +196,23 @@ function contextProfileSummary(finding: {
 	component_context_profile?: { name: string } | null;
 	collection_context_profile?: { name: string } | null;
 	tag_context_profiles?: Array<{ name: string }>;
-}) {
+};
+
+function parseContextFactor(
+	factor: string,
+	source?: string,
+	identity?: string,
+): ContextFactorAuditRow {
+	const [name, value] = factor.split(":");
+	return {
+		label: titleCaseWords(name),
+		value: value ?? "unknown",
+		source: source ?? null,
+		identity: identity ?? null,
+	};
+}
+
+function contextProfileSummary(finding: ContextAuditFinding) {
 	const labels = contextSourceLabels(finding);
 	if (labels.length === 0) {
 		return "Unassigned";
@@ -213,71 +223,63 @@ function contextProfileSummary(finding: {
 	return `Composite: ${labels.join(" + ")}`;
 }
 
-function contextSemantics(finding: {
-	contextual_posture?: string;
-	contextual_rule?: string;
-	contextual_factors?: string[];
-	contextual_factor_provenance?: Array<{
-		factor: string;
-		source: string;
-		identity: string;
-	}>;
-}) {
+function contextSemantics(finding: ContextAuditFinding) {
 	return {
-		posture:
-			finding.contextual_posture == null
-				? null
-				: `Posture: ${finding.contextual_posture}`,
-		rule:
-			finding.contextual_rule == null
-				? null
-				: `Rule: ${finding.contextual_rule}`,
+		posture: finding.contextual_posture ?? null,
+		rule: finding.contextual_rule ?? null,
 		factors:
 			finding.contextual_factor_provenance?.map(
 				({ factor, source, identity }) =>
-					formatContextFactorDetail(factor, source, identity),
+					parseContextFactor(factor, source, identity),
 			) ??
 			(finding.contextual_factors ?? []).map((factor) =>
-				formatContextFactorDetail(factor),
+				parseContextFactor(factor),
 			),
 	};
 }
 
-function renderContextCell(finding: {
-	context_profile_name: string | null;
-	contextual_posture?: string;
-	contextual_rule?: string;
-	contextual_factors?: string[];
-	contextual_factor_provenance?: Array<{
-		factor: string;
-		source: string;
-		identity: string;
-	}>;
-	component_context_profile?: { name: string } | null;
-	collection_context_profile?: { name: string } | null;
-	tag_context_profiles?: Array<{ name: string }>;
-}) {
+function renderContextCell(finding: ContextAuditFinding) {
 	const summary = contextProfileSummary(finding);
 	const semantics = contextSemantics(finding);
 	return (
 		<div className="context-cell">
 			<p className="context-summary">{summary}</p>
-			<div className="context-meta">
-				{semantics.posture ? (
-					<span className="context-chip">{semantics.posture}</span>
-				) : null}
-				{semantics.rule ? (
-					<span className="context-chip context-chip-subtle">
-						{semantics.rule}
-					</span>
-				) : null}
-			</div>
+			<dl className="context-audit-grid">
+				<div className="context-audit-card">
+					<dt>Posture</dt>
+					<dd>{semantics.posture ?? "Unclassified"}</dd>
+				</div>
+				<div className="context-audit-card">
+					<dt>Rule</dt>
+					<dd>{semantics.rule ?? "No explicit rule"}</dd>
+				</div>
+			</dl>
 			{semantics.factors.length > 0 ? (
-				<ul className="context-factor-list">
-					{semantics.factors.map((factor) => (
-						<li key={factor}>{factor}</li>
-					))}
-				</ul>
+				<div className="context-factor-audit">
+					<p className="context-factor-title">Effective Factors</p>
+					<table className="context-factor-table">
+						<thead>
+							<tr>
+								<th scope="col">Factor</th>
+								<th scope="col">Value</th>
+								<th scope="col">Source</th>
+								<th scope="col">Identity</th>
+							</tr>
+						</thead>
+						<tbody>
+							{semantics.factors.map((factor) => (
+								<tr
+									key={`${factor.label}:${factor.value}:${factor.source ?? "none"}:${factor.identity ?? "none"}`}
+								>
+									<td>{factor.label}</td>
+									<td>{factor.value}</td>
+									<td>{factor.source ?? "derived"}</td>
+									<td>{factor.identity ?? "n/a"}</td>
+								</tr>
+							))}
+						</tbody>
+					</table>
+				</div>
 			) : null}
 		</div>
 	);
