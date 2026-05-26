@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Default number of recent operator-facing system events returned in one query.
@@ -428,7 +428,7 @@ impl SystemEventQueryIndex {
         }
     }
     fn retain_only_windowed_events(&mut self) {
-        let mut retained_ids = BTreeMap::<Box<str>, ()>::new();
+        let mut retained_ids = BTreeSet::<Box<str>>::new();
         for event_id in self
             .recent_events
             .iter()
@@ -437,10 +437,10 @@ impl SystemEventQueryIndex {
             .chain(self.recent_governance_events.iter())
             .chain(self.recent_publication_events.iter())
         {
-            retained_ids.insert(event_id.clone(), ());
+            retained_ids.insert(event_id.clone());
         }
         self.retained_events
-            .retain(|event_id, _| retained_ids.contains_key(event_id));
+            .retain(|event_id, _| retained_ids.contains(event_id));
     }
 }
 
