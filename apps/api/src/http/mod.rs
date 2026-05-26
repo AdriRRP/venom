@@ -480,7 +480,7 @@ impl ApiState {
         slot.ready.notify_waiters();
     }
 
-    async fn refresh_local_service_if_stale(
+    fn refresh_local_service_if_stale(
         &self,
         lane: ApiMutationLane,
         service: &mut ApiApplication,
@@ -559,8 +559,7 @@ impl ApiState {
             None
         };
         let mut service = self.take_service(lane).await;
-        self.refresh_local_service_if_stale(lane, &mut service)
-            .await?;
+        self.refresh_local_service_if_stale(lane, &mut service)?;
         let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
             Err(error) => {
