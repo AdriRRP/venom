@@ -433,9 +433,7 @@ impl ApiState {
         } else {
             None
         };
-        if refresh_from_remote_changed
-            || (result.is_ok() && mark_remote_change_result.is_none())
-        {
+        if refresh_from_remote_changed || (result.is_ok() && mark_remote_change_result.is_none()) {
             self.inner
                 .remote_observation_degraded
                 .store(false, Ordering::Relaxed);
