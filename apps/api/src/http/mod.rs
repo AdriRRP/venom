@@ -36,7 +36,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, watch};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
@@ -55,8 +55,24 @@ struct ApiStateInner {
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
     remote_snapshot_watermark: AtomicU64,
+    remote_observation_degraded: AtomicBool,
     read_snapshot_tx: watch::Sender<Arc<ApiReadSnapshot>>,
     read_snapshot_rx: watch::Receiver<Arc<ApiReadSnapshot>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiHealthStatus {
+    Healthy,
+    Degraded,
+}
+
+impl ApiHealthStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded => "degraded",
+        }
+    }
 }
 
 enum SnapshotRefresh {
@@ -194,6 +210,7 @@ impl ApiState {
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
                 remote_snapshot_watermark: AtomicU64::new(remote_snapshot_watermark),
+                remote_observation_degraded: AtomicBool::new(false),
                 read_snapshot_tx,
                 read_snapshot_rx,
             }),
@@ -202,6 +219,18 @@ impl ApiState {
 
     fn read_snapshot(&self) -> Arc<ApiReadSnapshot> {
         self.inner.read_snapshot_rx.borrow().clone()
+    }
+
+    fn health_status(&self) -> ApiHealthStatus {
+        if self
+            .inner
+            .remote_observation_degraded
+            .load(Ordering::Relaxed)
+        {
+            ApiHealthStatus::Degraded
+        } else {
+            ApiHealthStatus::Healthy
+        }
     }
 
     async fn read_snapshot_fresh(&self) -> Result<Arc<ApiReadSnapshot>, ApiError> {
@@ -215,6 +244,11 @@ impl ApiState {
                 probe.observed_change_watermark(),
                 self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
             ) {
+                if current_change_watermark == probe.observed_change_watermark() {
+                    self.inner
+                        .remote_observation_degraded
+                        .store(false, Ordering::Relaxed);
+                }
                 return Ok(self.read_snapshot());
             }
 
@@ -228,12 +262,20 @@ impl ApiState {
                 probe.observed_change_watermark(),
                 self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
             ) {
+                if current_change_watermark == probe.observed_change_watermark() {
+                    self.inner
+                        .remote_observation_degraded
+                        .store(false, Ordering::Relaxed);
+                }
                 return Ok(self.read_snapshot());
             }
 
             if let Some(loader) = &self.inner.remote_read_snapshot_loader {
                 let loaded = loader.load().await.map_err(ApiError::internal)?;
                 probe.observe_change_watermark(loaded.change_watermark);
+                self.inner
+                    .remote_observation_degraded
+                    .store(false, Ordering::Relaxed);
                 let published_watermark =
                     self.inner.remote_snapshot_watermark.load(Ordering::Relaxed);
                 if !should_publish_remote_snapshot(loaded.change_watermark, published_watermark) {
@@ -391,6 +433,17 @@ impl ApiState {
         } else {
             None
         };
+        if refresh_from_remote_changed
+            || (result.is_ok() && mark_remote_change_result.is_none())
+        {
+            self.inner
+                .remote_observation_degraded
+                .store(false, Ordering::Relaxed);
+        } else if mark_remote_change_result.is_some() {
+            self.inner
+                .remote_observation_degraded
+                .store(true, Ordering::Relaxed);
+        }
         let next_snapshot = if refresh_from_remote_changed {
             Some(Arc::new(service.read_snapshot()))
         } else if result.is_ok() {
@@ -735,8 +788,8 @@ fn build_runtime_routes() -> Router<ApiState> {
         .route("/provider-reports", post(record_provider_report))
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<ApiState>) -> &'static str {
+    state.health_status().as_str()
 }
 
 async fn release_dashboard(
@@ -1538,6 +1591,7 @@ impl axum::response::IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::ApiError;
+    use super::ApiHealthStatus;
     use super::ApiState;
     use super::ComponentRegistrationRequest;
     use super::build_router;
@@ -1597,6 +1651,38 @@ mod tests {
         assert!(should_publish_remote_snapshot(9, 8));
         assert!(!should_publish_remote_snapshot(8, 8));
         assert!(!should_publish_remote_snapshot(7, 8));
+    }
+
+    #[tokio::test]
+    async fn api_health_reports_degraded_when_remote_observation_is_stale() {
+        let state = ApiState::open(
+            temp_path("health-degraded", "state"),
+            temp_path("health-degraded", "runtime"),
+        )
+        .expect("api state should open");
+        let router = build_router(state.clone());
+
+        assert_eq!(state.health_status(), ApiHealthStatus::Healthy);
+        state
+            .inner
+            .remote_observation_degraded
+            .store(true, Ordering::Relaxed);
+
+        let response = router
+            .oneshot(
+                Request::get("/health")
+                    .body(Body::empty())
+                    .expect("health request should build"),
+            )
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        assert_eq!(body.as_ref(), b"degraded");
     }
 
     #[tokio::test]

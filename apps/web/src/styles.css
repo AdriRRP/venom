@@ -110,6 +110,10 @@ select {
 	color: #166534;
 }
 
+.status-card dd[data-health="degraded"] {
+	color: #b45309;
+}
+
 .status-card dd[data-health="unhealthy"] {
 	color: #b91c1c;
 }

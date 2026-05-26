@@ -41,6 +41,14 @@ describe("fetchApiHealth", () => {
 		await expect(fetchApiHealth()).resolves.toBe("healthy");
 	});
 
+	it("maps a degraded health response explicitly", async () => {
+		globalThis.fetch = vi.fn(async () => {
+			return new Response("degraded", { status: 200 });
+		}) as typeof fetch;
+
+		await expect(fetchApiHealth()).resolves.toBe("degraded");
+	});
+
 	it("serializes the canonical query shape expected by the API", async () => {
 		const calls: string[] = [];
 		globalThis.fetch = vi.fn(async (input: string | URL | Request) => {

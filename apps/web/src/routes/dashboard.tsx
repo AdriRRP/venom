@@ -37,9 +37,7 @@ export function DashboardPage() {
 
 	const healthLabel = healthQuery.isLoading
 		? "loading"
-		: healthQuery.data === "healthy"
-			? "healthy"
-			: "unhealthy";
+		: (healthQuery.data ?? "unhealthy");
 
 	const summary = dashboardQuery.data?.summary;
 	const collections = dashboardQuery.data?.collections ?? [];

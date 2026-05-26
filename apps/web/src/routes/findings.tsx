@@ -506,7 +506,7 @@ export function FindingsPage() {
 		if (healthQuery.isLoading) {
 			return "loading";
 		}
-		return healthQuery.data === "healthy" ? "healthy" : "unhealthy";
+		return healthQuery.data ?? "unhealthy";
 	}, [healthQuery.data, healthQuery.isLoading]);
 
 	const collectionWindow = useMemo(

@@ -20,9 +20,7 @@ export function EventsPage() {
 
 	const apiHealth = healthQuery.isLoading
 		? "loading"
-		: healthQuery.data === "healthy"
-			? "healthy"
-			: "unhealthy";
+		: (healthQuery.data ?? "unhealthy");
 
 	const events = eventsQuery.data?.events ?? [];
 

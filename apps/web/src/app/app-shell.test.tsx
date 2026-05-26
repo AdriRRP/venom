@@ -39,4 +39,14 @@ describe("AppShell", () => {
 		).toBeInTheDocument();
 		expect(screen.getByText("content")).toBeInTheDocument();
 	});
+
+	it("renders degraded health explicitly", () => {
+		render(
+			<AppShell apiHealth="degraded" currentView="dashboard">
+				<p>content</p>
+			</AppShell>,
+		);
+
+		expect(screen.getByText("Degraded")).toBeInTheDocument();
+	});
 });
