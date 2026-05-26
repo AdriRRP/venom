@@ -50,7 +50,6 @@ pub struct DurableState {
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     applied_scan_commands: BTreeMap<Box<str>, FindingChangeSet>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
-    system_event_index: SystemEventQueryIndex,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
 }
 
@@ -86,7 +85,6 @@ impl DurableState {
             integration_runtime_config: None,
             applied_scan_commands: BTreeMap::new(),
             pending_integration_events: VecDeque::new(),
-            system_event_index: SystemEventQueryIndex::new(),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
         };
         state.rebuild_from_history()?;
@@ -140,7 +138,7 @@ impl DurableState {
 
     #[must_use]
     pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        self.system_event_index.query(query)
+        self.system_event_index_snapshot_cache.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.
@@ -1257,7 +1255,7 @@ impl DurableState {
         self.integration_runtime_config = None;
         self.applied_scan_commands.clear();
         self.pending_integration_events.clear();
-        self.system_event_index = SystemEventQueryIndex::new();
+        self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(DurableStateError::Io)?;
@@ -1274,7 +1272,6 @@ impl DurableState {
         }
 
         self.refresh_read_snapshot_caches();
-        self.refresh_system_event_index_snapshot_cache();
         Ok(())
     }
 
@@ -2278,8 +2275,7 @@ impl DurableState {
     }
 
     fn push_system_event(&mut self, event: SystemEvent) {
-        self.system_event_index.push_newest(event);
-        self.refresh_system_event_index_snapshot_cache();
+        Arc::make_mut(&mut self.system_event_index_snapshot_cache).push_newest(event);
     }
 
     fn refresh_read_snapshot_caches(&mut self) {
@@ -2311,10 +2307,6 @@ impl DurableState {
             self.ingestion.inventory(),
             &self.read_model,
         ));
-    }
-
-    fn refresh_system_event_index_snapshot_cache(&mut self) {
-        self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
     }
 }
 

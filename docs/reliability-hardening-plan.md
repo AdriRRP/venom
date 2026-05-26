@@ -215,6 +215,9 @@ Completed:
 72. `W160-command-status-rebuild-elision`
     Rebuild `command statuses` snapshot lanes incrementally during local replay
     and Postgres reload instead of regenerating full maps after each rebuild.
+73. `W161-system-event-source-arc-sharing`
+    Keep the live local and Postgres `system events` index as the shared
+    snapshot `Arc` itself instead of cloning the whole index on each push.
 
 ## Exit condition
 
