@@ -34,6 +34,14 @@ impl FindingIngestion {
     }
 
     #[must_use]
+    pub fn from_inventory_arc(inventory: Arc<ComponentInventory>) -> Self {
+        Self {
+            inventory,
+            tracker: FindingTracker::default(),
+        }
+    }
+
+    #[must_use]
     pub fn inventory(&self) -> &ComponentInventory {
         self.inventory.as_ref()
     }

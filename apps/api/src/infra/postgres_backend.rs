@@ -11,9 +11,8 @@ use venom_domain::findings::{
     BulkGovernanceQuery, BulkReopenFindingResult, BulkSuppressFindingResult, EvidenceFreshness,
     FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
-    ProviderScanReport, ReleaseBoard, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
-    RiskAcceptance, ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
-    build_release_board,
+    ProviderScanReport, ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance,
+    ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -54,7 +53,6 @@ pub struct PostgresStore {
     read_model: Arc<FindingReadModel>,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
-    release_board_snapshot_cache: Arc<ReleaseBoard>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
@@ -74,17 +72,24 @@ pub struct PostgresRemoteChangeProbe {
 pub struct PostgresReadSnapshotLoader {
     pool: PgPool,
     names: TableNames,
+    change_watermark_table: Box<str>,
 }
 
 #[derive(Debug)]
 pub struct LoadedPostgresReadSnapshot {
     pub inventory: Arc<ComponentInventory>,
     pub read_model: Arc<FindingReadModel>,
-    pub release_board: Arc<ReleaseBoard>,
     pub system_event_index: Arc<SystemEventQueryIndex>,
     pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     pub change_watermark: u64,
 }
+
+const CHANGE_LANE_INVENTORY: i32 = 1;
+const CHANGE_LANE_READ_MODEL: i32 = 1 << 1;
+const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 2;
+const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 3;
+const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 4;
+const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainDueCollectionScansResult {
@@ -159,10 +164,6 @@ impl PostgresStore {
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
-            release_board_snapshot_cache: Arc::new(build_release_board(
-                &ComponentInventory::default(),
-                &FindingReadModel::new(),
-            )),
             integration_runtime_config: None,
             commands: BTreeMap::new(),
             order: Vec::new(),
@@ -185,10 +186,6 @@ impl PostgresStore {
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
-            release_board_snapshot_cache: Arc::new(build_release_board(
-                &ComponentInventory::default(),
-                &FindingReadModel::new(),
-            )),
             integration_runtime_config: None,
             commands: BTreeMap::new(),
             order: Vec::new(),
@@ -209,7 +206,30 @@ impl PostgresStore {
         if self.observed_change_watermark() == current_change_watermark {
             return Ok(false);
         }
-        self.rebuild().await?;
+        let lane_mask = self
+            .changed_lane_mask(self.observed_change_watermark(), current_change_watermark)
+            .await?;
+        if lane_mask & CHANGE_LANE_INVENTORY != 0 {
+            self.refresh_inventory_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
+            self.refresh_read_model_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
+            self.refresh_command_statuses_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_INTEGRATION_OUTBOX != 0 {
+            self.refresh_pending_integration_events_from_remote()
+                .await?;
+        }
+        if lane_mask & CHANGE_LANE_INTEGRATION_RUNTIME != 0 {
+            self.refresh_integration_runtime_config_from_remote()
+                .await?;
+        }
+        if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
+            self.refresh_system_events_from_remote().await?;
+        }
+        self.set_observed_change_watermark(current_change_watermark);
         Ok(true)
     }
 
@@ -238,6 +258,7 @@ impl PostgresStore {
         PostgresReadSnapshotLoader {
             pool: self.pool.clone(),
             names: self.names.clone(),
+            change_watermark_table: self.names.change_watermark.clone(),
         }
     }
 
@@ -1378,11 +1399,6 @@ impl PostgresStore {
     }
 
     #[must_use]
-    pub fn read_model(&self) -> &FindingReadModel {
-        self.read_model.as_ref()
-    }
-
-    #[must_use]
     pub fn read_model_arc(&self) -> Arc<FindingReadModel> {
         Arc::clone(&self.read_model)
     }
@@ -1420,11 +1436,6 @@ impl PostgresStore {
     #[must_use]
     pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         Arc::clone(&self.system_event_index_snapshot_cache)
-    }
-
-    #[must_use]
-    pub fn release_board_snapshot_arc(&self) -> Arc<ReleaseBoard> {
-        Arc::clone(&self.release_board_snapshot_cache)
     }
 
     #[must_use]
@@ -2487,6 +2498,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres schema create failed: {error}"))?;
 
         self.create_change_watermark_table().await?;
+        self.create_change_journal_table().await?;
         self.create_components_table().await?;
         self.create_context_profiles_table().await?;
         self.create_component_context_profiles_table().await?;
@@ -2536,17 +2548,80 @@ impl PostgresStore {
         sqlx::query(&format!(
             concat!(
                 "CREATE OR REPLACE FUNCTION {}.touch_change_watermark() RETURNS trigger AS $$ ",
+                "DECLARE next_change_seq BIGINT; ",
+                "DECLARE lane_mask INTEGER; ",
                 "BEGIN ",
-                "UPDATE {} SET change_seq = change_seq + 1 WHERE singleton = TRUE; ",
+                "UPDATE {} SET change_seq = change_seq + 1 WHERE singleton = TRUE RETURNING change_seq INTO next_change_seq; ",
+                "lane_mask := CASE TG_TABLE_NAME ",
+                "WHEN 'components' THEN {} ",
+                "WHEN 'context_profiles' THEN {} ",
+                "WHEN 'component_context_profiles' THEN {} ",
+                "WHEN 'component_tags' THEN {} ",
+                "WHEN 'component_tag_memberships' THEN {} ",
+                "WHEN 'collections' THEN {} ",
+                "WHEN 'collection_sources' THEN {} ",
+                "WHEN 'collection_memberships' THEN {} ",
+                "WHEN 'collection_scan_schedules' THEN {} ",
+                "WHEN 'artifact_bindings' THEN {} ",
+                "WHEN 'provider_runtime_configs' THEN {} ",
+                "WHEN 'integration_runtime_config' THEN {} ",
+                "WHEN 'provider_reports' THEN {} ",
+                "WHEN 'finding_risk_acceptances' THEN {} ",
+                "WHEN 'finding_suppressions' THEN {} ",
+                "WHEN 'scan_commands' THEN {} ",
+                "WHEN 'integration_outbox' THEN {} ",
+                "WHEN 'system_events' THEN {} ",
+                "ELSE 0 END; ",
+                "INSERT INTO {} (change_seq, lane_mask) VALUES (next_change_seq, lane_mask) ",
+                "ON CONFLICT (change_seq) DO UPDATE SET lane_mask = {}.lane_mask | EXCLUDED.lane_mask; ",
+                "DELETE FROM {} WHERE change_seq < next_change_seq - 4096; ",
                 "RETURN NULL; ",
                 "END; ",
                 "$$ LANGUAGE plpgsql"
             ),
-            self.names.schema, self.names.change_watermark
+            self.names.schema,
+            self.names.change_watermark,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_INTEGRATION_RUNTIME,
+            CHANGE_LANE_READ_MODEL,
+            CHANGE_LANE_READ_MODEL,
+            CHANGE_LANE_READ_MODEL,
+            CHANGE_LANE_COMMAND_STATUSES,
+            CHANGE_LANE_INTEGRATION_OUTBOX,
+            CHANGE_LANE_SYSTEM_EVENTS,
+            self.names.change_journal,
+            self.names.change_journal,
+            self.names.change_journal
         ))
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres change watermark function create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_change_journal_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "change_seq BIGINT PRIMARY KEY, ",
+                "lane_mask INTEGER NOT NULL",
+                ")"
+            ),
+            self.names.change_journal
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change journal table create failed: {error}"))?;
         Ok(())
     }
 
@@ -3064,6 +3139,32 @@ impl PostgresStore {
             .store(change_watermark, Ordering::Relaxed);
     }
 
+    async fn changed_lane_mask(
+        &self,
+        since_change_watermark: u64,
+        current_change_watermark: u64,
+    ) -> Result<i32, String> {
+        sqlx::query_scalar::<_, Option<i32>>(&format!(
+            concat!(
+                "SELECT COALESCE(bit_or(lane_mask), 0) FROM {} ",
+                "WHERE change_seq > $1 AND change_seq <= $2"
+            ),
+            self.names.change_journal
+        ))
+        .bind(
+            i64::try_from(since_change_watermark)
+                .map_err(|_| "postgres change watermark lower bound out of range".to_owned())?,
+        )
+        .bind(
+            i64::try_from(current_change_watermark)
+                .map_err(|_| "postgres change watermark upper bound out of range".to_owned())?,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change journal read failed: {error}"))
+        .map(Option::unwrap_or_default)
+    }
+
     async fn current_change_watermark(&self) -> Result<u64, String> {
         sqlx::query_scalar::<_, i64>(&format!(
             "SELECT change_seq FROM {} WHERE singleton = TRUE",
@@ -3075,6 +3176,68 @@ impl PostgresStore {
         .and_then(|value| {
             u64::try_from(value).map_err(|_| "postgres change watermark out of range".to_owned())
         })
+    }
+
+    async fn refresh_inventory_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.load_components().await?;
+        backend.load_context_profiles().await?;
+        backend.load_component_context_profiles().await?;
+        backend.load_component_tags().await?;
+        backend.load_component_tag_memberships().await?;
+        backend.load_collections().await?;
+        backend.load_collection_sources().await?;
+        backend.load_collection_memberships().await?;
+        backend.load_collection_scan_schedules().await?;
+        backend.load_artifact_bindings().await?;
+        backend.load_provider_runtime_configs().await?;
+        self.ingestion = backend.ingestion;
+        self.refresh_inventory_snapshot_cache();
+        Ok(())
+    }
+
+    async fn refresh_read_model_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
+        backend.load_provider_reports().await?;
+        backend.load_finding_risk_acceptances().await?;
+        backend.load_finding_suppressions().await?;
+        let read_model = backend.read_model_arc();
+        self.governance = backend.governance;
+        self.read_model = read_model;
+        self.refresh_read_model_snapshot_cache();
+        Ok(())
+    }
+
+    async fn refresh_command_statuses_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.load_scan_commands().await?;
+        let command_statuses = backend.command_statuses_snapshot_arc();
+        self.commands = backend.commands;
+        self.order = backend.order;
+        self.command_statuses_snapshot_cache = command_statuses;
+        Ok(())
+    }
+
+    async fn refresh_pending_integration_events_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.load_pending_integration_events().await?;
+        self.pending_integration_events = backend.pending_integration_events;
+        Ok(())
+    }
+
+    async fn refresh_integration_runtime_config_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.load_integration_runtime_config().await?;
+        self.integration_runtime_config = backend.integration_runtime_config;
+        Ok(())
+    }
+
+    async fn refresh_system_events_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.load_system_events().await?;
+        self.system_event_index_snapshot_cache = backend.system_event_index_snapshot_arc();
+        Ok(())
     }
 
     async fn load_components(&mut self) -> Result<(), String> {
@@ -3811,17 +3974,14 @@ impl PostgresStore {
     fn refresh_read_snapshot_caches(&mut self) {
         self.refresh_inventory_snapshot_cache();
         self.refresh_read_model_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_inventory_and_release_board_snapshot_caches(&mut self) {
         self.refresh_inventory_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_read_model_and_release_board_snapshot_caches(&mut self) {
         self.refresh_read_model_snapshot_cache();
-        self.refresh_release_board_snapshot_cache();
     }
 
     fn refresh_inventory_snapshot_cache(&mut self) {
@@ -3831,14 +3991,6 @@ impl PostgresStore {
     fn refresh_read_model_snapshot_cache(&mut self) {
         self.read_model_snapshot_cache = self.read_model_arc();
     }
-
-    fn refresh_release_board_snapshot_cache(&mut self) {
-        self.release_board_snapshot_cache = Arc::new(build_release_board(
-            self.ingestion.inventory(),
-            self.read_model(),
-        ));
-    }
-
     fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
         Arc::make_mut(&mut self.command_statuses_snapshot_cache).insert(command_id.into(), status);
     }
@@ -4069,23 +4221,146 @@ impl PostgresRemoteChangeProbe {
 }
 
 impl PostgresReadSnapshotLoader {
-    /// Rebuild one detached Postgres-backed read snapshot without taking the
+    /// Load one detached Postgres-backed read snapshot delta without taking the
     /// live mutable application slot.
     ///
     /// # Errors
     ///
-    /// Returns an error string when the detached rebuild fails.
-    pub async fn load(&self) -> Result<LoadedPostgresReadSnapshot, String> {
-        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.rebuild().await?;
+    /// Returns an error string when one detached lane reload fails.
+    pub async fn load(
+        &self,
+        since_change_watermark: u64,
+        base_inventory: Arc<ComponentInventory>,
+        base_read_model: Arc<FindingReadModel>,
+        base_system_event_index: Arc<SystemEventQueryIndex>,
+        base_command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    ) -> Result<LoadedPostgresReadSnapshot, String> {
+        let change_watermark = self.current_change_watermark().await?;
+        if change_watermark <= since_change_watermark {
+            return Ok(LoadedPostgresReadSnapshot {
+                inventory: base_inventory,
+                read_model: base_read_model,
+                system_event_index: base_system_event_index,
+                command_statuses: base_command_statuses,
+                change_watermark,
+            });
+        }
+
+        let lane_mask = self
+            .changed_lane_mask(since_change_watermark, change_watermark)
+            .await?;
+        let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
+            self.load_inventory_snapshot().await?
+        } else {
+            base_inventory
+        };
+        let read_model = if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
+            self.load_read_model_snapshot(Arc::clone(&inventory))
+                .await?
+        } else {
+            base_read_model
+        };
+        let system_event_index = if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
+            self.load_system_event_index_snapshot().await?
+        } else {
+            base_system_event_index
+        };
+        let command_statuses = if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
+            self.load_command_statuses_snapshot().await?
+        } else {
+            base_command_statuses
+        };
+
         Ok(LoadedPostgresReadSnapshot {
-            inventory: backend.inventory_snapshot_arc(),
-            read_model: backend.read_model_snapshot_arc(),
-            release_board: backend.release_board_snapshot_arc(),
-            system_event_index: backend.system_event_index_snapshot_arc(),
-            command_statuses: backend.command_statuses_snapshot_arc(),
-            change_watermark: backend.observed_change_watermark(),
+            inventory,
+            read_model,
+            system_event_index,
+            command_statuses,
+            change_watermark,
         })
+    }
+
+    async fn current_change_watermark(&self) -> Result<u64, String> {
+        sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT change_seq FROM {} WHERE singleton = TRUE",
+            self.change_watermark_table
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change watermark read failed: {error}"))
+        .and_then(|value| {
+            u64::try_from(value).map_err(|_| "postgres change watermark out of range".to_owned())
+        })
+    }
+
+    async fn changed_lane_mask(
+        &self,
+        since_change_watermark: u64,
+        current_change_watermark: u64,
+    ) -> Result<i32, String> {
+        sqlx::query_scalar::<_, Option<i32>>(&format!(
+            concat!(
+                "SELECT COALESCE(bit_or(lane_mask), 0) FROM {} ",
+                "WHERE change_seq > $1 AND change_seq <= $2"
+            ),
+            self.names.change_journal
+        ))
+        .bind(
+            i64::try_from(since_change_watermark)
+                .map_err(|_| "postgres change watermark lower bound out of range".to_owned())?,
+        )
+        .bind(
+            i64::try_from(current_change_watermark)
+                .map_err(|_| "postgres change watermark upper bound out of range".to_owned())?,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres change journal read failed: {error}"))
+        .map(Option::unwrap_or_default)
+    }
+
+    async fn load_inventory_snapshot(&self) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.load_components().await?;
+        backend.load_context_profiles().await?;
+        backend.load_component_context_profiles().await?;
+        backend.load_component_tags().await?;
+        backend.load_component_tag_memberships().await?;
+        backend.load_collections().await?;
+        backend.load_collection_sources().await?;
+        backend.load_collection_memberships().await?;
+        backend.load_collection_scan_schedules().await?;
+        backend.load_artifact_bindings().await?;
+        backend.load_provider_runtime_configs().await?;
+        backend.refresh_inventory_snapshot_cache();
+        Ok(backend.inventory_snapshot_arc())
+    }
+
+    async fn load_read_model_snapshot(
+        &self,
+        inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<FindingReadModel>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
+        backend.load_provider_reports().await?;
+        backend.load_finding_risk_acceptances().await?;
+        backend.load_finding_suppressions().await?;
+        backend.refresh_read_model_snapshot_cache();
+        Ok(backend.read_model_snapshot_arc())
+    }
+
+    async fn load_system_event_index_snapshot(&self) -> Result<Arc<SystemEventQueryIndex>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.load_system_events().await?;
+        Ok(backend.system_event_index_snapshot_arc())
+    }
+
+    async fn load_command_statuses_snapshot(
+        &self,
+    ) -> Result<Arc<BTreeMap<Box<str>, ScanCommandStatus>>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.load_scan_commands().await?;
+        Ok(backend.command_statuses_snapshot_arc())
     }
 }
 
@@ -4099,6 +4374,7 @@ struct ScanCommandRecord {
 struct TableNames {
     schema: Box<str>,
     change_watermark: Box<str>,
+    change_journal: Box<str>,
     components: Box<str>,
     context_profiles: Box<str>,
     component_context_profiles: Box<str>,
@@ -4124,6 +4400,7 @@ impl TableNames {
         let schema = validate_schema_name(schema)?;
         Ok(Self {
             change_watermark: format!("{schema}.change_watermark").into_boxed_str(),
+            change_journal: format!("{schema}.change_journal").into_boxed_str(),
             components: format!("{schema}.components").into_boxed_str(),
             context_profiles: format!("{schema}.context_profiles").into_boxed_str(),
             component_context_profiles: format!("{schema}.component_context_profiles")

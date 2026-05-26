@@ -232,6 +232,11 @@ Completed:
     Keep the live `FindingReadModel` under shared `Arc` ownership so read-model
     snapshot refreshes reuse the source structure instead of cloning the full
     projection on each relevant mutation.
+78. `W166-http-write-lanes-and-remote-delta-refresh`
+    Partition the Postgres HTTP write plane by mutation lane, refresh remote
+    state by changed snapshot lanes instead of detached full rebuilds, make the
+    `ReleaseBoard` lazy over source arcs, and compact recent system-event
+    indexing so retained events are stored once and referenced cheaply.
 
 ## Exit condition
 
