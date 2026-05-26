@@ -212,6 +212,9 @@ Completed:
     Keep indexed `system events` queries on shared `Arc<SystemEvent>` entries
     until the API DTO projection layer instead of cloning full events
     immediately on every query.
+72. `W160-command-status-rebuild-elision`
+    Rebuild `command statuses` snapshot lanes incrementally during local replay
+    and Postgres reload instead of regenerating full maps after each rebuild.
 
 ## Exit condition
 

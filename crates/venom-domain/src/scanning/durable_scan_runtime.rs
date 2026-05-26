@@ -565,6 +565,7 @@ impl ScanCommandQueue {
         self.order.clear();
         self.pending_integration_events.clear();
         self.system_event_index = SystemEventQueryIndex::new();
+        self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
 
         for (line_index, line) in reader.lines().enumerate() {
             let line = line.map_err(ScanCommandQueueError::Io)?;
@@ -580,7 +581,6 @@ impl ScanCommandQueue {
             self.apply_event(event, line_index + 1)?;
         }
 
-        self.refresh_command_statuses_snapshot_cache();
         self.refresh_system_event_index_snapshot_cache();
 
         Ok(())
@@ -689,6 +689,10 @@ impl ScanCommandQueue {
                     collection_schedule_origin: command.collection_schedule_origin.clone(),
                     captured_report: None,
                 },
+            );
+            self.set_command_status_snapshot(
+                command.command_id.as_ref(),
+                ScanCommandStatus::Pending,
             );
             let collection_key = command
                 .collection_schedule_origin
@@ -879,7 +883,6 @@ impl ScanCommandQueue {
         if let Some(record) = self.commands.get_mut(command_id.as_ref()) {
             record.captured_report = None;
         }
-        self.refresh_command_statuses_snapshot_cache();
         self.push_system_event(SystemEvent {
             event_id: format!("scan-command-failed-{line}").into_boxed_str(),
             occurred_at_unix_ms,
@@ -999,15 +1002,6 @@ impl ScanCommandQueue {
 
     fn refresh_system_event_index_snapshot_cache(&mut self) {
         self.system_event_index_snapshot_cache = Arc::new(self.system_event_index.clone());
-    }
-
-    fn refresh_command_statuses_snapshot_cache(&mut self) {
-        self.command_statuses_snapshot_cache = Arc::new(
-            self.commands
-                .iter()
-                .map(|(command_id, record)| (command_id.clone(), record.status))
-                .collect(),
-        );
     }
 
     fn set_command_status_snapshot(&mut self, command_id: &str, status: ScanCommandStatus) {
@@ -1448,6 +1442,13 @@ mod tests {
             rebuilt.command_status(enqueue.command_id.as_ref()),
             Some(ScanCommandStatus::Completed)
         );
+        assert_eq!(
+            rebuilt
+                .command_statuses_snapshot()
+                .get(enqueue.command_id.as_ref())
+                .copied(),
+            Some(ScanCommandStatus::Completed)
+        );
         assert_eq!(rebuilt.pending_integration_events().len(), 1);
     }
 
@@ -1497,6 +1498,13 @@ mod tests {
 
         assert_eq!(
             rebuilt_runtime.command_status(enqueue.command_id.as_ref()),
+            Some(ScanCommandStatus::Applying)
+        );
+        assert_eq!(
+            rebuilt_runtime
+                .command_statuses_snapshot()
+                .get(enqueue.command_id.as_ref())
+                .copied(),
             Some(ScanCommandStatus::Applying)
         );
 
