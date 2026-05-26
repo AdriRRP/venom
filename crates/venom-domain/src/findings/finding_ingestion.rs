@@ -1,4 +1,5 @@
 use crate::{ComponentInventory, FindingChangeSet, FindingTracker, ProviderScanReport};
+use std::sync::Arc;
 
 /// Canonical failure when ingesting a provider scan report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +23,7 @@ impl FindingIngestionError {
 /// Minimal domain service that gates finding ingestion behind inventory.
 #[derive(Debug, Clone, Default)]
 pub struct FindingIngestion {
-    inventory: ComponentInventory,
+    inventory: Arc<ComponentInventory>,
     tracker: FindingTracker,
 }
 
@@ -33,13 +34,18 @@ impl FindingIngestion {
     }
 
     #[must_use]
-    pub const fn inventory(&self) -> &ComponentInventory {
-        &self.inventory
+    pub fn inventory(&self) -> &ComponentInventory {
+        self.inventory.as_ref()
     }
 
     #[must_use]
-    pub const fn inventory_mut(&mut self) -> &mut ComponentInventory {
-        &mut self.inventory
+    pub fn inventory_arc(&self) -> Arc<ComponentInventory> {
+        Arc::clone(&self.inventory)
+    }
+
+    #[must_use]
+    pub fn inventory_mut(&mut self) -> &mut ComponentInventory {
+        Arc::make_mut(&mut self.inventory)
     }
 
     /// Record one provider report only if the component is managed.
@@ -116,6 +122,7 @@ mod tests {
         ArtifactKind, ArtifactRef, ComponentRegistration, EvidenceFreshness, PackageCoordinate,
         ProviderScanReport, ReportedFinding,
     };
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     fn report() -> ProviderScanReport {
@@ -211,5 +218,43 @@ mod tests {
         assert_eq!(replayed.discovered, 0);
         assert_eq!(replayed.repeated, 1);
         assert_eq!(replayed.withdrawn, 0);
+    }
+
+    #[test]
+    fn inventory_arc_uses_copy_on_write_to_preserve_older_snapshots() {
+        let mut ingestion = FindingIngestion::new();
+        let _ = ingestion
+            .inventory_mut()
+            .register(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ));
+        let snapshot_before = ingestion.inventory_arc();
+
+        let _ = ingestion.inventory_mut().bind_artifact(
+            "component:payments-api",
+            ArtifactRef::new(
+                ArtifactKind::ContainerImage,
+                "registry.example/payments@sha256:111",
+            ),
+        );
+
+        let snapshot_after = ingestion.inventory_arc();
+
+        assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
+        assert!(!snapshot_before.component_owns_artifact(
+            "component:payments-api",
+            &ArtifactRef::new(
+                ArtifactKind::ContainerImage,
+                "registry.example/payments@sha256:111",
+            )
+        ));
+        assert!(snapshot_after.component_owns_artifact(
+            "component:payments-api",
+            &ArtifactRef::new(
+                ArtifactKind::ContainerImage,
+                "registry.example/payments@sha256:111",
+            )
+        ));
     }
 }

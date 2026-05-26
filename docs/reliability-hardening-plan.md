@@ -224,6 +224,10 @@ Completed:
 75. `W163-contextual-audit-surface`
     Render contextual posture, rule, and effective factor provenance as a
     structured operator audit surface instead of mixed text fragments.
+76. `W164-inventory-source-arc-sharing`
+    Keep the live inventory under shared `Arc<ComponentInventory>` ownership so
+    inventory snapshot refreshes reuse the source structure instead of deep
+    cloning the full inventory on each relevant mutation.
 
 ## Exit condition
 

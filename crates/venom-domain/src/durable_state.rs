@@ -2295,7 +2295,7 @@ impl DurableState {
     }
 
     fn refresh_inventory_snapshot_cache(&mut self) {
-        self.inventory_snapshot_cache = Arc::new(self.ingestion.inventory().clone());
+        self.inventory_snapshot_cache = self.ingestion.inventory_arc();
     }
 
     fn refresh_read_model_snapshot_cache(&mut self) {
@@ -2865,6 +2865,7 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2938,6 +2939,33 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             1
         );
+    }
+
+    #[test]
+    fn inventory_snapshot_cache_reuses_live_inventory_arc() {
+        let path = temp_path("durable-state-inventory-arc");
+        let mut state = DurableState::open(&path).expect("durable state should open");
+        let _ = state
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+
+        let snapshot_before = state.inventory_snapshot_arc();
+        let live_before = state.ingestion().inventory_arc();
+        assert!(Arc::ptr_eq(&snapshot_before, &live_before));
+
+        let _ = state
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+
+        let snapshot_after = state.inventory_snapshot_arc();
+        let live_after = state.ingestion().inventory_arc();
+        assert!(Arc::ptr_eq(&snapshot_after, &live_after));
+        assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
+        assert!(!snapshot_before.component_owns_artifact("component:payments-api", &artifact()));
+        assert!(snapshot_after.component_owns_artifact("component:payments-api", &artifact()));
     }
 
     #[test]
