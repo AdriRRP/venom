@@ -944,8 +944,9 @@ impl ScanCommandQueue {
             .append(true)
             .open(&self.history_path)
             .map_err(ScanCommandQueueError::Io)?;
-        serde_json::to_writer(&mut file, event).map_err(ScanCommandQueueError::Serialize)?;
-        file.write_all(b"\n").map_err(ScanCommandQueueError::Io)?;
+        let mut bytes = serde_json::to_vec(event).map_err(ScanCommandQueueError::Serialize)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes).map_err(ScanCommandQueueError::Io)?;
         file.flush().map_err(ScanCommandQueueError::Io)?;
         file.sync_all().map_err(ScanCommandQueueError::Io)?;
         Ok(())

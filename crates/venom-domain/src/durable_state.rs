@@ -2278,8 +2278,9 @@ impl DurableState {
             .append(true)
             .open(&self.history_path)
             .map_err(DurableStateError::Io)?;
-        serde_json::to_writer(&mut file, event).map_err(DurableStateError::Serialize)?;
-        file.write_all(b"\n").map_err(DurableStateError::Io)?;
+        let mut bytes = serde_json::to_vec(event).map_err(DurableStateError::Serialize)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes).map_err(DurableStateError::Io)?;
         file.flush().map_err(DurableStateError::Io)?;
         file.sync_all().map_err(DurableStateError::Io)?;
         Ok(())

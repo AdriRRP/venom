@@ -219,6 +219,38 @@ Completed:
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
 74. `W162-api-health-degraded-observation`
+    Surface committed-write remote-observation failures as degraded API health
+    instead of silently preserving a healthy shell.
+75. `W163-contextual-audit-surface`
+    Turn contextual-risk explainability into a structured operator-facing audit
+    surface in the findings UI.
+76. `W164-inventory-source-arc-sharing`
+    Keep the live inventory as the shared snapshot source arc instead of
+    cloning the full inventory shape on each refresh.
+77. `W165-read-model-source-arc-sharing`
+    Keep the live finding read model as the shared snapshot source arc instead
+    of cloning the full projection on each refresh.
+78. `W166-http-write-lanes-and-remote-delta-refresh`
+    Partition Postgres HTTP writes into state/runtime/publication lanes, make
+    remote read refresh lane-aware, and remove eager release-board rebuilds.
+79. `W167-lane-write-consistency-barrier`
+    Prevent partitioned state/runtime/publication writes from operating on
+    stale cached projections while another durable state mutation can still
+    interleave.
+80. `W168-change-journal-gap-fallback`
+    Detect truncated change-journal gaps and fall back to a truthful full lane
+    refresh instead of reusing stale cached arcs behind a newer watermark.
+81. `W169-local-write-plane-partitioning`
+    Partition the local HTTP write plane with correctness-preserving lane
+    coordination so the file-backed profile is no longer forced through one
+    global mutable slot.
+82. `W170-remote-refresh-sub-lane-narrowing`
+    Narrow detached Postgres refreshes below coarse inventory and read-model
+    lanes so small remote changes do not reload unrelated tables.
+83. `W171-system-event-merge-cost-compaction`
+    Merge bounded recent system-event windows directly from retained ids and
+    shared arcs instead of rebuilding merged windows through repeated queries.
+74. `W162-api-health-degraded-observation`
     Surface post-write remote-watermark observation drift as explicit degraded
     API health instead of silently swallowing the operator signal.
 75. `W163-contextual-audit-surface`
