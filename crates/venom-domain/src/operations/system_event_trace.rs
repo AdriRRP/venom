@@ -660,11 +660,7 @@ mod tests {
         let right = SystemEventQueryIndex::from_newest_first(
             [
                 timed_event("event-002", 2, SystemEventKind::FindingSuppressed),
-                timed_event(
-                    "event-004",
-                    4,
-                    SystemEventKind::IntegrationEventPublished,
-                ),
+                timed_event("event-004", 4, SystemEventKind::IntegrationEventPublished),
             ]
             .iter(),
         );
