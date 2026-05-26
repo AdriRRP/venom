@@ -66,11 +66,13 @@ struct ServiceSlot {
 
 enum ApiServiceSet {
     Single(ServiceSlot),
-    Partitioned {
-        state: ServiceSlot,
-        runtime: ServiceSlot,
-        publication: ServiceSlot,
-    },
+    Partitioned(Box<PartitionedServiceSlots>),
+}
+
+struct PartitionedServiceSlots {
+    state: ServiceSlot,
+    runtime: ServiceSlot,
+    publication: ServiceSlot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -245,7 +247,7 @@ impl ApiState {
         let (read_snapshot_tx, read_snapshot_rx) = watch::channel(snapshot);
         Self {
             inner: Arc::new(ApiStateInner {
-                services: ApiServiceSet::Partitioned {
+                services: ApiServiceSet::Partitioned(Box::new(PartitionedServiceSlots {
                     state: ServiceSlot {
                         service: Mutex::new(Some(state_service)),
                         ready: Notify::new(),
@@ -258,7 +260,7 @@ impl ApiState {
                         service: Mutex::new(Some(publication_service)),
                         ready: Notify::new(),
                     },
-                },
+                })),
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -455,14 +457,10 @@ impl ApiState {
     fn slot_for_lane(&self, lane: ApiMutationLane) -> &ServiceSlot {
         match &self.inner.services {
             ApiServiceSet::Single(slot) => slot,
-            ApiServiceSet::Partitioned {
-                state,
-                runtime,
-                publication,
-            } => match lane {
-                ApiMutationLane::State => state,
-                ApiMutationLane::Runtime => runtime,
-                ApiMutationLane::Publication => publication,
+            ApiServiceSet::Partitioned(slots) => match lane {
+                ApiMutationLane::State => &slots.state,
+                ApiMutationLane::Runtime => &slots.runtime,
+                ApiMutationLane::Publication => &slots.publication,
             },
         }
     }
