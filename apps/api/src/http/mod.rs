@@ -171,8 +171,8 @@ impl SnapshotRefresh {
                 system_events,
                 system_event_source_cursor,
             } => {
-                let next =
-                    current.with_command_statuses_arc(command_statuses, command_status_source_cursor);
+                let next = current
+                    .with_command_statuses_arc(command_statuses, command_status_source_cursor);
                 Arc::new(
                     next.with_system_event_index_arc(system_events, system_event_source_cursor),
                 )
@@ -224,8 +224,7 @@ impl ApiState {
         let runtime_path = runtime_path.into();
         let state_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
             .map_err(|error| error.to_string())?;
-        let volatile_service =
-            ApiApplication::open_local(state_path, runtime_path)
+        let volatile_service = ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
         Ok(Self::new_partitioned(state_service, volatile_service))
     }
@@ -247,10 +246,7 @@ impl ApiState {
         Ok(Self::new_partitioned(state_service, volatile_service))
     }
 
-    fn new_partitioned(
-        state_service: ApiApplication,
-        volatile_service: ApiApplication,
-    ) -> Self {
+    fn new_partitioned(state_service: ApiApplication, volatile_service: ApiApplication) -> Self {
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
             .unwrap_or(0);

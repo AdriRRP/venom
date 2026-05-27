@@ -998,7 +998,9 @@ impl PostgresStore {
             })?;
             self.upsert_risk_acceptance_in_transaction(&mut tx, &finding, &acceptance)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres finding risk acceptance commit failed: {error}")
             })?;
@@ -1067,7 +1069,9 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres risk acceptance batch commit failed: {error}")
             })?;
@@ -1142,7 +1146,9 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres tag risk acceptance batch commit failed: {error}")
             })?;
@@ -1206,7 +1212,9 @@ impl PostgresStore {
                 .map_err(|error| format!("postgres finding reopen begin failed: {error}"))?;
             self.delete_governance_decision_rows_in_transaction(&mut tx, &finding)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres finding reopen commit failed: {error}"))?;
@@ -1263,7 +1271,9 @@ impl PostgresStore {
                 })?;
             self.upsert_suppression_in_transaction(&mut tx, &finding, &suppression)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres finding suppression commit failed: {error}"))?;
@@ -1333,7 +1343,9 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed_findings, &suppression)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
@@ -1409,7 +1421,9 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed, &suppression)
                 .await?;
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres tag suppression batch commit failed: {error}")
             })?;
@@ -1483,7 +1497,9 @@ impl PostgresStore {
                 self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
                     .await?;
             }
-            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
+            let system_event_cursor = self
+                .insert_system_event_in_transaction(&mut tx, &event)
+                .await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
@@ -1620,16 +1636,17 @@ impl PostgresStore {
         };
 
         let mut transaction = self.begin_transaction().await?;
-        let command_status_cursor = self.insert_pending_scan_commands(
-            &mut transaction,
-            std::slice::from_ref(&command_id),
-            std::slice::from_ref(&request),
-        )
-        .await
-        .map_err(|error| format!("postgres scan command insert failed: {error}"))?;
-        let system_event_cursor =
-            self.insert_system_events_in_transaction(&mut transaction, std::slice::from_ref(&event))
-                .await?;
+        let command_status_cursor = self
+            .insert_pending_scan_commands(
+                &mut transaction,
+                std::slice::from_ref(&command_id),
+                std::slice::from_ref(&request),
+            )
+            .await
+            .map_err(|error| format!("postgres scan command insert failed: {error}"))?;
+        let system_event_cursor = self
+            .insert_system_events_in_transaction(&mut transaction, std::slice::from_ref(&event))
+            .await?;
         self.commit_transaction(transaction).await?;
 
         Arc::make_mut(&mut self.order).push(command_id.clone());
@@ -1690,12 +1707,13 @@ impl PostgresStore {
             .collect::<Vec<_>>();
 
         let mut transaction = self.begin_transaction().await?;
-        let command_status_cursor =
-            self.insert_pending_scan_commands(&mut transaction, &command_ids, &batch.requests)
+        let command_status_cursor = self
+            .insert_pending_scan_commands(&mut transaction, &command_ids, &batch.requests)
             .await
             .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
-        let system_event_cursor =
-            self.insert_system_events_in_transaction(&mut transaction, &system_events).await?;
+        let system_event_cursor = self
+            .insert_system_events_in_transaction(&mut transaction, &system_events)
+            .await?;
         self.commit_transaction(transaction).await?;
 
         self.command_status_source_cursor =
@@ -1777,12 +1795,12 @@ impl PostgresStore {
         );
         let (command_status_cursor, system_event_cursor) = self
             .persist_due_collection_scans(
-            &command_ids,
-            &all_requests,
-            &schedule_rows,
-            &system_events,
-        )
-        .await?;
+                &command_ids,
+                &all_requests,
+                &schedule_rows,
+                &system_events,
+            )
+            .await?;
 
         self.apply_due_collection_scan_state(
             &due_scans,
@@ -2344,8 +2362,9 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
-        let system_event_cursor =
-            self.insert_system_event_in_transaction(&mut transaction, &system_event).await?;
+        let system_event_cursor = self
+            .insert_system_event_in_transaction(&mut transaction, &system_event)
+            .await?;
         self.commit_transaction(transaction).await?;
 
         self.remove_pending_integration_event(event_id);
@@ -2397,8 +2416,9 @@ impl PostgresStore {
         .map_err(|sql_error| {
             format!("postgres integration outbox failure update failed: {sql_error}")
         })?;
-        let system_event_cursor =
-            self.insert_system_event_in_transaction(&mut transaction, &system_event).await?;
+        let system_event_cursor = self
+            .insert_system_event_in_transaction(&mut transaction, &system_event)
+            .await?;
         self.commit_transaction(transaction).await?;
 
         self.system_event_source_cursor =
@@ -2441,11 +2461,12 @@ impl PostgresStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| format!("postgres scan command completion failed: {error}"))?;
-        let system_event_cursor = self.insert_system_events_in_transaction(
-            &mut transaction,
-            std::slice::from_ref(system_event),
-        )
-        .await?;
+        let system_event_cursor = self
+            .insert_system_events_in_transaction(
+                &mut transaction,
+                std::slice::from_ref(system_event),
+            )
+            .await?;
         self.commit_transaction(transaction).await?;
         Ok((
             u64::try_from(provider_report_row_id)
@@ -4167,8 +4188,7 @@ impl PostgresStore {
             freshness,
             status,
             updated_at_micros,
-        ) in
-            commands
+        ) in commands
         {
             let command_id = command_id.into_boxed_str();
             let status = parse_scan_command_status(&status)?;
@@ -4411,7 +4431,9 @@ impl PostgresStore {
             .begin()
             .await
             .map_err(|error| format!("postgres system event begin failed: {error}"))?;
-        let cursor = self.insert_system_event_in_transaction(&mut tx, event).await?;
+        let cursor = self
+            .insert_system_event_in_transaction(&mut tx, event)
+            .await?;
         tx.commit()
             .await
             .map_err(|error| format!("postgres system event commit failed: {error}"))?;
@@ -5266,7 +5288,10 @@ fn row_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> RowSourceCursor
     }
 }
 
-fn max_event_source_cursor(left: &EventSourceCursor, right: EventSourceCursor) -> EventSourceCursor {
+fn max_event_source_cursor(
+    left: &EventSourceCursor,
+    right: EventSourceCursor,
+) -> EventSourceCursor {
     if compare_source_cursor(
         left.unix_micros,
         left.tie_breaker.as_deref(),
