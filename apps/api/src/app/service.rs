@@ -1,7 +1,9 @@
 use crate::app::read_cursor::{EventSourceCursor, RowSourceCursor};
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
-pub use crate::infra::postgres_backend::{PostgresReadSnapshotLoader, PostgresRemoteChangeProbe};
+pub use crate::infra::postgres_backend::{
+    PostgresReadSnapshotBase, PostgresReadSnapshotLoader, PostgresRemoteChangeProbe,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -72,7 +74,7 @@ pub struct ApiReadSnapshot {
 
 impl ApiReadSnapshot {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
@@ -176,38 +178,16 @@ impl ApiReadSnapshot {
     }
 
     #[must_use]
-    pub(crate) fn inventory_arc(&self) -> Arc<ComponentInventory> {
-        Arc::clone(&self.inventory)
-    }
-
-    #[must_use]
-    pub(crate) fn read_model_arc(&self) -> Arc<FindingReadModel> {
-        Arc::clone(&self.read_model)
-    }
-
-    #[must_use]
-    pub(crate) const fn read_model_source_watermark(&self) -> u64 {
-        self.read_model_source_watermark
-    }
-
-    #[must_use]
-    pub(crate) fn system_event_index_arc(&self) -> Arc<SystemEventQueryIndex> {
-        Arc::clone(&self.system_event_index)
-    }
-
-    #[must_use]
-    pub(crate) fn system_event_source_cursor(&self) -> EventSourceCursor {
-        self.system_event_source_cursor.clone()
-    }
-
-    #[must_use]
-    pub(crate) fn command_statuses_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
-        Arc::clone(&self.command_statuses)
-    }
-
-    #[must_use]
-    pub(crate) fn command_status_source_cursor(&self) -> RowSourceCursor {
-        self.command_status_source_cursor.clone()
+    pub(crate) fn postgres_read_snapshot_base(&self) -> PostgresReadSnapshotBase {
+        PostgresReadSnapshotBase::new(
+            Arc::clone(&self.inventory),
+            Arc::clone(&self.read_model),
+            self.read_model_source_watermark,
+            Arc::clone(&self.system_event_index),
+            self.system_event_source_cursor.clone(),
+            Arc::clone(&self.command_statuses),
+            self.command_status_source_cursor.clone(),
+        )
     }
 
     /// Query the current system-event trace from the indexed read-side snapshot.
@@ -540,7 +520,7 @@ impl LocalStore {
                         state,
                         runtime,
                         state_windows: snapshot.state_windows.clone(),
-                        runtime_windows: runtime_windows.clone(),
+                        runtime_windows,
                         merged: Arc::clone(&merged),
                     });
                     return merged;
@@ -557,7 +537,7 @@ impl LocalStore {
                     *cache = Some(MergedSystemEventSnapshot {
                         state,
                         runtime,
-                        state_windows: state_windows.clone(),
+                        state_windows,
                         runtime_windows: snapshot.runtime_windows.clone(),
                         merged: Arc::clone(&merged),
                     });

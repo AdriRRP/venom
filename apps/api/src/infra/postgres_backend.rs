@@ -79,6 +79,17 @@ pub struct PostgresReadSnapshotLoader {
     change_watermark_table: Box<str>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PostgresReadSnapshotBase {
+    inventory: Arc<ComponentInventory>,
+    read_model: Arc<FindingReadModel>,
+    read_model_source_watermark: u64,
+    system_event_index: Arc<SystemEventQueryIndex>,
+    system_event_source_cursor: EventSourceCursor,
+    command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    command_status_source_cursor: RowSourceCursor,
+}
+
 #[derive(Debug)]
 pub struct LoadedPostgresReadSnapshot {
     pub inventory: Arc<ComponentInventory>,
@@ -89,6 +100,35 @@ pub struct LoadedPostgresReadSnapshot {
     pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     pub command_status_source_cursor: RowSourceCursor,
     pub change_watermark: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TailRefreshCursors {
+    command_status: RowSourceCursor,
+    system_event: EventSourceCursor,
+}
+
+impl PostgresReadSnapshotBase {
+    #[must_use]
+    pub fn new(
+        inventory: Arc<ComponentInventory>,
+        read_model: Arc<FindingReadModel>,
+        read_model_source_watermark: u64,
+        system_event_index: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: EventSourceCursor,
+        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: RowSourceCursor,
+    ) -> Self {
+        Self {
+            inventory,
+            read_model,
+            read_model_source_watermark,
+            system_event_index,
+            system_event_source_cursor,
+            command_statuses,
+            command_status_source_cursor,
+        }
+    }
 }
 
 const CHANGE_LANE_INVENTORY: i32 = 1;
@@ -1793,7 +1833,7 @@ impl PostgresStore {
             &all_requests,
             now_unix_ms,
         );
-        let (command_status_cursor, system_event_cursor) = self
+        let tail_cursors = self
             .persist_due_collection_scans(
                 &command_ids,
                 &all_requests,
@@ -1808,8 +1848,7 @@ impl PostgresStore {
             system_events,
             &command_ids,
             all_requests,
-            command_status_cursor,
-            system_event_cursor,
+            tail_cursors,
         );
 
         Ok(DrainDueCollectionScansResult {
@@ -2194,7 +2233,7 @@ impl PostgresStore {
         requests: &[ScanRequest],
         schedule_rows: &[(Box<str>, venom_domain::CollectionScanSchedule)],
         system_events: &[SystemEvent],
-    ) -> Result<(RowSourceCursor, EventSourceCursor), String> {
+    ) -> Result<TailRefreshCursors, String> {
         let mut transaction = self.begin_transaction().await?;
         let command_status_cursor = self
             .insert_pending_scan_commands(&mut transaction, command_ids, requests)
@@ -2205,7 +2244,10 @@ impl PostgresStore {
             .insert_system_events_in_transaction(&mut transaction, system_events)
             .await?;
         self.commit_transaction(transaction).await?;
-        Ok((command_status_cursor, system_event_cursor))
+        Ok(TailRefreshCursors {
+            command_status: command_status_cursor,
+            system_event: system_event_cursor,
+        })
     }
 
     fn apply_due_collection_scan_state(
@@ -2215,8 +2257,7 @@ impl PostgresStore {
         system_events: Vec<SystemEvent>,
         command_ids: &[Box<str>],
         requests: Vec<ScanRequest>,
-        command_status_cursor: RowSourceCursor,
-        system_event_cursor: EventSourceCursor,
+        tail_cursors: TailRefreshCursors,
     ) {
         for due_scan in due_scans {
             let _ = self
@@ -2247,10 +2288,12 @@ impl PostgresStore {
                 ScanCommandStatus::Pending,
             );
         }
-        self.command_status_source_cursor =
-            max_row_source_cursor(&self.command_status_source_cursor, command_status_cursor);
+        self.command_status_source_cursor = max_row_source_cursor(
+            &self.command_status_source_cursor,
+            tail_cursors.command_status,
+        );
         self.system_event_source_cursor =
-            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
+            max_event_source_cursor(&self.system_event_source_cursor, tail_cursors.system_event);
     }
 
     fn build_due_collection_system_events(
@@ -4668,24 +4711,18 @@ impl PostgresReadSnapshotLoader {
     pub async fn load(
         &self,
         since_change_watermark: u64,
-        base_inventory: Arc<ComponentInventory>,
-        base_read_model: Arc<FindingReadModel>,
-        base_read_model_source_watermark: u64,
-        base_system_event_index: Arc<SystemEventQueryIndex>,
-        base_system_event_source_cursor: EventSourceCursor,
-        base_command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
-        base_command_status_source_cursor: RowSourceCursor,
+        base: PostgresReadSnapshotBase,
     ) -> Result<LoadedPostgresReadSnapshot, String> {
         let change_watermark = self.current_change_watermark().await?;
         if change_watermark <= since_change_watermark {
             return Ok(LoadedPostgresReadSnapshot {
-                inventory: base_inventory,
-                read_model: base_read_model,
-                read_model_source_watermark: base_read_model_source_watermark,
-                system_event_index: base_system_event_index,
-                system_event_source_cursor: base_system_event_source_cursor,
-                command_statuses: base_command_statuses,
-                command_status_source_cursor: base_command_status_source_cursor,
+                inventory: base.inventory,
+                read_model: base.read_model,
+                read_model_source_watermark: base.read_model_source_watermark,
+                system_event_index: base.system_event_index,
+                system_event_source_cursor: base.system_event_source_cursor,
+                command_statuses: base.command_statuses,
+                command_status_source_cursor: base.command_status_source_cursor,
                 change_watermark,
             });
         }
@@ -4695,9 +4732,9 @@ impl PostgresReadSnapshotLoader {
             .await?;
         let inventory = {
             let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
-                self.load_inventory_core_snapshot(base_inventory).await?
+                self.load_inventory_core_snapshot(base.inventory).await?
             } else {
-                base_inventory
+                base.inventory
             };
             let inventory = if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
                 self.load_component_binding_inventory_snapshot(inventory)
@@ -4726,40 +4763,40 @@ impl PostgresReadSnapshotLoader {
         let read_model = if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
             self.load_read_model_snapshot(
                 Arc::clone(&inventory),
-                base_read_model,
-                base_read_model_source_watermark,
+                base.read_model,
+                base.read_model_source_watermark,
                 lane_mask,
             )
             .await?
         } else {
-            base_read_model
+            base.read_model
         };
         let read_model_source_watermark =
             if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
-                self.load_read_model_source_watermark(base_read_model_source_watermark, lane_mask)
+                self.load_read_model_source_watermark(base.read_model_source_watermark, lane_mask)
                     .await?
             } else {
-                base_read_model_source_watermark
+                base.read_model_source_watermark
             };
         let (system_event_index, system_event_source_cursor) =
             if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
                 self.load_system_event_index_snapshot(
-                    base_system_event_index,
-                    base_system_event_source_cursor,
+                    base.system_event_index,
+                    base.system_event_source_cursor,
                 )
                 .await?
             } else {
-                (base_system_event_index, base_system_event_source_cursor)
+                (base.system_event_index, base.system_event_source_cursor)
             };
         let (command_statuses, command_status_source_cursor) =
             if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
                 self.load_command_statuses_snapshot(
-                    base_command_statuses,
-                    base_command_status_source_cursor,
+                    base.command_statuses,
+                    base.command_status_source_cursor,
                 )
                 .await?
             } else {
-                (base_command_statuses, base_command_status_source_cursor)
+                (base.command_statuses, base.command_status_source_cursor)
             };
 
         Ok(LoadedPostgresReadSnapshot {
@@ -5274,14 +5311,14 @@ fn parse_system_event_row(row: SystemEventRow) -> Result<SystemEvent, String> {
     })
 }
 
-fn event_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> EventSourceCursor {
+const fn event_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> EventSourceCursor {
     EventSourceCursor {
         unix_micros,
         tie_breaker: Some(tie_breaker),
     }
 }
 
-fn row_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> RowSourceCursor {
+const fn row_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> RowSourceCursor {
     RowSourceCursor {
         unix_micros,
         tie_breaker: Some(tie_breaker),
@@ -5744,6 +5781,15 @@ mod tests {
         let base_system_event_source_cursor = backend.system_event_source_cursor();
         let base_command_statuses = backend.command_statuses_snapshot_arc();
         let base_command_status_source_cursor = backend.command_status_source_cursor();
+        let snapshot_base = PostgresReadSnapshotBase::new(
+            base_inventory,
+            Arc::clone(&base_read_model),
+            base_read_model_source_watermark,
+            base_system_event_index,
+            base_system_event_source_cursor,
+            base_command_statuses,
+            base_command_status_source_cursor,
+        );
 
         let mut writer = PostgresStore::open(&database_url, &schema)
             .await
@@ -5766,16 +5812,7 @@ mod tests {
             .expect("second provider report should persist");
 
         let refreshed_snapshot = loader
-            .load(
-                since_change_watermark,
-                base_inventory,
-                Arc::clone(&base_read_model),
-                base_read_model_source_watermark,
-                base_system_event_index,
-                base_system_event_source_cursor,
-                base_command_statuses,
-                base_command_status_source_cursor,
-            )
+            .load(since_change_watermark, snapshot_base)
             .await
             .expect("detached fresh read should load");
 

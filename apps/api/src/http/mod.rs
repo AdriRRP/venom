@@ -335,16 +335,11 @@ impl ApiState {
 
             if let Some(loader) = &self.inner.remote_read_snapshot_loader {
                 let current_snapshot = self.read_snapshot();
+                let snapshot_base = current_snapshot.postgres_read_snapshot_base();
                 let loaded = loader
                     .load(
                         self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
-                        current_snapshot.inventory_arc(),
-                        current_snapshot.read_model_arc(),
-                        current_snapshot.read_model_source_watermark(),
-                        current_snapshot.system_event_index_arc(),
-                        current_snapshot.system_event_source_cursor(),
-                        current_snapshot.command_statuses_arc(),
-                        current_snapshot.command_status_source_cursor(),
+                        snapshot_base,
                     )
                     .await
                     .map_err(ApiError::internal)?;
@@ -430,17 +425,12 @@ impl ApiState {
         }
 
         let current_snapshot = self.read_snapshot();
+        let snapshot_base = current_snapshot.postgres_read_snapshot_base();
         Some(
             loader
                 .load(
                     self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
-                    current_snapshot.inventory_arc(),
-                    current_snapshot.read_model_arc(),
-                    current_snapshot.read_model_source_watermark(),
-                    current_snapshot.system_event_index_arc(),
-                    current_snapshot.system_event_source_cursor(),
-                    current_snapshot.command_statuses_arc(),
-                    current_snapshot.command_status_source_cursor(),
+                    snapshot_base,
                 )
                 .await
                 .map(|loaded| {
