@@ -3978,17 +3978,21 @@ mod tests {
             .expect("state mutation should persist");
 
         let _second = local.system_event_index_snapshot_arc();
-        let cache = local
-            .merged_system_event_snapshot_cache
-            .lock()
-            .expect("merged cache should not be poisoned");
-        let snapshot = cache
-            .as_ref()
-            .expect("merged cache should be refreshed after state change");
-        assert!(std::sync::Arc::ptr_eq(&first_cache, &snapshot.runtime));
-        assert_eq!(
-            snapshot.runtime_windows.recent_events.len(),
-            snapshot.runtime.recent_windows().recent_events.len()
-        );
+        let runtime_cache = {
+            let cache = local
+                .merged_system_event_snapshot_cache
+                .lock()
+                .expect("merged cache should not be poisoned");
+            let snapshot = cache
+                .as_ref()
+                .expect("merged cache should be refreshed after state change");
+            (
+                snapshot.runtime.clone(),
+                snapshot.runtime_windows.recent_events.len(),
+                snapshot.runtime.recent_windows().recent_events.len(),
+            )
+        };
+        assert!(std::sync::Arc::ptr_eq(&first_cache, &runtime_cache.0));
+        assert_eq!(runtime_cache.1, runtime_cache.2);
     }
 }
