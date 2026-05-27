@@ -10,7 +10,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone)]
 pub struct ScanCommandQueue {
     history_path: PathBuf,
+    replayed_bytes: u64,
+    replayed_lines: usize,
     commands: BTreeMap<Box<str>, ScanCommandRecord>,
     order: Vec<Box<str>>,
     pending_integration_events: VecDeque<PendingIntegrationEvent>,
@@ -51,6 +53,8 @@ impl ScanCommandQueue {
 
         let mut runtime = Self {
             history_path,
+            replayed_bytes: 0,
+            replayed_lines: 0,
             commands: BTreeMap::new(),
             order: Vec::new(),
             pending_integration_events: VecDeque::new(),
@@ -556,29 +560,78 @@ impl ScanCommandQueue {
         Ok(())
     }
 
+    /// Replay only the durable queue history appended since the last local rebuild or tail sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanCommandQueueError`] when the queue tail cannot be read,
+    /// parsed, or applied, or when a truncated queue history forces a full
+    /// rebuild that also fails.
+    pub fn sync_from_history_tail(&mut self) -> Result<(), ScanCommandQueueError> {
+        let metadata = std::fs::metadata(&self.history_path).map_err(ScanCommandQueueError::Io)?;
+        if metadata.len() < self.replayed_bytes {
+            self.rebuild_from_history()?;
+            return Ok(());
+        }
+        if metadata.len() == self.replayed_bytes {
+            return Ok(());
+        }
+
+        let mut file = File::open(&self.history_path).map_err(ScanCommandQueueError::Io)?;
+        file.seek(SeekFrom::Start(self.replayed_bytes))
+            .map_err(ScanCommandQueueError::Io)?;
+        let mut reader = BufReader::new(file);
+        self.apply_history_tail_from_reader(&mut reader, self.replayed_lines)?;
+        Ok(())
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), ScanCommandQueueError> {
         let file = File::open(&self.history_path).map_err(ScanCommandQueueError::Io)?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         self.commands.clear();
         self.order.clear();
         self.pending_integration_events.clear();
         self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
+        self.replayed_bytes = 0;
+        self.replayed_lines = 0;
+        self.apply_history_tail_from_reader(&mut reader, 0)?;
+        Ok(())
+    }
 
-        for (line_index, line) in reader.lines().enumerate() {
-            let line = line.map_err(ScanCommandQueueError::Io)?;
+    fn apply_history_tail_from_reader(
+        &mut self,
+        reader: &mut BufReader<File>,
+        starting_line: usize,
+    ) -> Result<(), ScanCommandQueueError> {
+        let mut line = String::new();
+        let mut line_index = starting_line;
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_line(&mut line)
+                .map_err(ScanCommandQueueError::Io)?;
+            if bytes_read == 0 {
+                break;
+            }
+            self.replayed_bytes +=
+                u64::try_from(bytes_read).map_err(|_| ScanCommandQueueError::CorruptHistory {
+                    line: line_index + 1,
+                    reason: "history line byte length out of range".into(),
+                })?;
+            line_index += 1;
+            self.replayed_lines = line_index;
             if line.trim().is_empty() {
                 continue;
             }
             let event = serde_json::from_str::<DurableScanEvent>(&line).map_err(|error| {
                 ScanCommandQueueError::CorruptHistory {
-                    line: line_index + 1,
+                    line: line_index,
                     reason: error.to_string().into_boxed_str(),
                 }
             })?;
-            self.apply_event(event, line_index + 1)?;
+            self.apply_event(event, line_index)?;
         }
-
         Ok(())
     }
 
@@ -939,7 +992,7 @@ impl ScanCommandQueue {
         Ok(())
     }
 
-    fn append_event(&self, event: &DurableScanEvent) -> Result<(), ScanCommandQueueError> {
+    fn append_event(&mut self, event: &DurableScanEvent) -> Result<(), ScanCommandQueueError> {
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.history_path)
@@ -949,6 +1002,12 @@ impl ScanCommandQueue {
         file.write_all(&bytes).map_err(ScanCommandQueueError::Io)?;
         file.flush().map_err(ScanCommandQueueError::Io)?;
         file.sync_all().map_err(ScanCommandQueueError::Io)?;
+        self.replayed_bytes +=
+            u64::try_from(bytes.len()).map_err(|_| ScanCommandQueueError::CorruptHistory {
+                line: self.replayed_lines + 1,
+                reason: "history append byte length out of range".into(),
+            })?;
+        self.replayed_lines += 1;
         Ok(())
     }
 
@@ -1311,6 +1370,28 @@ mod tests {
             )
             .expect("planner should create request");
         (state, request)
+    }
+
+    #[test]
+    fn tail_sync_replays_only_appended_scan_events() {
+        let path = temp_path("scan-queue-tail-sync");
+        let (state, request) = durable_inventory();
+        let _ = state;
+        let mut writer = ScanCommandQueue::open(&path).expect("writer queue should open");
+        let mut follower = ScanCommandQueue::open(&path).expect("follower queue should open");
+
+        let enqueued = writer
+            .enqueue(request)
+            .expect("enqueue should append one command");
+        follower
+            .sync_from_history_tail()
+            .expect("tail sync should apply appended queue event");
+
+        assert_eq!(follower.pending_commands(), 1);
+        assert_eq!(
+            follower.command_status(enqueued.command_id.as_ref()),
+            Some(ScanCommandStatus::Pending)
+        );
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -41,6 +41,8 @@ use time::format_description::well_known::Rfc3339;
 #[derive(Debug, Clone)]
 pub struct DurableState {
     history_path: PathBuf,
+    replayed_bytes: u64,
+    replayed_lines: usize,
     ingestion: FindingIngestion,
     governance: FindingGovernance,
     read_model: Arc<FindingReadModel>,
@@ -72,6 +74,8 @@ impl DurableState {
 
         let mut state = Self {
             history_path,
+            replayed_bytes: 0,
+            replayed_lines: 0,
             ingestion: FindingIngestion::default(),
             governance: FindingGovernance::default(),
             read_model: Arc::new(FindingReadModel::default()),
@@ -1255,9 +1259,35 @@ impl DurableState {
         })
     }
 
+    /// Replay only the durable history appended since the last local rebuild or tail sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the history tail cannot be read,
+    /// parsed, or applied, or when a truncated history forces a full rebuild
+    /// that also fails.
+    pub fn sync_from_history_tail(&mut self) -> Result<(), DurableStateError> {
+        let metadata = std::fs::metadata(&self.history_path).map_err(DurableStateError::Io)?;
+        if metadata.len() < self.replayed_bytes {
+            self.rebuild_from_history()?;
+            return Ok(());
+        }
+        if metadata.len() == self.replayed_bytes {
+            return Ok(());
+        }
+
+        let mut file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
+        file.seek(SeekFrom::Start(self.replayed_bytes))
+            .map_err(DurableStateError::Io)?;
+        let mut reader = BufReader::new(file);
+        self.apply_history_tail_from_reader(&mut reader, self.replayed_lines)?;
+        self.refresh_read_snapshot_caches();
+        Ok(())
+    }
+
     fn rebuild_from_history(&mut self) -> Result<(), DurableStateError> {
         let file = File::open(&self.history_path).map_err(DurableStateError::Io)?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         self.ingestion = FindingIngestion::default();
         self.governance = FindingGovernance::default();
         self.read_model = Arc::new(FindingReadModel::default());
@@ -1265,22 +1295,44 @@ impl DurableState {
         self.applied_scan_commands.clear();
         self.pending_integration_events.clear();
         self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
+        self.replayed_bytes = 0;
+        self.replayed_lines = 0;
+        self.apply_history_tail_from_reader(&mut reader, 0)?;
+        self.refresh_read_snapshot_caches();
+        Ok(())
+    }
 
-        for (line_index, line) in reader.lines().enumerate() {
-            let line = line.map_err(DurableStateError::Io)?;
+    fn apply_history_tail_from_reader(
+        &mut self,
+        reader: &mut BufReader<File>,
+        starting_line: usize,
+    ) -> Result<(), DurableStateError> {
+        let mut line = String::new();
+        let mut line_index = starting_line;
+        loop {
+            line.clear();
+            let bytes_read = reader.read_line(&mut line).map_err(DurableStateError::Io)?;
+            if bytes_read == 0 {
+                break;
+            }
+            self.replayed_bytes +=
+                u64::try_from(bytes_read).map_err(|_| DurableStateError::CorruptHistory {
+                    line: line_index + 1,
+                    reason: "history line byte length out of range".into(),
+                })?;
+            line_index += 1;
+            self.replayed_lines = line_index;
             if line.trim().is_empty() {
                 continue;
             }
             let event = serde_json::from_str::<DurableEvent>(&line).map_err(|error| {
                 DurableStateError::CorruptHistory {
-                    line: line_index + 1,
+                    line: line_index,
                     reason: error.to_string().into_boxed_str(),
                 }
             })?;
-            self.apply_event(event, line_index + 1)?;
+            self.apply_event(event, line_index)?;
         }
-
-        self.refresh_read_snapshot_caches();
         Ok(())
     }
 
@@ -2273,7 +2325,7 @@ impl DurableState {
         }
     }
 
-    fn append_event(&self, event: &DurableEvent) -> Result<(), DurableStateError> {
+    fn append_event(&mut self, event: &DurableEvent) -> Result<(), DurableStateError> {
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.history_path)
@@ -2283,6 +2335,12 @@ impl DurableState {
         file.write_all(&bytes).map_err(DurableStateError::Io)?;
         file.flush().map_err(DurableStateError::Io)?;
         file.sync_all().map_err(DurableStateError::Io)?;
+        self.replayed_bytes +=
+            u64::try_from(bytes.len()).map_err(|_| DurableStateError::CorruptHistory {
+                line: self.replayed_lines + 1,
+                reason: "history append byte length out of range".into(),
+            })?;
+        self.replayed_lines += 1;
         Ok(())
     }
 
@@ -2940,6 +2998,42 @@ mod tests {
                 .read_model()
                 .active_finding_count("component:payments-api", &artifact()),
             1
+        );
+    }
+
+    #[test]
+    fn tail_sync_applies_only_appended_history() {
+        let path = temp_path("durable-state-tail-sync");
+        let mut writer = DurableState::open(&path).expect("writer state should open");
+        let mut follower = DurableState::open(&path).expect("follower state should open");
+
+        let _ = writer
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("registration should persist");
+        follower
+            .sync_from_history_tail()
+            .expect("tail sync should apply appended registration");
+        assert!(
+            follower
+                .ingestion()
+                .inventory()
+                .is_managed("component:payments-api")
+        );
+
+        let _ = writer
+            .bind_artifact("component:payments-api", artifact())
+            .expect("artifact binding should persist");
+        follower
+            .sync_from_history_tail()
+            .expect("tail sync should apply appended artifact binding");
+        assert!(
+            follower
+                .ingestion()
+                .inventory()
+                .component_owns_artifact("component:payments-api", &artifact())
         );
     }
 

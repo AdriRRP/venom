@@ -245,6 +245,14 @@ impl FindingReadModel {
     }
 
     #[must_use]
+    pub fn clone_active_only(&self) -> Self {
+        Self {
+            active: self.active.clone(),
+            decisions: BTreeMap::new(),
+        }
+    }
+
+    #[must_use]
     pub fn active_finding_count(&self, component_key: &str, artifact: &ArtifactRef) -> usize {
         self.active
             .get(&TrackedArtifactKey::new(

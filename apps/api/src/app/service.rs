@@ -643,19 +643,23 @@ impl ApiApplication {
         }
     }
 
-    /// Reload one local file-backed application view from durable history.
+    /// Refresh one local file-backed application view from appended durable history.
     ///
     /// # Errors
     ///
     /// Returns [`ApiApplicationError`] when the local durable state or runtime
     /// cannot be reopened from disk.
-    pub fn reload_local_from_disk(&mut self) -> Result<(), ApiApplicationError> {
+    pub fn refresh_local_from_disk(&mut self) -> Result<(), ApiApplicationError> {
         match &mut self.backend {
             ApiStore::Local(local) => {
-                local.state = DurableState::open(local.state_path.clone())
-                    .map_err(|error| ApiApplicationError::State(error.to_string()))?;
-                local.runtime = ScanCommandQueue::open(local.runtime_path.clone())
-                    .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                if local.state.sync_from_history_tail().is_err() {
+                    local.state = DurableState::open(local.state_path.clone())
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                }
+                if local.runtime.sync_from_history_tail().is_err() {
+                    local.runtime = ScanCommandQueue::open(local.runtime_path.clone())
+                        .map_err(|error| ApiApplicationError::State(error.to_string()))?;
+                }
                 *local
                     .merged_system_event_snapshot_cache
                     .lock()
@@ -3728,5 +3732,97 @@ fn merge_publish_results(
     aggregate.pending_remaining = update.pending_remaining;
     if update.last_failure.is_some() {
         aggregate.last_failure = update.last_failure;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ApiApplication, ComponentRegistrationRequest, RequestScanCommand};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(name: &str, suffix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time should be after unix epoch")
+            .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "venom-api-service-{name}-{suffix}-{nanos}-{counter}.jsonl"
+        ))
+    }
+
+    #[tokio::test]
+    async fn local_stale_lane_refresh_uses_tail_sync_for_inventory_changes() {
+        let state_path = temp_path("tail-sync", "state");
+        let runtime_path = temp_path("tail-sync", "runtime");
+        let mut writer =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("writer should open");
+        let mut follower =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("follower should open");
+
+        writer
+            .register_component(ComponentRegistrationRequest {
+                component_key: "component:payments-api".to_owned(),
+                name: "Payments API".to_owned(),
+            })
+            .await
+            .expect("component registration should persist");
+
+        follower
+            .refresh_local_from_disk()
+            .expect("follower should tail-sync local state");
+
+        assert!(
+            follower
+                .inventory_snapshot_arc()
+                .is_managed("component:payments-api")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_stale_lane_refresh_uses_tail_sync_for_runtime_changes() {
+        let state_path = temp_path("tail-sync-runtime", "state");
+        let runtime_path = temp_path("tail-sync-runtime", "runtime");
+        let mut writer =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("writer should open");
+        let mut follower =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("follower should open");
+
+        writer
+            .register_component(ComponentRegistrationRequest {
+                component_key: "component:payments-api".to_owned(),
+                name: "Payments API".to_owned(),
+            })
+            .await
+            .expect("component registration should persist");
+        writer
+            .bind_artifact(
+                "component:payments-api",
+                super::BindArtifactRequest {
+                    artifact_kind: "container-image".to_owned(),
+                    artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                },
+            )
+            .await
+            .expect("artifact binding should persist");
+        writer
+            .request_scan(RequestScanCommand {
+                component_key: "component:payments-api".to_owned(),
+                artifact_kind: "container-image".to_owned(),
+                artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                freshness: "deterministic".to_owned(),
+            })
+            .await
+            .expect("scan request should persist");
+
+        follower
+            .refresh_local_from_disk()
+            .expect("follower should tail-sync local runtime");
+
+        let statuses = follower.command_statuses_snapshot_arc();
+        assert_eq!(statuses.len(), 1);
     }
 }

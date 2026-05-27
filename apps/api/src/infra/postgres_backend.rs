@@ -85,15 +85,22 @@ pub struct LoadedPostgresReadSnapshot {
 }
 
 const CHANGE_LANE_INVENTORY: i32 = 1;
-const CHANGE_LANE_READ_MODEL: i32 = 1 << 1;
-const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 2;
-const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 3;
-const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 4;
-const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 5;
-const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 6;
-const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 7;
+const CHANGE_LANE_COMPONENT_BINDINGS: i32 = 1 << 1;
+const CHANGE_LANE_COLLECTIONS: i32 = 1 << 2;
+const CHANGE_LANE_READ_MODEL: i32 = 1 << 3;
+const CHANGE_LANE_GOVERNANCE: i32 = 1 << 4;
+const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 5;
+const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 6;
+const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 7;
+const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 8;
+const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 9;
+const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 10;
+const POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY
+    | CHANGE_LANE_COMPONENT_BINDINGS
+    | CHANGE_LANE_COLLECTIONS
     | CHANGE_LANE_READ_MODEL
+    | CHANGE_LANE_GOVERNANCE
     | CHANGE_LANE_COMMAND_STATUSES
     | CHANGE_LANE_SYSTEM_EVENTS
     | CHANGE_LANE_INTEGRATION_OUTBOX
@@ -160,7 +167,7 @@ impl PostgresStore {
     pub async fn open(database_url: &str, schema: &str) -> Result<Self, String> {
         let names = TableNames::new(schema)?;
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(POSTGRES_POOL_MAX_CONNECTIONS)
             .connect(database_url)
             .await
             .map_err(|error| format!("postgres connect failed: {error}"))?;
@@ -222,6 +229,12 @@ impl PostgresStore {
         if lane_mask & CHANGE_LANE_INVENTORY != 0 {
             self.refresh_inventory_from_remote().await?;
         } else {
+            if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
+                self.refresh_component_bindings_from_remote().await?;
+            }
+            if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
+                self.refresh_collections_from_remote().await?;
+            }
             if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
                 self.refresh_collection_scan_schedules_from_remote().await?;
             }
@@ -229,8 +242,8 @@ impl PostgresStore {
                 self.refresh_provider_runtime_configs_from_remote().await?;
             }
         }
-        if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
-            self.refresh_read_model_from_remote().await?;
+        if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
+            self.refresh_read_model_from_remote(lane_mask).await?;
         }
         if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
             self.refresh_command_statuses_from_remote().await?;
@@ -2600,19 +2613,19 @@ impl PostgresStore {
             self.names.change_watermark,
             CHANGE_LANE_INVENTORY,
             CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_COMPONENT_BINDINGS,
             CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_COMPONENT_BINDINGS,
+            CHANGE_LANE_COLLECTIONS,
+            CHANGE_LANE_COLLECTIONS,
+            CHANGE_LANE_COLLECTIONS,
             CHANGE_LANE_COLLECTION_SCHEDULES,
+            CHANGE_LANE_COMPONENT_BINDINGS,
             CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS,
             CHANGE_LANE_INTEGRATION_RUNTIME,
             CHANGE_LANE_READ_MODEL,
-            CHANGE_LANE_READ_MODEL,
-            CHANGE_LANE_READ_MODEL,
+            CHANGE_LANE_GOVERNANCE,
+            CHANGE_LANE_GOVERNANCE,
             CHANGE_LANE_COMMAND_STATUSES,
             CHANGE_LANE_INTEGRATION_OUTBOX,
             CHANGE_LANE_SYSTEM_EVENTS,
@@ -3234,6 +3247,33 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn refresh_component_bindings_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        let mut inventory = Arc::unwrap_or_clone(self.ingestion.inventory_arc());
+        inventory.reset_component_bindings_for_rebuild();
+        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.load_component_context_profiles().await?;
+        backend.load_component_tag_memberships().await?;
+        backend.load_artifact_bindings().await?;
+        self.ingestion = backend.ingestion;
+        self.refresh_inventory_snapshot_cache();
+        Ok(())
+    }
+
+    async fn refresh_collections_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        let mut inventory = Arc::unwrap_or_clone(self.ingestion.inventory_arc());
+        inventory.reset_collections_for_rebuild();
+        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.load_collections().await?;
+        backend.load_collection_sources().await?;
+        backend.load_collection_memberships().await?;
+        backend.load_collection_scan_schedules().await?;
+        self.ingestion = backend.ingestion;
+        self.refresh_inventory_snapshot_cache();
+        Ok(())
+    }
+
     async fn refresh_collection_scan_schedules_from_remote(&mut self) -> Result<(), String> {
         self.load_collection_scan_schedules().await?;
         self.refresh_inventory_snapshot_cache();
@@ -3246,12 +3286,26 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn refresh_read_model_from_remote(&mut self) -> Result<(), String> {
+    async fn refresh_read_model_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
-        backend.load_provider_reports().await?;
-        backend.load_finding_risk_acceptances().await?;
-        backend.load_finding_suppressions().await?;
+        backend.governance = if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            FindingGovernance::default()
+        } else {
+            self.governance.clone()
+        };
+        backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            self.read_model.as_ref().clone_active_only()
+        } else {
+            self.read_model.as_ref().clone()
+        });
+        if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
+            backend.load_provider_reports().await?;
+        }
+        if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            backend.load_finding_risk_acceptances().await?;
+            backend.load_finding_suppressions().await?;
+        }
         let read_model = backend.read_model_arc();
         self.governance = backend.governance;
         self.read_model = read_model;
@@ -4302,11 +4356,22 @@ impl PostgresReadSnapshotLoader {
         let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
             self.load_inventory_snapshot().await?
         } else {
-            let inventory = if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
-                self.load_collection_schedule_inventory_snapshot(base_inventory)
+            let inventory = if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
+                self.load_component_binding_inventory_snapshot(base_inventory)
                     .await?
             } else {
                 base_inventory
+            };
+            let inventory = if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
+                self.load_collection_inventory_snapshot(inventory).await?
+            } else {
+                inventory
+            };
+            let inventory = if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
+                self.load_collection_schedule_inventory_snapshot(inventory)
+                    .await?
+            } else {
+                inventory
             };
             if lane_mask & CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS != 0 {
                 self.load_provider_runtime_inventory_snapshot(inventory)
@@ -4315,8 +4380,8 @@ impl PostgresReadSnapshotLoader {
                 inventory
             }
         };
-        let read_model = if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
-            self.load_read_model_snapshot(Arc::clone(&inventory))
+        let read_model = if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
+            self.load_read_model_snapshot(Arc::clone(&inventory), base_read_model, lane_mask)
                 .await?
         } else {
             base_read_model
@@ -4418,6 +4483,37 @@ impl PostgresReadSnapshotLoader {
         Ok(backend.inventory_snapshot_arc())
     }
 
+    async fn load_component_binding_inventory_snapshot(
+        &self,
+        inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        let mut inventory = Arc::unwrap_or_clone(inventory);
+        inventory.reset_component_bindings_for_rebuild();
+        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.load_component_context_profiles().await?;
+        backend.load_component_tag_memberships().await?;
+        backend.load_artifact_bindings().await?;
+        backend.refresh_inventory_snapshot_cache();
+        Ok(backend.inventory_snapshot_arc())
+    }
+
+    async fn load_collection_inventory_snapshot(
+        &self,
+        inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        let mut inventory = Arc::unwrap_or_clone(inventory);
+        inventory.reset_collections_for_rebuild();
+        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.load_collections().await?;
+        backend.load_collection_sources().await?;
+        backend.load_collection_memberships().await?;
+        backend.load_collection_scan_schedules().await?;
+        backend.refresh_inventory_snapshot_cache();
+        Ok(backend.inventory_snapshot_arc())
+    }
+
     async fn load_collection_schedule_inventory_snapshot(
         &self,
         inventory: Arc<ComponentInventory>,
@@ -4443,12 +4539,28 @@ impl PostgresReadSnapshotLoader {
     async fn load_read_model_snapshot(
         &self,
         inventory: Arc<ComponentInventory>,
+        base_read_model: Arc<FindingReadModel>,
+        lane_mask: i32,
     ) -> Result<Arc<FindingReadModel>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
-        backend.load_provider_reports().await?;
-        backend.load_finding_risk_acceptances().await?;
-        backend.load_finding_suppressions().await?;
+        backend.governance = if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            FindingGovernance::default()
+        } else {
+            backend.governance
+        };
+        backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            base_read_model.as_ref().clone_active_only()
+        } else {
+            base_read_model.as_ref().clone()
+        });
+        if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
+            backend.load_provider_reports().await?;
+        }
+        if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
+            backend.load_finding_risk_acceptances().await?;
+            backend.load_finding_suppressions().await?;
+        }
         backend.refresh_read_model_snapshot_cache();
         Ok(backend.read_model_snapshot_arc())
     }
