@@ -525,7 +525,7 @@ impl LocalStore {
     }
 }
 
-fn merge_system_event_window_totals(
+const fn merge_system_event_window_totals(
     left: &venom_domain::SystemEventWindowTotals,
     right: &venom_domain::SystemEventWindowTotals,
 ) -> venom_domain::SystemEventWindowTotals {
