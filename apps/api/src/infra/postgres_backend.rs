@@ -924,11 +924,10 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.provider_report_row_high_watermark = self
-            .provider_report_row_high_watermark
-            .max(u64::try_from(provider_report_row_id).map_err(|_| {
-                "postgres provider report id out of range".to_owned()
-            })?);
+        self.provider_report_row_high_watermark = self.provider_report_row_high_watermark.max(
+            u64::try_from(provider_report_row_id)
+                .map_err(|_| "postgres provider report id out of range".to_owned())?,
+        );
         self.refresh_read_model_and_release_board_snapshot_caches();
         Arc::make_mut(&mut self.pending_integration_events).push(pending_integration_event);
         Ok(change_set)
@@ -2030,18 +2029,19 @@ impl PostgresStore {
         };
         let provider_report_row_id = self
             .persist_completed_scan_command(
-            command_id.as_ref(),
-            &report,
-            &finding_changes_event,
-            &scan_command_completed_event,
-            &system_event,
-        )
-        .await?;
+                command_id.as_ref(),
+                &report,
+                &finding_changes_event,
+                &scan_command_completed_event,
+                &system_event,
+            )
+            .await?;
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
-        self.provider_report_row_high_watermark =
-            self.provider_report_row_high_watermark.max(provider_report_row_id);
+        self.provider_report_row_high_watermark = self
+            .provider_report_row_high_watermark
+            .max(provider_report_row_id);
         self.refresh_read_model_and_release_board_snapshot_caches();
         let completed = CompletedScanCommand {
             command_id,
@@ -3841,14 +3841,18 @@ impl PostgresStore {
         Ok(())
     }
 
-    fn apply_provider_report_row(&mut self, id: i64, report: &ProviderScanReport) -> Result<(), String> {
-        self.ingestion
-            .replay_scan_report(report)
-            .map_err(|error| format!("postgres provider report replay failed: {}", error.as_str()))?;
+    fn apply_provider_report_row(
+        &mut self,
+        id: i64,
+        report: &ProviderScanReport,
+    ) -> Result<(), String> {
+        self.ingestion.replay_scan_report(report).map_err(|error| {
+            format!("postgres provider report replay failed: {}", error.as_str())
+        })?;
         self.read_model_mut().record_scan_report(report);
-        self.provider_report_row_high_watermark = self
-            .provider_report_row_high_watermark
-            .max(u64::try_from(id).map_err(|_| "postgres provider report id out of range".to_owned())?);
+        self.provider_report_row_high_watermark = self.provider_report_row_high_watermark.max(
+            u64::try_from(id).map_err(|_| "postgres provider report id out of range".to_owned())?,
+        );
         Ok(())
     }
 
@@ -4528,14 +4532,14 @@ impl PostgresReadSnapshotLoader {
                 base_read_model_source_watermark,
                 lane_mask,
             )
-                .await?
+            .await?
         } else {
             base_read_model
         };
         let read_model_source_watermark =
             if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
                 self.load_read_model_source_watermark(base_read_model_source_watermark, lane_mask)
-                .await?
+                    .await?
             } else {
                 base_read_model_source_watermark
             };
@@ -4735,7 +4739,8 @@ impl PostgresReadSnapshotLoader {
         .await
         .map_err(|error| format!("postgres provider report watermark read failed: {error}"))?
         .unwrap_or_default();
-        u64::try_from(max_id).map_err(|_| "postgres provider report watermark out of range".to_owned())
+        u64::try_from(max_id)
+            .map_err(|_| "postgres provider report watermark out of range".to_owned())
     }
 
     async fn load_system_event_index_snapshot(&self) -> Result<Arc<SystemEventQueryIndex>, String> {
@@ -5294,7 +5299,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detached_postgres_read_snapshot_advances_read_model_source_watermark_for_new_reports() {
+    async fn detached_postgres_read_snapshot_advances_read_model_source_watermark_for_new_reports()
+    {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
@@ -5348,14 +5354,8 @@ mod tests {
             SystemTime::UNIX_EPOCH,
             EvidenceFreshness::Deterministic,
             vec![
-                ReportedFinding::new(
-                    "CVE-2026-0001",
-                    PackageCoordinate::new("openssl", "3.0.0"),
-                ),
-                ReportedFinding::new(
-                    "CVE-2026-0002",
-                    PackageCoordinate::new("libxml2", "2.11.0"),
-                ),
+                ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0")),
+                ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0")),
             ],
         )
         .with_knowledge_revision("fixture-db:2026-05-17");

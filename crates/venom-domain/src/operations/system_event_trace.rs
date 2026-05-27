@@ -641,8 +641,13 @@ fn collect_category_recent_events(
     slots: &[u16],
     events: &[RetainedSystemEvent],
 ) -> Vec<Arc<SystemEvent>> {
-    slots.iter()
-        .filter_map(|slot| events.get(usize::from(*slot)).map(|entry| Arc::clone(&entry.event)))
+    slots
+        .iter()
+        .filter_map(|slot| {
+            events
+                .get(usize::from(*slot))
+                .map(|entry| Arc::clone(&entry.event))
+        })
         .collect()
 }
 
