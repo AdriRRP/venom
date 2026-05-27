@@ -223,15 +223,15 @@ impl ApiState {
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
         let pool =
             crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
-        let state_service = ApiApplication::open_postgres_with_pool(pool.clone(), schema)
-            .await
-            .map_err(|error| error.to_string())?;
-        let runtime_service = ApiApplication::open_postgres_with_pool(pool.clone(), schema)
-            .await
-            .map_err(|error| error.to_string())?;
-        let publication_service = ApiApplication::open_postgres_with_pool(pool, schema)
-            .await
-            .map_err(|error| error.to_string())?;
+        let state_backend =
+            crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
+        let runtime_backend =
+            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
+        let publication_backend =
+            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
+        let state_service = ApiApplication::from_postgres_store(state_backend);
+        let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
+        let publication_service = ApiApplication::from_postgres_store(publication_backend);
         Ok(Self::new_partitioned(
             state_service,
             runtime_service,
@@ -578,15 +578,6 @@ impl ApiState {
             .await
     }
 
-    async fn mutate_runtime<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
-    where
-        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
-        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
-    {
-        self.mutate_on_lane(ApiMutationLane::Runtime, true, operation, refresh)
-            .await
-    }
-
     async fn mutate_runtime_postgres_relaxed<T, F, R>(
         &self,
         operation: F,
@@ -799,7 +790,7 @@ impl ApiState {
 
         for _ in 0..max_collections {
             let step = self
-                .mutate_runtime(
+                .mutate_runtime_postgres_relaxed(
                     |service| {
                         let request = DrainCollectionScanWorkerCommand {
                             max_collections: Some(1),
@@ -1068,7 +1059,7 @@ async fn register_component(
     Json(request): Json<ComponentRegistrationRequest>,
 ) -> Result<Json<RegisterComponentResponse>, ApiError> {
     let response = state
-        .mutate_runtime(
+        .mutate(
             |service| {
                 Box::pin(async move {
                     service
@@ -1088,7 +1079,7 @@ async fn register_component_tag(
     Json(request): Json<ComponentTagRegistrationRequest>,
 ) -> Result<Json<RegisterComponentTagResponse>, ApiError> {
     let response = state
-        .mutate_runtime(
+        .mutate(
             |service| {
                 Box::pin(async move {
                     service
@@ -1116,7 +1107,7 @@ async fn register_context_profile(
     Json(request): Json<ContextProfileRegistrationRequest>,
 ) -> Result<Json<RegisterContextProfileResponse>, ApiError> {
     let response = state
-        .mutate_runtime(
+        .mutate(
             |service| {
                 Box::pin(async move {
                     service
@@ -1848,6 +1839,7 @@ mod tests {
     };
     use serde_json::json;
     use sqlx::PgPool;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
@@ -1906,6 +1898,48 @@ mod tests {
         assert!(!ApiMutationLane::Publication.requires_state_read_barrier());
         assert!(!ApiMutationLane::Publication.requires_state_write_barrier());
         assert!(ApiMutationLane::Publication.requires_local_runtime_mutation_barrier());
+    }
+
+    #[tokio::test]
+    async fn postgres_open_shares_bootstrap_snapshot_arcs_across_lanes() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("bootstrap_shared_arcs");
+        let state = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("postgres api state should open");
+
+        let state_service = state.take_service(ApiMutationLane::State).await;
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+
+        assert!(Arc::ptr_eq(
+            &state_service.inventory_snapshot_arc(),
+            &runtime_service.inventory_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &state_service.inventory_snapshot_arc(),
+            &publication_service.inventory_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &runtime_service.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &publication_service.read_model_snapshot_arc()
+        ));
+
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
     }
 
     #[tokio::test]

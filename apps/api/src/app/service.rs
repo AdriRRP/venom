@@ -2,7 +2,6 @@ use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEve
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
 pub use crate::infra::postgres_backend::{PostgresReadSnapshotLoader, PostgresRemoteChangeProbe};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -524,21 +523,11 @@ impl ApiApplication {
         })
     }
 
-    /// Open the application service over a shared Postgres pool.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiApplicationError`] when the Postgres durable backend cannot be opened.
-    pub async fn open_postgres_with_pool(
-        pool: PgPool,
-        schema: &str,
-    ) -> Result<Self, ApiApplicationError> {
-        let backend = PostgresStore::open_with_pool(pool, schema)
-            .await
-            .map_err(ApiApplicationError::State)?;
-        Ok(Self {
+    #[must_use]
+    pub const fn from_postgres_store(backend: PostgresStore) -> Self {
+        Self {
             backend: ApiStore::Postgres(backend),
-        })
+        }
     }
 
     #[must_use]

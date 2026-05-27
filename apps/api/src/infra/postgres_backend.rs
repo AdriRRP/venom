@@ -146,6 +146,7 @@ type SystemEventWindowRow = (
     Option<bool>,
     Option<String>,
     i64,
+    i64,
 );
 
 #[derive(Default)]
@@ -208,6 +209,26 @@ impl PostgresStore {
         backend.init_schema().await?;
         backend.rebuild().await?;
         Ok(backend)
+    }
+
+    #[must_use]
+    pub fn fork_from(base: &Self) -> Self {
+        Self {
+            pool: base.pool.clone(),
+            names: base.names.clone(),
+            observed_change_watermark: Arc::new(AtomicU64::new(base.observed_change_watermark())),
+            ingestion: base.ingestion.clone(),
+            governance: base.governance.clone(),
+            read_model: Arc::clone(&base.read_model),
+            inventory_snapshot_cache: Arc::clone(&base.inventory_snapshot_cache),
+            read_model_snapshot_cache: Arc::clone(&base.read_model_snapshot_cache),
+            integration_runtime_config: base.integration_runtime_config.clone(),
+            commands: base.commands.clone(),
+            order: base.order.clone(),
+            pending_integration_events: base.pending_integration_events.clone(),
+            system_event_index_snapshot_cache: Arc::clone(&base.system_event_index_snapshot_cache),
+            command_statuses_snapshot_cache: Arc::clone(&base.command_statuses_snapshot_cache),
+        }
     }
 
     fn detached(pool: PgPool, names: TableNames) -> Self {
@@ -1651,6 +1672,7 @@ impl PostgresStore {
         max_collections: usize,
         now_unix_ms: u64,
     ) -> Result<DrainDueCollectionScansResult, String> {
+        self.refresh_from_remote_if_stale().await?;
         if max_collections == 0 {
             return Ok(DrainDueCollectionScansResult {
                 outcome: "idle".into(),
@@ -4003,14 +4025,15 @@ impl PostgresStore {
         let rows = sqlx::query_as::<_, SystemEventWindowRow>(&format!(
             concat!(
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
-                "command_id, integration_event_id, finding_count, retryable, detail, global_rank ",
+                "command_id, integration_event_id, finding_count, retryable, detail, global_rank, category_rank ",
                 "FROM (",
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                 "command_id, integration_event_id, finding_count, retryable, detail, ",
-                "ROW_NUMBER() OVER (ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS global_rank ",
+                "ROW_NUMBER() OVER (ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS global_rank, ",
+                "ROW_NUMBER() OVER (PARTITION BY category ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS category_rank ",
                 "FROM {}",
                 ") ranked ",
-                "WHERE global_rank <= $1 ",
+                "WHERE global_rank <= $1 OR category_rank <= $1 ",
                 "ORDER BY occurred_at_unix_ms DESC, event_id DESC"
             ),
             self.names.system_events
@@ -4035,6 +4058,7 @@ impl PostgresStore {
                 retryable,
                 detail,
                 global_rank,
+                category_rank,
             ) = row;
             let event = Arc::new(parse_system_event_row((
                 event_id,
@@ -4053,7 +4077,26 @@ impl PostgresStore {
                 windows.recent_events.push(event.clone());
             }
             match category.as_str() {
-                "scheduler" | "command" | "governance" | "publication" => {}
+                "scheduler" => {
+                    if category_rank <= limit {
+                        windows.recent_scheduler_events.push(event.clone());
+                    }
+                }
+                "command" => {
+                    if category_rank <= limit {
+                        windows.recent_command_events.push(event.clone());
+                    }
+                }
+                "governance" => {
+                    if category_rank <= limit {
+                        windows.recent_governance_events.push(event.clone());
+                    }
+                }
+                "publication" => {
+                    if category_rank <= limit {
+                        windows.recent_publication_events.push(event.clone());
+                    }
+                }
                 _ => {
                     return Err(format!(
                         "postgres system events contain unknown category: {category}"

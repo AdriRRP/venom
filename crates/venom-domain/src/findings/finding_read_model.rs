@@ -4,6 +4,7 @@ use crate::{
 };
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Arc;
 
 pub const DEFAULT_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 50;
 pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
@@ -16,8 +17,8 @@ pub const MAX_ACTIVE_FINDINGS_PAGE_LIMIT: usize = 200;
 /// these snapshots.
 #[derive(Debug, Clone, Default)]
 pub struct FindingReadModel {
-    active: BTreeMap<TrackedArtifactKey, Vec<ActiveFindingRecord>>,
-    decisions: BTreeMap<FindingRef, FindingDecision>,
+    active: Arc<BTreeMap<TrackedArtifactKey, Vec<ActiveFindingRecord>>>,
+    decisions: Arc<BTreeMap<FindingRef, FindingDecision>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,8 +203,7 @@ impl FindingReadModel {
     /// Apply one full provider snapshot to the active findings projection.
     pub fn record_scan_report(&mut self, report: &ProviderScanReport) {
         let key = TrackedArtifactKey::new(report.component_key.clone(), report.artifact.clone());
-        self.active
-            .insert(key, canonicalize_findings(&report.findings));
+        Arc::make_mut(&mut self.active).insert(key, canonicalize_findings(&report.findings));
     }
 
     /// Restore one provider snapshot during replay from already canonical findings.
@@ -214,12 +214,11 @@ impl FindingReadModel {
         canonical_findings: &[ReportedFinding],
     ) {
         let key = TrackedArtifactKey::new(component_key, artifact);
-        self.active
-            .insert(key, canonicalize_findings(canonical_findings));
+        Arc::make_mut(&mut self.active).insert(key, canonicalize_findings(canonical_findings));
     }
 
     pub fn accept_risk(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
-        self.decisions
+        Arc::make_mut(&mut self.decisions)
             .insert(finding, FindingDecision::RiskAccepted(acceptance));
     }
 
@@ -228,7 +227,7 @@ impl FindingReadModel {
     }
 
     pub fn suppress(&mut self, finding: FindingRef, suppression: Suppression) {
-        self.decisions
+        Arc::make_mut(&mut self.decisions)
             .insert(finding, FindingDecision::Suppressed(suppression));
     }
 
@@ -237,7 +236,7 @@ impl FindingReadModel {
     }
 
     pub fn reopen(&mut self, finding: &FindingRef) {
-        self.decisions.remove(finding);
+        Arc::make_mut(&mut self.decisions).remove(finding);
     }
 
     pub fn replay_reopen(&mut self, finding: &FindingRef) {
@@ -247,8 +246,8 @@ impl FindingReadModel {
     #[must_use]
     pub fn clone_active_only(&self) -> Self {
         Self {
-            active: self.active.clone(),
-            decisions: BTreeMap::new(),
+            active: Arc::clone(&self.active),
+            decisions: Arc::default(),
         }
     }
 
@@ -803,6 +802,7 @@ mod tests {
         PackageCoordinate, ProviderScanReport, ReportedFinding, RiskAcceptance, Severity,
         Suppression,
     };
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     fn artifact() -> ArtifactRef {
@@ -1131,5 +1131,52 @@ mod tests {
             Some("Known upstream false alarm")
         );
         assert_eq!(page.findings[0].governance_until_unix_ms, None);
+    }
+
+    #[test]
+    fn clone_uses_copy_on_write_for_inner_sources() {
+        let mut read_model = FindingReadModel::new();
+        let finding = FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+        read_model.record_scan_report(&report(vec![ReportedFinding::new(
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        )]));
+        read_model.accept_risk(finding.clone(), RiskAcceptance::new("Accepted once"));
+
+        let cloned = read_model.clone();
+        assert!(Arc::ptr_eq(&read_model.active, &cloned.active));
+        assert!(Arc::ptr_eq(&read_model.decisions, &cloned.decisions));
+
+        read_model.reopen(&finding);
+
+        assert!(Arc::ptr_eq(&read_model.active, &cloned.active));
+        assert!(!Arc::ptr_eq(&read_model.decisions, &cloned.decisions));
+        assert_eq!(
+            cloned
+                .query_active_findings(&ActiveFindingsQuery::new(
+                    "component:payments-api",
+                    artifact(),
+                ))
+                .findings[0]
+                .governance_state
+                .as_str(),
+            "risk-accepted"
+        );
+        assert_eq!(
+            read_model
+                .query_active_findings(&ActiveFindingsQuery::new(
+                    "component:payments-api",
+                    artifact(),
+                ))
+                .findings[0]
+                .governance_state
+                .as_str(),
+            "open"
+        );
     }
 }

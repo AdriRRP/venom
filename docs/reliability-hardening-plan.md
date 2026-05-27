@@ -218,6 +218,20 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W180-system-event-category-window-truth`
+    Keep one retained operator event store while restoring truthful recent
+    category pages instead of filtering only the global recent window.
+75. `W181-postgres-lane-bootstrap-forking`
+    Open one rebuilt Postgres-backed application view and fork the other API
+    lanes from that bootstrapped state instead of rebuilding all three.
+76. `W182-read-model-inner-source-sharing`
+    Move `FindingReadModel` internals onto copy-on-write `Arc` maps so remote
+    refreshes and cloned lanes do not deep-clone active findings and decisions
+    by default.
+77. `W183-runtime-worker-barrier-narrowing`
+    Reserve the state/runtime consistency barrier for true state writes and let
+    Postgres runtime workers revalidate against durable state instead of taking
+    the broad read barrier on every step.
 74. `W176-shared-postgres-pool-across-api-lanes`
     Reuse one `PgPool` across the partitioned Postgres-backed API lanes instead
     of opening three independent pools for the same schema and process.
