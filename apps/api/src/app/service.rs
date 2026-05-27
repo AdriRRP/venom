@@ -1,6 +1,9 @@
+use crate::app::read_cursor::{EventSourceCursor, RowSourceCursor};
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
 use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
-pub use crate::infra::postgres_backend::{PostgresReadSnapshotLoader, PostgresRemoteChangeProbe};
+pub use crate::infra::postgres_backend::{
+    PostgresReadSnapshotBase, PostgresReadSnapshotLoader, PostgresRemoteChangeProbe,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,7 +66,9 @@ pub struct ApiReadSnapshot {
     read_model: Arc<FindingReadModel>,
     read_model_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
+    system_event_source_cursor: EventSourceCursor,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    command_status_source_cursor: RowSourceCursor,
     release_board: Mutex<Option<Arc<ReleaseBoard>>>,
 }
 
@@ -74,14 +79,18 @@ impl ApiReadSnapshot {
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
         system_event_index: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: EventSourceCursor,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: RowSourceCursor,
     ) -> Self {
         Self {
             inventory,
             read_model,
             read_model_source_watermark,
             system_event_index,
+            system_event_source_cursor,
             command_statuses,
+            command_status_source_cursor,
             release_board: Mutex::new(None),
         }
     }
@@ -93,7 +102,9 @@ impl ApiReadSnapshot {
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
+            system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses: Arc::clone(&self.command_statuses),
+            command_status_source_cursor: self.command_status_source_cursor.clone(),
             release_board: Mutex::new(None),
         }
     }
@@ -109,7 +120,9 @@ impl ApiReadSnapshot {
             read_model,
             read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
+            system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses: Arc::clone(&self.command_statuses),
+            command_status_source_cursor: self.command_status_source_cursor.clone(),
             release_board: Mutex::new(None),
         }
     }
@@ -118,13 +131,16 @@ impl ApiReadSnapshot {
     pub fn with_system_event_index_arc(
         &self,
         system_event_index: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: EventSourceCursor,
     ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
             system_event_index,
+            system_event_source_cursor,
             command_statuses: Arc::clone(&self.command_statuses),
+            command_status_source_cursor: self.command_status_source_cursor.clone(),
             release_board: Mutex::new(None),
         }
     }
@@ -133,13 +149,16 @@ impl ApiReadSnapshot {
     pub fn with_command_statuses_arc(
         &self,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: RowSourceCursor,
     ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
+            system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses,
+            command_status_source_cursor,
             release_board: Mutex::new(None),
         }
     }
@@ -159,28 +178,16 @@ impl ApiReadSnapshot {
     }
 
     #[must_use]
-    pub(crate) fn inventory_arc(&self) -> Arc<ComponentInventory> {
-        Arc::clone(&self.inventory)
-    }
-
-    #[must_use]
-    pub(crate) fn read_model_arc(&self) -> Arc<FindingReadModel> {
-        Arc::clone(&self.read_model)
-    }
-
-    #[must_use]
-    pub(crate) const fn read_model_source_watermark(&self) -> u64 {
-        self.read_model_source_watermark
-    }
-
-    #[must_use]
-    pub(crate) fn system_event_index_arc(&self) -> Arc<SystemEventQueryIndex> {
-        Arc::clone(&self.system_event_index)
-    }
-
-    #[must_use]
-    pub(crate) fn command_statuses_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
-        Arc::clone(&self.command_statuses)
+    pub(crate) fn postgres_read_snapshot_base(&self) -> PostgresReadSnapshotBase {
+        PostgresReadSnapshotBase::new(
+            Arc::clone(&self.inventory),
+            Arc::clone(&self.read_model),
+            self.read_model_source_watermark,
+            Arc::clone(&self.system_event_index),
+            self.system_event_source_cursor.clone(),
+            Arc::clone(&self.command_statuses),
+            self.command_status_source_cursor.clone(),
+        )
     }
 
     /// Query the current system-event trace from the indexed read-side snapshot.
@@ -503,9 +510,39 @@ impl LocalStore {
 
         let (state_windows, runtime_windows) = match cache.as_ref() {
             Some(snapshot) if Arc::ptr_eq(&snapshot.state, &state) => {
+                if let Some(runtime_delta) = runtime.delta_since(snapshot.runtime.as_ref()) {
+                    let merged = Arc::new(SystemEventQueryIndex::merged(
+                        snapshot.merged.as_ref(),
+                        &runtime_delta,
+                    ));
+                    let runtime_windows = runtime.recent_windows();
+                    *cache = Some(MergedSystemEventSnapshot {
+                        state,
+                        runtime,
+                        state_windows: snapshot.state_windows.clone(),
+                        runtime_windows,
+                        merged: Arc::clone(&merged),
+                    });
+                    return merged;
+                }
                 (snapshot.state_windows.clone(), runtime.recent_windows())
             }
             Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
+                if let Some(state_delta) = state.delta_since(snapshot.state.as_ref()) {
+                    let merged = Arc::new(SystemEventQueryIndex::merged(
+                        snapshot.merged.as_ref(),
+                        &state_delta,
+                    ));
+                    let state_windows = state.recent_windows();
+                    *cache = Some(MergedSystemEventSnapshot {
+                        state,
+                        runtime,
+                        state_windows,
+                        runtime_windows: snapshot.runtime_windows.clone(),
+                        merged: Arc::clone(&merged),
+                    });
+                    return merged;
+                }
                 (state.recent_windows(), snapshot.runtime_windows.clone())
             }
             _ => (state.recent_windows(), runtime.recent_windows()),
@@ -671,14 +708,18 @@ impl ApiApplication {
                 local.state.read_model_snapshot_arc(),
                 0,
                 local.system_event_index_snapshot_arc(),
+                EventSourceCursor::default(),
                 local.runtime.command_statuses_snapshot_arc(),
+                RowSourceCursor::default(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
                 postgres.read_model_source_watermark(),
                 postgres.system_event_index_snapshot_arc(),
+                postgres.system_event_source_cursor(),
                 postgres.command_statuses_snapshot_arc(),
+                postgres.command_status_source_cursor(),
             ),
         }
     }
@@ -716,10 +757,26 @@ impl ApiApplication {
     }
 
     #[must_use]
+    pub fn system_event_source_cursor(&self) -> EventSourceCursor {
+        match &self.backend {
+            ApiStore::Local(_) => EventSourceCursor::default(),
+            ApiStore::Postgres(postgres) => postgres.system_event_source_cursor(),
+        }
+    }
+
+    #[must_use]
     pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
         match &self.backend {
             ApiStore::Local(local) => local.runtime.command_statuses_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.command_statuses_snapshot_arc(),
+        }
+    }
+
+    #[must_use]
+    pub fn command_status_source_cursor(&self) -> RowSourceCursor {
+        match &self.backend {
+            ApiStore::Local(_) => RowSourceCursor::default(),
+            ApiStore::Postgres(postgres) => postgres.command_status_source_cursor(),
         }
     }
     /// Refresh one Postgres-backed in-memory view when the durable store advanced in another instance.
