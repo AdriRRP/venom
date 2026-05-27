@@ -560,6 +560,13 @@ impl ScanCommandQueue {
         Ok(())
     }
 
+    /// Replay only the durable queue history appended since the last local rebuild or tail sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanCommandQueueError`] when the queue tail cannot be read,
+    /// parsed, or applied, or when a truncated queue history forces a full
+    /// rebuild that also fails.
     pub fn sync_from_history_tail(&mut self) -> Result<(), ScanCommandQueueError> {
         let metadata = std::fs::metadata(&self.history_path).map_err(ScanCommandQueueError::Io)?;
         if metadata.len() < self.replayed_bytes {

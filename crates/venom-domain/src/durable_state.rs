@@ -1259,6 +1259,13 @@ impl DurableState {
         })
     }
 
+    /// Replay only the durable history appended since the last local rebuild or tail sync.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurableStateError`] when the history tail cannot be read,
+    /// parsed, or applied, or when a truncated history forces a full rebuild
+    /// that also fails.
     pub fn sync_from_history_tail(&mut self) -> Result<(), DurableStateError> {
         let metadata = std::fs::metadata(&self.history_path).map_err(DurableStateError::Io)?;
         if metadata.len() < self.replayed_bytes {

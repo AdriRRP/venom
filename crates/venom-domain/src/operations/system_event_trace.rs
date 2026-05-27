@@ -559,7 +559,7 @@ fn merge_recent_events(
     merged
 }
 
-fn remap_recent_slots(events: &mut Vec<u16>, remap: &BTreeMap<u16, u16>) {
+fn remap_recent_slots(events: &mut [u16], remap: &BTreeMap<u16, u16>) {
     for slot in events.iter_mut() {
         *slot = *remap
             .get(slot)
