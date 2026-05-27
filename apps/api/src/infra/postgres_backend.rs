@@ -216,7 +216,7 @@ impl PostgresStore {
         Self {
             pool: base.pool.clone(),
             names: base.names.clone(),
-            observed_change_watermark: Arc::clone(&base.observed_change_watermark),
+            observed_change_watermark: Arc::new(AtomicU64::new(base.observed_change_watermark())),
             ingestion: base.ingestion.clone(),
             governance: base.governance.clone(),
             read_model: Arc::clone(&base.read_model),
