@@ -95,6 +95,7 @@ const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 7;
 const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 8;
 const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 9;
 const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 10;
+const POSTGRES_POOL_MAX_CONNECTIONS: u32 = 3;
 const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY
     | CHANGE_LANE_COMPONENT_BINDINGS
     | CHANGE_LANE_COLLECTIONS
@@ -166,7 +167,7 @@ impl PostgresStore {
     pub async fn open(database_url: &str, schema: &str) -> Result<Self, String> {
         let names = TableNames::new(schema)?;
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(POSTGRES_POOL_MAX_CONNECTIONS)
             .connect(database_url)
             .await
             .map_err(|error| format!("postgres connect failed: {error}"))?;
