@@ -274,46 +274,51 @@ impl SystemEventQueryIndex {
     #[must_use]
     pub fn merged(left: &Self, right: &Self) -> Self {
         Self::from_recent_windows(
-            SystemEventWindowTotals {
-                total: left.total + right.total,
-                scheduler_total: left.scheduler_total + right.scheduler_total,
-                command_total: left.command_total + right.command_total,
-                governance_total: left.governance_total + right.governance_total,
-                publication_total: left.publication_total + right.publication_total,
-            },
-            SystemEventRecentWindows {
-                recent_events: merge_recent_events(
-                    &left.recent_events,
-                    &left.retained_events,
-                    &right.recent_events,
-                    &right.retained_events,
-                ),
-                recent_scheduler_events: merge_recent_events(
-                    &left.collect_category_recent_slots(SystemEventCategory::Scheduler),
-                    &left.retained_events,
-                    &right.collect_category_recent_slots(SystemEventCategory::Scheduler),
-                    &right.retained_events,
-                ),
-                recent_command_events: merge_recent_events(
-                    &left.collect_category_recent_slots(SystemEventCategory::Command),
-                    &left.retained_events,
-                    &right.collect_category_recent_slots(SystemEventCategory::Command),
-                    &right.retained_events,
-                ),
-                recent_governance_events: merge_recent_events(
-                    &left.collect_category_recent_slots(SystemEventCategory::Governance),
-                    &left.retained_events,
-                    &right.collect_category_recent_slots(SystemEventCategory::Governance),
-                    &right.retained_events,
-                ),
-                recent_publication_events: merge_recent_events(
-                    &left.collect_category_recent_slots(SystemEventCategory::Publication),
-                    &left.retained_events,
-                    &right.collect_category_recent_slots(SystemEventCategory::Publication),
-                    &right.retained_events,
-                ),
-            },
+            merge_window_totals(&left.window_totals(), &right.window_totals()),
+            merge_recent_windows(&left.recent_windows(), &right.recent_windows()),
         )
+    }
+
+    #[must_use]
+    pub const fn window_totals(&self) -> SystemEventWindowTotals {
+        SystemEventWindowTotals {
+            total: self.total,
+            scheduler_total: self.scheduler_total,
+            command_total: self.command_total,
+            governance_total: self.governance_total,
+            publication_total: self.publication_total,
+        }
+    }
+
+    #[must_use]
+    pub fn recent_windows(&self) -> SystemEventRecentWindows {
+        SystemEventRecentWindows {
+            recent_events: self
+                .recent_events
+                .iter()
+                .filter_map(|slot| {
+                    self.retained_events
+                        .get(usize::from(*slot))
+                        .map(|entry| Arc::clone(&entry.event))
+                })
+                .collect(),
+            recent_scheduler_events: collect_category_recent_events(
+                &self.collect_category_recent_slots(SystemEventCategory::Scheduler),
+                &self.retained_events,
+            ),
+            recent_command_events: collect_category_recent_events(
+                &self.collect_category_recent_slots(SystemEventCategory::Command),
+                &self.retained_events,
+            ),
+            recent_governance_events: collect_category_recent_events(
+                &self.collect_category_recent_slots(SystemEventCategory::Governance),
+                &self.retained_events,
+            ),
+            recent_publication_events: collect_category_recent_events(
+                &self.collect_category_recent_slots(SystemEventCategory::Publication),
+                &self.retained_events,
+            ),
+        }
     }
 
     #[must_use]
@@ -632,32 +637,65 @@ fn push_bounded_slot(events: &mut Vec<u16>, slot: u16) {
     events.insert(0, slot);
 }
 
-fn merge_recent_events(
-    left_slots: &[u16],
-    left_retained: &[RetainedSystemEvent],
-    right_slots: &[u16],
-    right_retained: &[RetainedSystemEvent],
+fn collect_category_recent_events(
+    slots: &[u16],
+    events: &[RetainedSystemEvent],
 ) -> Vec<Arc<SystemEvent>> {
-    let mut merged =
-        Vec::with_capacity((left_slots.len() + right_slots.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
+    slots.iter()
+        .filter_map(|slot| events.get(usize::from(*slot)).map(|entry| Arc::clone(&entry.event)))
+        .collect()
+}
+
+fn merge_window_totals(
+    left: &SystemEventWindowTotals,
+    right: &SystemEventWindowTotals,
+) -> SystemEventWindowTotals {
+    SystemEventWindowTotals {
+        total: left.total + right.total,
+        scheduler_total: left.scheduler_total + right.scheduler_total,
+        command_total: left.command_total + right.command_total,
+        governance_total: left.governance_total + right.governance_total,
+        publication_total: left.publication_total + right.publication_total,
+    }
+}
+
+fn merge_recent_windows(
+    left: &SystemEventRecentWindows,
+    right: &SystemEventRecentWindows,
+) -> SystemEventRecentWindows {
+    SystemEventRecentWindows {
+        recent_events: merge_recent_arc_events(&left.recent_events, &right.recent_events),
+        recent_scheduler_events: merge_recent_arc_events(
+            &left.recent_scheduler_events,
+            &right.recent_scheduler_events,
+        ),
+        recent_command_events: merge_recent_arc_events(
+            &left.recent_command_events,
+            &right.recent_command_events,
+        ),
+        recent_governance_events: merge_recent_arc_events(
+            &left.recent_governance_events,
+            &right.recent_governance_events,
+        ),
+        recent_publication_events: merge_recent_arc_events(
+            &left.recent_publication_events,
+            &right.recent_publication_events,
+        ),
+    }
+}
+
+fn merge_recent_arc_events(
+    left: &[Arc<SystemEvent>],
+    right: &[Arc<SystemEvent>],
+) -> Vec<Arc<SystemEvent>> {
+    let mut merged = Vec::with_capacity((left.len() + right.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
     let mut left_index = 0;
     let mut right_index = 0;
 
     while merged.len() < MAX_SYSTEM_EVENTS_LIMIT
-        && (left_index < left_slots.len() || right_index < right_slots.len())
+        && (left_index < left.len() || right_index < right.len())
     {
-        let take_left = match (
-            left_slots.get(left_index).and_then(|slot| {
-                left_retained
-                    .get(usize::from(*slot))
-                    .map(|entry| &entry.event)
-            }),
-            right_slots.get(right_index).and_then(|slot| {
-                right_retained
-                    .get(usize::from(*slot))
-                    .map(|entry| &entry.event)
-            }),
-        ) {
+        let take_left = match (left.get(left_index), right.get(right_index)) {
             (Some(left_event), Some(right_event)) => {
                 compare_recent_event_order(left_event, right_event).is_lt()
             }
@@ -667,18 +705,15 @@ fn merge_recent_events(
         };
         if take_left {
             merged.push(Arc::clone(
-                left_retained
-                    .get(usize::from(left_slots[left_index]))
-                    .map(|entry| &entry.event)
-                    .expect("left retained system event slot should exist"),
+                left.get(left_index)
+                    .expect("left recent event should exist for merge"),
             ));
             left_index += 1;
         } else {
             merged.push(Arc::clone(
-                right_retained
-                    .get(usize::from(right_slots[right_index]))
-                    .map(|entry| &entry.event)
-                    .expect("right retained system event slot should exist"),
+                right
+                    .get(right_index)
+                    .expect("right recent event should exist for merge"),
             ));
             right_index += 1;
         }
