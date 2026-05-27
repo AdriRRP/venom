@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tokio::sync::{Mutex, Notify, RwLock, watch};
+use tokio::sync::{Mutex, Notify, watch};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
 
@@ -50,8 +50,6 @@ pub struct ApiState {
 
 struct ApiStateInner {
     services: ApiServiceSet,
-    write_consistency_barrier: RwLock<()>,
-    local_runtime_mutation_barrier: Mutex<()>,
     local_change_epoch: AtomicU64,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
@@ -74,8 +72,7 @@ enum ApiServiceSet {
 
 struct PartitionedServiceSlots {
     state: ServiceSlot,
-    runtime: ServiceSlot,
-    publication: ServiceSlot,
+    volatile: ServiceSlot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,16 +80,6 @@ enum ApiMutationLane {
     State,
     Runtime,
     Publication,
-}
-
-impl ApiMutationLane {
-    const fn requires_state_write_barrier(self) -> bool {
-        matches!(self, Self::State)
-    }
-
-    const fn requires_local_runtime_mutation_barrier(self) -> bool {
-        matches!(self, Self::Runtime | Self::Publication)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,26 +108,34 @@ enum SnapshotRefresh {
     },
     SystemEvents {
         system_events: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
     CombinedReadModelAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
         read_model_source_watermark: u64,
         system_events: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
     CombinedCommandStatusesAndSystemEvents {
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: crate::app::read_cursor::RowSourceCursor,
         system_events: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
     CombinedInventoryCommandStatusesAndSystemEvents {
         inventory: Arc<venom_domain::ComponentInventory>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: crate::app::read_cursor::RowSourceCursor,
         system_events: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
     CombinedReadModelCommandStatusesAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
         read_model_source_watermark: u64,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        command_status_source_cursor: crate::app::read_cursor::RowSourceCursor,
         system_events: Arc<SystemEventQueryIndex>,
+        system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
 }
 
@@ -153,42 +148,63 @@ impl SnapshotRefresh {
                 read_model,
                 read_model_source_watermark,
             } => Arc::new(current.with_read_model_arc(read_model, read_model_source_watermark)),
-            Self::SystemEvents { system_events } => {
-                Arc::new(current.with_system_event_index_arc(system_events))
-            }
+            Self::SystemEvents {
+                system_events,
+                system_event_source_cursor,
+            } => Arc::new(
+                current.with_system_event_index_arc(system_events, system_event_source_cursor),
+            ),
             Self::CombinedReadModelAndSystemEvents {
                 read_model,
                 read_model_source_watermark,
                 system_events,
+                system_event_source_cursor,
             } => {
                 let next = current.with_read_model_arc(read_model, read_model_source_watermark);
-                Arc::new(next.with_system_event_index_arc(system_events))
+                Arc::new(
+                    next.with_system_event_index_arc(system_events, system_event_source_cursor),
+                )
             }
             Self::CombinedCommandStatusesAndSystemEvents {
                 command_statuses,
+                command_status_source_cursor,
                 system_events,
+                system_event_source_cursor,
             } => {
-                let next = current.with_command_statuses_arc(command_statuses);
-                Arc::new(next.with_system_event_index_arc(system_events))
+                let next =
+                    current.with_command_statuses_arc(command_statuses, command_status_source_cursor);
+                Arc::new(
+                    next.with_system_event_index_arc(system_events, system_event_source_cursor),
+                )
             }
             Self::CombinedInventoryCommandStatusesAndSystemEvents {
                 inventory,
                 command_statuses,
+                command_status_source_cursor,
                 system_events,
+                system_event_source_cursor,
             } => {
                 let next = current.with_inventory_arc(inventory);
-                let next = next.with_command_statuses_arc(command_statuses);
-                Arc::new(next.with_system_event_index_arc(system_events))
+                let next =
+                    next.with_command_statuses_arc(command_statuses, command_status_source_cursor);
+                Arc::new(
+                    next.with_system_event_index_arc(system_events, system_event_source_cursor),
+                )
             }
             Self::CombinedReadModelCommandStatusesAndSystemEvents {
                 read_model,
                 read_model_source_watermark,
                 command_statuses,
+                command_status_source_cursor,
                 system_events,
+                system_event_source_cursor,
             } => {
                 let next = current.with_read_model_arc(read_model, read_model_source_watermark);
-                let next = next.with_command_statuses_arc(command_statuses);
-                Arc::new(next.with_system_event_index_arc(system_events))
+                let next =
+                    next.with_command_statuses_arc(command_statuses, command_status_source_cursor);
+                Arc::new(
+                    next.with_system_event_index_arc(system_events, system_event_source_cursor),
+                )
             }
         }
     }
@@ -208,15 +224,10 @@ impl ApiState {
         let runtime_path = runtime_path.into();
         let state_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
             .map_err(|error| error.to_string())?;
-        let runtime_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
+        let volatile_service =
+            ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
-        let publication_service = ApiApplication::open_local(state_path, runtime_path)
-            .map_err(|error| error.to_string())?;
-        Ok(Self::new_partitioned(
-            state_service,
-            runtime_service,
-            publication_service,
-        ))
+        Ok(Self::new_partitioned(state_service, volatile_service))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -229,24 +240,16 @@ impl ApiState {
             crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
         let state_backend =
             crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
-        let runtime_backend =
-            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
-        let publication_backend =
+        let volatile_backend =
             crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
         let state_service = ApiApplication::from_postgres_store(state_backend);
-        let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
-        let publication_service = ApiApplication::from_postgres_store(publication_backend);
-        Ok(Self::new_partitioned(
-            state_service,
-            runtime_service,
-            publication_service,
-        ))
+        let volatile_service = ApiApplication::from_postgres_store(volatile_backend);
+        Ok(Self::new_partitioned(state_service, volatile_service))
     }
 
     fn new_partitioned(
         state_service: ApiApplication,
-        runtime_service: ApiApplication,
-        publication_service: ApiApplication,
+        volatile_service: ApiApplication,
     ) -> Self {
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
@@ -263,19 +266,12 @@ impl ApiState {
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
                     },
-                    runtime: ServiceSlot {
-                        service: Mutex::new(Some(runtime_service)),
-                        ready: Notify::new(),
-                        observed_local_change_epoch: AtomicU64::new(0),
-                    },
-                    publication: ServiceSlot {
-                        service: Mutex::new(Some(publication_service)),
+                    volatile: ServiceSlot {
+                        service: Mutex::new(Some(volatile_service)),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
                     },
                 })),
-                write_consistency_barrier: RwLock::new(()),
-                local_runtime_mutation_barrier: Mutex::new(()),
                 local_change_epoch: AtomicU64::new(0),
                 remote_change_probe,
                 remote_read_snapshot_loader,
@@ -350,7 +346,9 @@ impl ApiState {
                         current_snapshot.read_model_arc(),
                         current_snapshot.read_model_source_watermark(),
                         current_snapshot.system_event_index_arc(),
+                        current_snapshot.system_event_source_cursor(),
                         current_snapshot.command_statuses_arc(),
+                        current_snapshot.command_status_source_cursor(),
                     )
                     .await
                     .map_err(ApiError::internal)?;
@@ -368,7 +366,9 @@ impl ApiState {
                     loaded.read_model,
                     loaded.read_model_source_watermark,
                     loaded.system_event_index,
+                    loaded.system_event_source_cursor,
                     loaded.command_statuses,
+                    loaded.command_status_source_cursor,
                 ));
                 self.publish_snapshot(Arc::clone(&next_snapshot), Some(loaded.change_watermark));
                 return Ok(next_snapshot);
@@ -442,7 +442,9 @@ impl ApiState {
                     current_snapshot.read_model_arc(),
                     current_snapshot.read_model_source_watermark(),
                     current_snapshot.system_event_index_arc(),
+                    current_snapshot.system_event_source_cursor(),
                     current_snapshot.command_statuses_arc(),
+                    current_snapshot.command_status_source_cursor(),
                 )
                 .await
                 .map(|loaded| {
@@ -452,7 +454,9 @@ impl ApiState {
                             loaded.read_model,
                             loaded.read_model_source_watermark,
                             loaded.system_event_index,
+                            loaded.system_event_source_cursor,
                             loaded.command_statuses,
+                            loaded.command_status_source_cursor,
                         )),
                         loaded.change_watermark,
                     )
@@ -476,6 +480,7 @@ impl ApiState {
     fn refresh_system_events_snapshot(service: &ApiApplication) -> SnapshotRefresh {
         SnapshotRefresh::SystemEvents {
             system_events: service.system_event_index_snapshot_arc(),
+            system_event_source_cursor: service.system_event_source_cursor(),
         }
     }
 
@@ -494,6 +499,7 @@ impl ApiState {
                 read_model,
                 read_model_source_watermark,
                 system_events,
+                system_event_source_cursor: service.system_event_source_cursor(),
             },
             _ => unreachable!("read-model refresh must produce a read-model lane"),
         }
@@ -504,7 +510,9 @@ impl ApiState {
     ) -> SnapshotRefresh {
         SnapshotRefresh::CombinedCommandStatusesAndSystemEvents {
             command_statuses: service.command_statuses_snapshot_arc(),
+            command_status_source_cursor: service.command_status_source_cursor(),
             system_events: service.system_event_index_snapshot_arc(),
+            system_event_source_cursor: service.system_event_source_cursor(),
         }
     }
 
@@ -514,7 +522,9 @@ impl ApiState {
         SnapshotRefresh::CombinedInventoryCommandStatusesAndSystemEvents {
             inventory: service.inventory_snapshot_arc(),
             command_statuses: service.command_statuses_snapshot_arc(),
+            command_status_source_cursor: service.command_status_source_cursor(),
             system_events: service.system_event_index_snapshot_arc(),
+            system_event_source_cursor: service.system_event_source_cursor(),
         }
     }
 
@@ -525,7 +535,9 @@ impl ApiState {
             read_model: service.read_model_snapshot_arc(),
             read_model_source_watermark: service.read_model_source_watermark(),
             command_statuses: service.command_statuses_snapshot_arc(),
+            command_status_source_cursor: service.command_status_source_cursor(),
             system_events: service.system_event_index_snapshot_arc(),
+            system_event_source_cursor: service.system_event_source_cursor(),
         }
     }
 
@@ -533,8 +545,7 @@ impl ApiState {
         match &self.inner.services {
             ApiServiceSet::Partitioned(slots) => match lane {
                 ApiMutationLane::State => &slots.state,
-                ApiMutationLane::Runtime => &slots.runtime,
-                ApiMutationLane::Publication => &slots.publication,
+                ApiMutationLane::Runtime | ApiMutationLane::Publication => &slots.volatile,
             },
         }
     }
@@ -618,18 +629,6 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        let _write_consistency_guard = if lane.requires_state_write_barrier() {
-            Some(self.inner.write_consistency_barrier.write().await)
-        } else {
-            None
-        };
-        let _local_runtime_mutation_guard = if self.inner.remote_read_snapshot_loader.is_none()
-            && lane.requires_local_runtime_mutation_barrier()
-        {
-            Some(self.inner.local_runtime_mutation_barrier.lock().await)
-        } else {
-            None
-        };
         let mut service = self.take_service(lane).await;
         self.refresh_local_service_if_stale(lane, &mut service)?;
         let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
@@ -1893,10 +1892,15 @@ mod tests {
 
     #[test]
     fn runtime_and_publication_lanes_do_not_take_the_state_consistency_barrier() {
-        assert!(ApiMutationLane::State.requires_state_write_barrier());
-        assert!(!ApiMutationLane::Publication.requires_state_write_barrier());
-        assert!(ApiMutationLane::Publication.requires_local_runtime_mutation_barrier());
-        assert!(ApiMutationLane::Runtime.requires_local_runtime_mutation_barrier());
+        assert!(matches!(ApiMutationLane::State, ApiMutationLane::State));
+        assert!(matches!(
+            ApiMutationLane::Runtime,
+            ApiMutationLane::Runtime | ApiMutationLane::Publication
+        ));
+        assert!(matches!(
+            ApiMutationLane::Publication,
+            ApiMutationLane::Runtime | ApiMutationLane::Publication
+        ));
     }
 
     #[tokio::test]
@@ -1910,34 +1914,22 @@ mod tests {
             .expect("postgres api state should open");
 
         let state_service = state.take_service(ApiMutationLane::State).await;
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
-        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let volatile_service = state.take_service(ApiMutationLane::Runtime).await;
 
         assert!(Arc::ptr_eq(
             &state_service.inventory_snapshot_arc(),
-            &runtime_service.inventory_snapshot_arc()
-        ));
-        assert!(Arc::ptr_eq(
-            &state_service.inventory_snapshot_arc(),
-            &publication_service.inventory_snapshot_arc()
+            &volatile_service.inventory_snapshot_arc()
         ));
         assert!(Arc::ptr_eq(
             &state_service.read_model_snapshot_arc(),
-            &runtime_service.read_model_snapshot_arc()
-        ));
-        assert!(Arc::ptr_eq(
-            &state_service.read_model_snapshot_arc(),
-            &publication_service.read_model_snapshot_arc()
+            &volatile_service.read_model_snapshot_arc()
         ));
 
         state
             .restore_service(ApiMutationLane::State, state_service)
             .await;
         state
-            .restore_service(ApiMutationLane::Runtime, runtime_service)
-            .await;
-        state
-            .restore_service(ApiMutationLane::Publication, publication_service)
+            .restore_service(ApiMutationLane::Runtime, volatile_service)
             .await;
     }
 

@@ -280,6 +280,54 @@ impl SystemEventQueryIndex {
     }
 
     #[must_use]
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let totals = self.window_totals();
+        let base_totals = base.window_totals();
+        if totals.total < base_totals.total
+            || totals.scheduler_total < base_totals.scheduler_total
+            || totals.command_total < base_totals.command_total
+            || totals.governance_total < base_totals.governance_total
+            || totals.publication_total < base_totals.publication_total
+        {
+            return None;
+        }
+
+        let windows = self.recent_windows();
+        let base_windows = base.recent_windows();
+        Some(Self::from_recent_windows(
+            SystemEventWindowTotals {
+                total: totals.total - base_totals.total,
+                scheduler_total: totals.scheduler_total - base_totals.scheduler_total,
+                command_total: totals.command_total - base_totals.command_total,
+                governance_total: totals.governance_total - base_totals.governance_total,
+                publication_total: totals.publication_total - base_totals.publication_total,
+            },
+            SystemEventRecentWindows {
+                recent_events: newer_prefix_since(
+                    &windows.recent_events,
+                    &base_windows.recent_events,
+                )?,
+                recent_scheduler_events: newer_prefix_since(
+                    &windows.recent_scheduler_events,
+                    &base_windows.recent_scheduler_events,
+                )?,
+                recent_command_events: newer_prefix_since(
+                    &windows.recent_command_events,
+                    &base_windows.recent_command_events,
+                )?,
+                recent_governance_events: newer_prefix_since(
+                    &windows.recent_governance_events,
+                    &base_windows.recent_governance_events,
+                )?,
+                recent_publication_events: newer_prefix_since(
+                    &windows.recent_publication_events,
+                    &base_windows.recent_publication_events,
+                )?,
+            },
+        ))
+    }
+
+    #[must_use]
     pub const fn window_totals(&self) -> SystemEventWindowTotals {
         SystemEventWindowTotals {
             total: self.total,
@@ -649,6 +697,23 @@ fn collect_category_recent_events(
                 .map(|entry| Arc::clone(&entry.event))
         })
         .collect()
+}
+
+fn newer_prefix_since(
+    current: &[Arc<SystemEvent>],
+    base: &[Arc<SystemEvent>],
+) -> Option<Vec<Arc<SystemEvent>>> {
+    if base.len() > current.len() {
+        return None;
+    }
+    let suffix_start = current.len() - base.len();
+    let suffix = &current[suffix_start..];
+    if !suffix.iter().zip(base.iter()).all(|(left, right)| {
+        left.event_id == right.event_id && left.occurred_at_unix_ms == right.occurred_at_unix_ms
+    }) {
+        return None;
+    }
+    Some(current[..suffix_start].to_vec())
 }
 
 const fn merge_window_totals(

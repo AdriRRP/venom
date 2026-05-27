@@ -232,6 +232,21 @@ Completed:
     Reserve the state/runtime consistency barrier for true state writes and let
     Postgres runtime workers revalidate against durable state instead of taking
     the broad read barrier on every step.
+78. `W188-postgres-lane-topology-compaction`
+    Collapse runtime and publication onto one volatile API lane so local and
+    Postgres-backed `ApiState` stop paying three live mutable services.
+79. `W189-postgres-read-model-governance-delta-tightening`
+    Keep detached Postgres findings refresh aligned to durable cursors instead
+    of widening back to whole-subgraph reloads.
+80. `W190-local-system-event-merge-incrementality`
+    Merge local state/runtime event deltas over the cached composite snapshot
+    when one side only advanced by a bounded append window.
+81. `W191-postgres-observability-tail-refresh`
+    Tail-refresh detached Postgres `system events` and `command statuses`
+    snapshots from durable cursors instead of reloading whole lanes.
+82. `W192-state-runtime-barrier-elision`
+    Remove the leftover state/runtime barrier when lane ownership already
+    provides the required serialization boundary.
 74. `W176-shared-postgres-pool-across-api-lanes`
     Reuse one `PgPool` across the partitioned Postgres-backed API lanes instead
     of opening three independent pools for the same schema and process.

@@ -1,3 +1,4 @@
+use crate::app::read_cursor::{EventSourceCursor, RowSourceCursor};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, postgres::PgPoolOptions, types::Json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -59,7 +60,9 @@ pub struct PostgresStore {
     order: Arc<CommandOrder>,
     pending_integration_events: Arc<PendingIntegrationEventList>,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
+    system_event_source_cursor: EventSourceCursor,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    command_status_source_cursor: RowSourceCursor,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +85,9 @@ pub struct LoadedPostgresReadSnapshot {
     pub read_model: Arc<FindingReadModel>,
     pub read_model_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
+    pub system_event_source_cursor: EventSourceCursor,
     pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    pub command_status_source_cursor: RowSourceCursor,
     pub change_watermark: u64,
 }
 
@@ -153,6 +158,21 @@ type SystemEventWindowRow = (
     i64,
     i64,
 );
+type SystemEventDeltaRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i32>,
+    Option<bool>,
+    Option<String>,
+    i64,
+);
+type CommandStatusDeltaRow = (String, String, i64);
 
 #[derive(Default)]
 struct SystemEventTotals {
@@ -210,7 +230,9 @@ impl PostgresStore {
             order: Arc::new(Vec::new()),
             pending_integration_events: Arc::new(Vec::new()),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
+            system_event_source_cursor: EventSourceCursor::default(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
+            command_status_source_cursor: RowSourceCursor::default(),
         };
         backend.init_schema().await?;
         backend.rebuild().await?;
@@ -234,7 +256,9 @@ impl PostgresStore {
             order: Arc::clone(&base.order),
             pending_integration_events: Arc::clone(&base.pending_integration_events),
             system_event_index_snapshot_cache: Arc::clone(&base.system_event_index_snapshot_cache),
+            system_event_source_cursor: base.system_event_source_cursor.clone(),
             command_statuses_snapshot_cache: Arc::clone(&base.command_statuses_snapshot_cache),
+            command_status_source_cursor: base.command_status_source_cursor.clone(),
         }
     }
 
@@ -254,7 +278,9 @@ impl PostgresStore {
             order: Arc::new(Vec::new()),
             pending_integration_events: Arc::new(Vec::new()),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
+            system_event_source_cursor: EventSourceCursor::default(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
+            command_status_source_cursor: RowSourceCursor::default(),
         }
     }
 
@@ -972,8 +998,7 @@ impl PostgresStore {
             })?;
             self.upsert_risk_acceptance_in_transaction(&mut tx, &finding, &acceptance)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres finding risk acceptance commit failed: {error}")
             })?;
@@ -982,6 +1007,8 @@ impl PostgresStore {
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1040,8 +1067,7 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres risk acceptance batch commit failed: {error}")
             })?;
@@ -1053,6 +1079,8 @@ impl PostgresStore {
                     .accept_risk(finding.clone(), acceptance.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1114,8 +1142,7 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres tag risk acceptance batch commit failed: {error}")
             })?;
@@ -1127,6 +1154,8 @@ impl PostgresStore {
                     .accept_risk(finding.clone(), acceptance.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1177,8 +1206,7 @@ impl PostgresStore {
                 .map_err(|error| format!("postgres finding reopen begin failed: {error}"))?;
             self.delete_governance_decision_rows_in_transaction(&mut tx, &finding)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres finding reopen commit failed: {error}"))?;
@@ -1187,6 +1215,8 @@ impl PostgresStore {
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1233,8 +1263,7 @@ impl PostgresStore {
                 })?;
             self.upsert_suppression_in_transaction(&mut tx, &finding, &suppression)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres finding suppression commit failed: {error}"))?;
@@ -1243,6 +1272,8 @@ impl PostgresStore {
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1302,8 +1333,7 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed_findings, &suppression)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
@@ -1315,6 +1345,8 @@ impl PostgresStore {
                     .suppress(finding.clone(), suppression.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1377,8 +1409,7 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed, &suppression)
                 .await?;
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit().await.map_err(|error| {
                 format!("postgres tag suppression batch commit failed: {error}")
             })?;
@@ -1390,6 +1421,8 @@ impl PostgresStore {
                     .suppress(finding.clone(), suppression.clone());
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1450,8 +1483,7 @@ impl PostgresStore {
                 self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
                     .await?;
             }
-            self.insert_system_event_in_transaction(&mut tx, &event)
-                .await?;
+            let system_event_cursor = self.insert_system_event_in_transaction(&mut tx, &event).await?;
             tx.commit()
                 .await
                 .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
@@ -1461,6 +1493,8 @@ impl PostgresStore {
                 self.read_model_mut().reopen(finding);
             }
             self.refresh_read_model_and_release_board_snapshot_caches();
+            self.system_event_source_cursor =
+                max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
             self.push_system_event(event);
         }
 
@@ -1519,6 +1553,11 @@ impl PostgresStore {
     #[must_use]
     pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         Arc::clone(&self.system_event_index_snapshot_cache)
+    }
+
+    #[must_use]
+    pub fn system_event_source_cursor(&self) -> EventSourceCursor {
+        self.system_event_source_cursor.clone()
     }
 
     #[must_use]
@@ -1581,15 +1620,16 @@ impl PostgresStore {
         };
 
         let mut transaction = self.begin_transaction().await?;
-        self.insert_pending_scan_commands(
+        let command_status_cursor = self.insert_pending_scan_commands(
             &mut transaction,
             std::slice::from_ref(&command_id),
             std::slice::from_ref(&request),
         )
         .await
         .map_err(|error| format!("postgres scan command insert failed: {error}"))?;
-        self.insert_system_events_in_transaction(&mut transaction, std::slice::from_ref(&event))
-            .await?;
+        let system_event_cursor =
+            self.insert_system_events_in_transaction(&mut transaction, std::slice::from_ref(&event))
+                .await?;
         self.commit_transaction(transaction).await?;
 
         Arc::make_mut(&mut self.order).push(command_id.clone());
@@ -1601,6 +1641,10 @@ impl PostgresStore {
             },
         );
         self.set_command_status_snapshot(command_id.as_ref(), ScanCommandStatus::Pending);
+        self.command_status_source_cursor =
+            max_row_source_cursor(&self.command_status_source_cursor, command_status_cursor);
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         self.push_system_event(event);
         Ok(command_id)
     }
@@ -1646,13 +1690,18 @@ impl PostgresStore {
             .collect::<Vec<_>>();
 
         let mut transaction = self.begin_transaction().await?;
-        self.insert_pending_scan_commands(&mut transaction, &command_ids, &batch.requests)
+        let command_status_cursor =
+            self.insert_pending_scan_commands(&mut transaction, &command_ids, &batch.requests)
             .await
             .map_err(|error| format!("postgres collection scan command insert failed: {error}"))?;
-        self.insert_system_events_in_transaction(&mut transaction, &system_events)
-            .await?;
+        let system_event_cursor =
+            self.insert_system_events_in_transaction(&mut transaction, &system_events).await?;
         self.commit_transaction(transaction).await?;
 
+        self.command_status_source_cursor =
+            max_row_source_cursor(&self.command_status_source_cursor, command_status_cursor);
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         for ((command_id, request), event) in command_ids
             .iter()
             .cloned()
@@ -1726,7 +1775,8 @@ impl PostgresStore {
             &all_requests,
             now_unix_ms,
         );
-        self.persist_due_collection_scans(
+        let (command_status_cursor, system_event_cursor) = self
+            .persist_due_collection_scans(
             &command_ids,
             &all_requests,
             &schedule_rows,
@@ -1740,6 +1790,8 @@ impl PostgresStore {
             system_events,
             &command_ids,
             all_requests,
+            command_status_cursor,
+            system_event_cursor,
         );
 
         Ok(DrainDueCollectionScansResult {
@@ -1781,9 +1833,9 @@ impl PostgresStore {
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         command_ids: &[Box<str>],
         requests: &[ScanRequest],
-    ) -> Result<(), String> {
+    ) -> Result<RowSourceCursor, String> {
         if requests.is_empty() {
-            return Ok(());
+            return Ok(RowSourceCursor::default());
         }
 
         let mut query_builder = QueryBuilder::<sqlx::Postgres>::new(format!(
@@ -1801,12 +1853,26 @@ impl PostgresStore {
                     .push_bind(scan_command_status_name(ScanCommandStatus::Pending));
             },
         );
-        query_builder
-            .build()
-            .execute(&mut **transaction)
+        query_builder.push(
+            " RETURNING command_id, (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros",
+        );
+        let rows = query_builder
+            .build_query_as::<(String, i64)>()
+            .fetch_all(&mut **transaction)
             .await
             .map_err(|error| format!("postgres due collection scan insert failed: {error}"))?;
-        Ok(())
+        let mut cursor = RowSourceCursor::default();
+        for (command_id, updated_at_micros) in rows {
+            cursor = max_row_source_cursor(
+                &cursor,
+                row_source_cursor(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                    command_id.into_boxed_str(),
+                ),
+            );
+        }
+        Ok(cursor)
     }
 
     async fn upsert_collection_scan_schedules(
@@ -1873,6 +1939,11 @@ impl PostgresStore {
     #[must_use]
     pub fn command_statuses_snapshot_arc(&self) -> Arc<BTreeMap<Box<str>, ScanCommandStatus>> {
         Arc::clone(&self.command_statuses_snapshot_cache)
+    }
+
+    #[must_use]
+    pub fn command_status_source_cursor(&self) -> RowSourceCursor {
+        self.command_status_source_cursor.clone()
     }
 
     #[must_use]
@@ -2027,7 +2098,7 @@ impl PostgresStore {
                 .into_boxed_str(),
             ),
         };
-        let provider_report_row_id = self
+        let (provider_report_row_id, command_status_cursor, system_event_cursor) = self
             .persist_completed_scan_command(
                 command_id.as_ref(),
                 &report,
@@ -2054,6 +2125,8 @@ impl PostgresStore {
             finding_changes_event,
             scan_command_completed_event,
             system_event,
+            command_status_cursor,
+            system_event_cursor,
         );
 
         Ok(RunNextScanResult::Completed(completed))
@@ -2103,15 +2176,18 @@ impl PostgresStore {
         requests: &[ScanRequest],
         schedule_rows: &[(Box<str>, venom_domain::CollectionScanSchedule)],
         system_events: &[SystemEvent],
-    ) -> Result<(), String> {
+    ) -> Result<(RowSourceCursor, EventSourceCursor), String> {
         let mut transaction = self.begin_transaction().await?;
-        self.insert_pending_scan_commands(&mut transaction, command_ids, requests)
+        let command_status_cursor = self
+            .insert_pending_scan_commands(&mut transaction, command_ids, requests)
             .await?;
         self.upsert_collection_scan_schedules(&mut transaction, schedule_rows)
             .await?;
-        self.insert_system_events_in_transaction(&mut transaction, system_events)
+        let system_event_cursor = self
+            .insert_system_events_in_transaction(&mut transaction, system_events)
             .await?;
-        self.commit_transaction(transaction).await
+        self.commit_transaction(transaction).await?;
+        Ok((command_status_cursor, system_event_cursor))
     }
 
     fn apply_due_collection_scan_state(
@@ -2121,6 +2197,8 @@ impl PostgresStore {
         system_events: Vec<SystemEvent>,
         command_ids: &[Box<str>],
         requests: Vec<ScanRequest>,
+        command_status_cursor: RowSourceCursor,
+        system_event_cursor: EventSourceCursor,
     ) {
         for due_scan in due_scans {
             let _ = self
@@ -2151,6 +2229,10 @@ impl PostgresStore {
                 ScanCommandStatus::Pending,
             );
         }
+        self.command_status_source_cursor =
+            max_row_source_cursor(&self.command_status_source_cursor, command_status_cursor);
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
     }
 
     fn build_due_collection_system_events(
@@ -2262,11 +2344,13 @@ impl PostgresStore {
         .execute(&mut *transaction)
         .await
         .map_err(|error| format!("postgres integration outbox publish update failed: {error}"))?;
-        self.insert_system_event_in_transaction(&mut transaction, &system_event)
-            .await?;
+        let system_event_cursor =
+            self.insert_system_event_in_transaction(&mut transaction, &system_event).await?;
         self.commit_transaction(transaction).await?;
 
         self.remove_pending_integration_event(event_id);
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         self.push_system_event(system_event);
         Ok(())
     }
@@ -2313,10 +2397,12 @@ impl PostgresStore {
         .map_err(|sql_error| {
             format!("postgres integration outbox failure update failed: {sql_error}")
         })?;
-        self.insert_system_event_in_transaction(&mut transaction, &system_event)
-            .await?;
+        let system_event_cursor =
+            self.insert_system_event_in_transaction(&mut transaction, &system_event).await?;
         self.commit_transaction(transaction).await?;
 
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         self.push_system_event(system_event);
         Ok(failure)
     }
@@ -2328,7 +2414,7 @@ impl PostgresStore {
         finding_changes_event: &PendingIntegrationEvent,
         scan_command_completed_event: &PendingIntegrationEvent,
         system_event: &SystemEvent,
-    ) -> Result<u64, String> {
+    ) -> Result<(u64, RowSourceCursor, EventSourceCursor), String> {
         let mut transaction = self.begin_transaction().await?;
         let provider_report_row_id = self
             .insert_provider_report(&mut transaction, report)
@@ -2341,27 +2427,36 @@ impl PostgresStore {
             ],
         )
         .await?;
-        sqlx::query(&format!(
+        let (updated_at_micros, updated_command_id) = sqlx::query_as::<_, (i64, String)>(&format!(
             concat!(
                 "UPDATE {} ",
                 "SET status = $2, updated_at = NOW() ",
-                "WHERE command_id = $1"
+                "WHERE command_id = $1 ",
+                "RETURNING (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros, command_id"
             ),
             self.names.scan_commands
         ))
         .bind(command_id)
         .bind(scan_command_status_name(ScanCommandStatus::Completed))
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|error| format!("postgres scan command completion failed: {error}"))?;
-        self.insert_system_events_in_transaction(
+        let system_event_cursor = self.insert_system_events_in_transaction(
             &mut transaction,
             std::slice::from_ref(system_event),
         )
         .await?;
         self.commit_transaction(transaction).await?;
-        u64::try_from(provider_report_row_id)
-            .map_err(|_| "postgres provider report id out of range".to_owned())
+        Ok((
+            u64::try_from(provider_report_row_id)
+                .map_err(|_| "postgres provider report id out of range".to_owned())?,
+            row_source_cursor(
+                u64::try_from(updated_at_micros)
+                    .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                updated_command_id.into_boxed_str(),
+            ),
+            system_event_cursor,
+        ))
     }
 
     fn apply_completed_scan_command(
@@ -2370,6 +2465,8 @@ impl PostgresStore {
         finding_changes_event: PendingIntegrationEvent,
         scan_command_completed_event: PendingIntegrationEvent,
         system_event: SystemEvent,
+        command_status_cursor: RowSourceCursor,
+        system_event_cursor: EventSourceCursor,
     ) {
         Arc::make_mut(&mut self.pending_integration_events).push(finding_changes_event);
         Arc::make_mut(&mut self.pending_integration_events).push(scan_command_completed_event);
@@ -2381,6 +2478,10 @@ impl PostgresStore {
             completed.command_id.as_ref(),
             ScanCommandStatus::Completed,
         );
+        self.command_status_source_cursor =
+            max_row_source_cursor(&self.command_status_source_cursor, command_status_cursor);
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         self.push_system_event(system_event);
     }
 
@@ -2441,13 +2542,15 @@ impl PostgresStore {
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         events: &[SystemEvent],
-    ) -> Result<(), String> {
+    ) -> Result<EventSourceCursor, String> {
+        let mut cursor = EventSourceCursor::default();
         for event in events {
-            sqlx::query(&format!(
+            let (created_at_micros, event_id) = sqlx::query_as::<_, (i64, String)>(&format!(
                 concat!(
                     "INSERT INTO {} (event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                     "command_id, integration_event_id, finding_count, retryable, detail) ",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ",
+                    "RETURNING (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros, event_id"
                 ),
                 self.names.system_events
             ))
@@ -2469,11 +2572,19 @@ impl PostgresStore {
             )
             .bind(event.retryable)
             .bind(event.detail.as_deref())
-            .execute(&mut **transaction)
+            .fetch_one(&mut **transaction)
             .await
             .map_err(|error| format!("postgres system event insert failed: {error}"))?;
+            cursor = max_event_source_cursor(
+                &cursor,
+                event_source_cursor(
+                    u64::try_from(created_at_micros)
+                        .map_err(|_| "postgres system event created_at out of range".to_owned())?,
+                    event_id.into_boxed_str(),
+                ),
+            );
         }
-        Ok(())
+        Ok(cursor)
     }
 
     async fn delete_governance_decision_rows_in_transaction(
@@ -2532,11 +2643,12 @@ impl PostgresStore {
             .get(command_id.as_ref())
             .map(|record| record.request.component_key.clone());
         let occurred_at_unix_ms = current_unix_millis()?;
-        sqlx::query(&format!(
+        let (updated_at_micros, updated_command_id) = sqlx::query_as::<_, (i64, String)>(&format!(
             concat!(
                 "UPDATE {} ",
                 "SET status = $2, error_code = $3, retryable = $4, detail = $5, updated_at = NOW() ",
-                "WHERE command_id = $1"
+                "WHERE command_id = $1 ",
+                "RETURNING (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros, command_id"
             ),
             self.names.scan_commands
         ))
@@ -2545,7 +2657,7 @@ impl PostgresStore {
         .bind(provider_error_code(error.kind))
         .bind(error.retryable)
         .bind(error.message.as_ref())
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(|sql_error| format!("postgres scan command failure update failed: {sql_error}"))?;
 
@@ -2566,7 +2678,17 @@ impl PostgresStore {
             retryable: Some(error.retryable),
             detail: Some(error.message.clone()),
         };
-        self.insert_system_event(&event).await?;
+        self.command_status_source_cursor = max_row_source_cursor(
+            &self.command_status_source_cursor,
+            row_source_cursor(
+                u64::try_from(updated_at_micros)
+                    .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                updated_command_id.into_boxed_str(),
+            ),
+        );
+        let system_event_cursor = self.insert_system_event(&event).await?;
+        self.system_event_source_cursor =
+            max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
         self.push_system_event(event);
 
         Ok(RunNextScanResult::Failed(FailedScanCommand {
@@ -3194,7 +3316,9 @@ impl PostgresStore {
         Arc::make_mut(&mut self.order).clear();
         Arc::make_mut(&mut self.pending_integration_events).clear();
         self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
+        self.system_event_source_cursor = EventSourceCursor::default();
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
+        self.command_status_source_cursor = RowSourceCursor::default();
 
         self.load_components().await?;
         self.load_context_profiles().await?;
@@ -3378,6 +3502,7 @@ impl PostgresStore {
         self.commands = backend.commands;
         self.order = backend.order;
         self.command_statuses_snapshot_cache = command_statuses;
+        self.command_status_source_cursor = backend.command_status_source_cursor;
         Ok(())
     }
 
@@ -3399,6 +3524,7 @@ impl PostgresStore {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         backend.load_system_events().await?;
         self.system_event_index_snapshot_cache = backend.system_event_index_snapshot_arc();
+        self.system_event_source_cursor = backend.system_event_source_cursor;
         Ok(())
     }
 
@@ -4022,9 +4148,10 @@ impl PostgresStore {
     }
 
     async fn load_scan_commands(&mut self) -> Result<(), String> {
-        let commands = sqlx::query_as::<_, (String, String, String, String, String, String)>(&format!(
+        let commands = sqlx::query_as::<_, (String, String, String, String, String, String, i64)>(&format!(
             concat!(
-                "SELECT command_id, component_key, artifact_kind, artifact_identity, freshness, status ",
+                "SELECT command_id, component_key, artifact_kind, artifact_identity, freshness, status, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
                 "FROM {} ORDER BY order_id"
             ),
             self.names.scan_commands
@@ -4032,7 +4159,15 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres scan commands load failed: {error}"))?;
-        for (command_id, component_key, artifact_kind, artifact_identity, freshness, status) in
+        for (
+            command_id,
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            freshness,
+            status,
+            updated_at_micros,
+        ) in
             commands
         {
             let command_id = command_id.into_boxed_str();
@@ -4044,6 +4179,14 @@ impl PostgresStore {
             );
             Arc::make_mut(&mut self.order).push(command_id.clone());
             self.set_command_status_snapshot(command_id.as_ref(), status);
+            self.command_status_source_cursor = max_row_source_cursor(
+                &self.command_status_source_cursor,
+                row_source_cursor(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                    command_id.clone(),
+                ),
+            );
             Arc::make_mut(&mut self.commands)
                 .insert(command_id, ScanCommandRecord { request, status });
         }
@@ -4070,6 +4213,7 @@ impl PostgresStore {
     async fn load_system_events(&mut self) -> Result<(), String> {
         let totals = self.load_system_event_totals().await?;
         let windows = self.load_recent_system_event_windows().await?;
+        let cursor = self.load_latest_system_event_cursor().await?;
 
         self.system_event_index_snapshot_cache =
             Arc::new(SystemEventQueryIndex::from_recent_windows(
@@ -4082,6 +4226,7 @@ impl PostgresStore {
                 },
                 windows,
             ));
+        self.system_event_source_cursor = cursor;
         Ok(())
     }
 
@@ -4201,6 +4346,27 @@ impl PostgresStore {
         Ok(windows)
     }
 
+    async fn load_latest_system_event_cursor(&self) -> Result<EventSourceCursor, String> {
+        sqlx::query_as::<_, (i64, String)>(&format!(
+            concat!(
+                "SELECT (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros, event_id ",
+                "FROM {} ORDER BY created_at DESC, event_id DESC LIMIT 1"
+            ),
+            self.names.system_events
+        ))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("postgres latest system event cursor load failed: {error}"))
+        .and_then(|row| match row {
+            Some((created_at_micros, event_id)) => Ok(event_source_cursor(
+                u64::try_from(created_at_micros)
+                    .map_err(|_| "postgres system event created_at out of range".to_owned())?,
+                event_id.into_boxed_str(),
+            )),
+            None => Ok(EventSourceCursor::default()),
+        })
+    }
+
     fn remove_pending_integration_event(&mut self, event_id: &str) {
         if let Some(index) = self
             .pending_integration_events
@@ -4239,30 +4405,30 @@ impl PostgresStore {
         Arc::make_mut(&mut self.command_statuses_snapshot_cache).insert(command_id.into(), status);
     }
 
-    async fn insert_system_event(&self, event: &SystemEvent) -> Result<(), String> {
+    async fn insert_system_event(&self, event: &SystemEvent) -> Result<EventSourceCursor, String> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|error| format!("postgres system event begin failed: {error}"))?;
-        self.insert_system_event_in_transaction(&mut tx, event)
-            .await?;
+        let cursor = self.insert_system_event_in_transaction(&mut tx, event).await?;
         tx.commit()
             .await
             .map_err(|error| format!("postgres system event commit failed: {error}"))?;
-        Ok(())
+        Ok(cursor)
     }
 
     async fn insert_system_event_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         event: &SystemEvent,
-    ) -> Result<(), String> {
-        sqlx::query(&format!(
+    ) -> Result<EventSourceCursor, String> {
+        sqlx::query_as::<_, (i64, String)>(&format!(
             concat!(
                 "INSERT INTO {} (event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                 "command_id, integration_event_id, finding_count, retryable, detail) ",
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ",
+                "RETURNING (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros, event_id"
             ),
             self.names.system_events
         ))
@@ -4284,10 +4450,16 @@ impl PostgresStore {
         )
         .bind(event.retryable)
         .bind(event.detail.as_deref())
-        .execute(&mut **tx)
+        .fetch_one(&mut **tx)
         .await
-        .map_err(|error| format!("postgres system event insert failed: {error}"))?;
-        Ok(())
+        .map_err(|error| format!("postgres system event insert failed: {error}"))
+        .and_then(|(created_at_micros, event_id)| {
+            Ok(event_source_cursor(
+                u64::try_from(created_at_micros)
+                    .map_err(|_| "postgres system event created_at out of range".to_owned())?,
+                event_id.into_boxed_str(),
+            ))
+        })
     }
 
     async fn upsert_risk_acceptance_in_transaction(
@@ -4478,7 +4650,9 @@ impl PostgresReadSnapshotLoader {
         base_read_model: Arc<FindingReadModel>,
         base_read_model_source_watermark: u64,
         base_system_event_index: Arc<SystemEventQueryIndex>,
+        base_system_event_source_cursor: EventSourceCursor,
         base_command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        base_command_status_source_cursor: RowSourceCursor,
     ) -> Result<LoadedPostgresReadSnapshot, String> {
         let change_watermark = self.current_change_watermark().await?;
         if change_watermark <= since_change_watermark {
@@ -4487,7 +4661,9 @@ impl PostgresReadSnapshotLoader {
                 read_model: base_read_model,
                 read_model_source_watermark: base_read_model_source_watermark,
                 system_event_index: base_system_event_index,
+                system_event_source_cursor: base_system_event_source_cursor,
                 command_statuses: base_command_statuses,
+                command_status_source_cursor: base_command_status_source_cursor,
                 change_watermark,
             });
         }
@@ -4543,23 +4719,35 @@ impl PostgresReadSnapshotLoader {
             } else {
                 base_read_model_source_watermark
             };
-        let system_event_index = if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
-            self.load_system_event_index_snapshot().await?
-        } else {
-            base_system_event_index
-        };
-        let command_statuses = if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
-            self.load_command_statuses_snapshot().await?
-        } else {
-            base_command_statuses
-        };
+        let (system_event_index, system_event_source_cursor) =
+            if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
+                self.load_system_event_index_snapshot(
+                    base_system_event_index,
+                    base_system_event_source_cursor,
+                )
+                .await?
+            } else {
+                (base_system_event_index, base_system_event_source_cursor)
+            };
+        let (command_statuses, command_status_source_cursor) =
+            if lane_mask & CHANGE_LANE_COMMAND_STATUSES != 0 {
+                self.load_command_statuses_snapshot(
+                    base_command_statuses,
+                    base_command_status_source_cursor,
+                )
+                .await?
+            } else {
+                (base_command_statuses, base_command_status_source_cursor)
+            };
 
         Ok(LoadedPostgresReadSnapshot {
             inventory,
             read_model,
             read_model_source_watermark,
             system_event_index,
+            system_event_source_cursor,
             command_statuses,
+            command_status_source_cursor,
             change_watermark,
         })
     }
@@ -4743,18 +4931,146 @@ impl PostgresReadSnapshotLoader {
             .map_err(|_| "postgres provider report watermark out of range".to_owned())
     }
 
-    async fn load_system_event_index_snapshot(&self) -> Result<Arc<SystemEventQueryIndex>, String> {
-        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.load_system_events().await?;
-        Ok(backend.system_event_index_snapshot_arc())
+    async fn load_system_event_index_snapshot(
+        &self,
+        base_system_event_index: Arc<SystemEventQueryIndex>,
+        base_system_event_source_cursor: EventSourceCursor,
+    ) -> Result<(Arc<SystemEventQueryIndex>, EventSourceCursor), String> {
+        let rows = sqlx::query_as::<_, SystemEventDeltaRow>(&format!(
+            concat!(
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, created_at_micros ",
+                "FROM (",
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {}",
+                ") delta ",
+                "WHERE created_at_micros > $1 OR (created_at_micros = $1 AND event_id > $2) ",
+                "ORDER BY created_at_micros DESC, event_id DESC"
+            ),
+            self.names.system_events
+        ))
+        .bind(
+            i64::try_from(base_system_event_source_cursor.unix_micros)
+                .map_err(|_| "postgres system event cursor out of range".to_owned())?,
+        )
+        .bind(
+            base_system_event_source_cursor
+                .tie_breaker
+                .as_deref()
+                .unwrap_or(""),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres system event delta load failed: {error}"))?;
+
+        if rows.is_empty() {
+            return Ok((base_system_event_index, base_system_event_source_cursor));
+        }
+
+        let mut cursor = base_system_event_source_cursor;
+        let mut delta_events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (
+                event_id,
+                occurred_at_unix_ms,
+                category,
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+                created_at_micros,
+            ) = row;
+            cursor = max_event_source_cursor(
+                &cursor,
+                event_source_cursor(
+                    u64::try_from(created_at_micros)
+                        .map_err(|_| "postgres system event created_at out of range".to_owned())?,
+                    event_id.clone().into_boxed_str(),
+                ),
+            );
+            delta_events.push(parse_system_event_row((
+                event_id,
+                occurred_at_unix_ms,
+                category,
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+            ))?);
+        }
+
+        let delta_index = SystemEventQueryIndex::from_newest_first(delta_events.iter());
+        Ok((
+            Arc::new(SystemEventQueryIndex::merged(
+                base_system_event_index.as_ref(),
+                &delta_index,
+            )),
+            cursor,
+        ))
     }
 
     async fn load_command_statuses_snapshot(
         &self,
-    ) -> Result<Arc<BTreeMap<Box<str>, ScanCommandStatus>>, String> {
-        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.load_scan_commands().await?;
-        Ok(backend.command_statuses_snapshot_arc())
+        base_command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+        base_command_status_source_cursor: RowSourceCursor,
+    ) -> Result<(Arc<BTreeMap<Box<str>, ScanCommandStatus>>, RowSourceCursor), String> {
+        let rows = sqlx::query_as::<_, CommandStatusDeltaRow>(&format!(
+            concat!(
+                "SELECT command_id, status, updated_at_micros ",
+                "FROM (",
+                "SELECT command_id, status, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {}",
+                ") delta ",
+                "WHERE updated_at_micros > $1 OR (updated_at_micros = $1 AND command_id > $2) ",
+                "ORDER BY updated_at_micros ASC, command_id ASC"
+            ),
+            self.names.scan_commands
+        ))
+        .bind(
+            i64::try_from(base_command_status_source_cursor.unix_micros)
+                .map_err(|_| "postgres command status cursor out of range".to_owned())?,
+        )
+        .bind(
+            base_command_status_source_cursor
+                .tie_breaker
+                .as_deref()
+                .unwrap_or(""),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres command status delta load failed: {error}"))?;
+
+        if rows.is_empty() {
+            return Ok((base_command_statuses, base_command_status_source_cursor));
+        }
+
+        let mut cursor = base_command_status_source_cursor;
+        let mut statuses = Arc::unwrap_or_clone(base_command_statuses);
+        for (command_id, status, updated_at_micros) in rows {
+            let command_id = command_id.into_boxed_str();
+            statuses.insert(command_id.clone(), parse_scan_command_status(&status)?);
+            cursor = max_row_source_cursor(
+                &cursor,
+                row_source_cursor(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                    command_id,
+                ),
+            );
+        }
+
+        Ok((Arc::new(statuses), cursor))
     }
 }
 
@@ -4934,6 +5250,61 @@ fn parse_system_event_row(row: SystemEventRow) -> Result<SystemEvent, String> {
         retryable,
         detail: detail.map(String::into_boxed_str),
     })
+}
+
+fn event_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> EventSourceCursor {
+    EventSourceCursor {
+        unix_micros,
+        tie_breaker: Some(tie_breaker),
+    }
+}
+
+fn row_source_cursor(unix_micros: u64, tie_breaker: Box<str>) -> RowSourceCursor {
+    RowSourceCursor {
+        unix_micros,
+        tie_breaker: Some(tie_breaker),
+    }
+}
+
+fn max_event_source_cursor(left: &EventSourceCursor, right: EventSourceCursor) -> EventSourceCursor {
+    if compare_source_cursor(
+        left.unix_micros,
+        left.tie_breaker.as_deref(),
+        right.unix_micros,
+        right.tie_breaker.as_deref(),
+    )
+    .is_ge()
+    {
+        left.clone()
+    } else {
+        right
+    }
+}
+
+fn max_row_source_cursor(left: &RowSourceCursor, right: RowSourceCursor) -> RowSourceCursor {
+    if compare_source_cursor(
+        left.unix_micros,
+        left.tie_breaker.as_deref(),
+        right.unix_micros,
+        right.tie_breaker.as_deref(),
+    )
+    .is_ge()
+    {
+        left.clone()
+    } else {
+        right
+    }
+}
+
+fn compare_source_cursor(
+    left_unix_micros: u64,
+    left_tie_breaker: Option<&str>,
+    right_unix_micros: u64,
+    right_tie_breaker: Option<&str>,
+) -> std::cmp::Ordering {
+    left_unix_micros
+        .cmp(&right_unix_micros)
+        .then_with(|| left_tie_breaker.cmp(&right_tie_breaker))
 }
 
 fn parse_freshness(value: &str) -> Result<EvidenceFreshness, String> {
@@ -5345,7 +5716,9 @@ mod tests {
         let base_read_model = backend.read_model_snapshot_arc();
         let base_read_model_source_watermark = backend.read_model_source_watermark();
         let base_system_event_index = backend.system_event_index_snapshot_arc();
+        let base_system_event_source_cursor = backend.system_event_source_cursor();
         let base_command_statuses = backend.command_statuses_snapshot_arc();
+        let base_command_status_source_cursor = backend.command_status_source_cursor();
 
         let mut writer = PostgresStore::open(&database_url, &schema)
             .await
@@ -5374,7 +5747,9 @@ mod tests {
                 Arc::clone(&base_read_model),
                 base_read_model_source_watermark,
                 base_system_event_index,
+                base_system_event_source_cursor,
                 base_command_statuses,
+                base_command_status_source_cursor,
             )
             .await
             .expect("detached fresh read should load");
