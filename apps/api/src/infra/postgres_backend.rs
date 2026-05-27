@@ -5337,7 +5337,10 @@ mod tests {
             .expect("first provider report should persist");
 
         let loader = backend.read_snapshot_loader();
-        let since_change_watermark = backend.observed_change_watermark();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after first report");
         let base_inventory = backend.inventory_snapshot_arc();
         let base_read_model = backend.read_model_snapshot_arc();
         let base_read_model_source_watermark = backend.read_model_source_watermark();
