@@ -1064,6 +1064,23 @@ pub struct ComponentInventory {
 }
 
 impl ComponentInventory {
+    /// Clear component-local bindings that are reconstructed from their own durable tables.
+    pub fn reset_component_bindings_for_rebuild(&mut self) {
+        for component in self.components.values_mut() {
+            component.artifacts.clear();
+            component.context_profile_key = None;
+            component.tag_keys.clear();
+        }
+        for tag in self.component_tags.values_mut() {
+            tag.component_keys.clear();
+        }
+    }
+
+    /// Clear collection-local state that is reconstructed from collection durable tables.
+    pub fn reset_collections_for_rebuild(&mut self) {
+        self.collections.clear();
+    }
+
     /// Register one component under management.
     #[must_use]
     pub fn register(&mut self, registration: ComponentRegistration) -> RegisterComponentResult {
