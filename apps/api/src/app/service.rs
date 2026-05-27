@@ -524,7 +524,7 @@ impl ApiApplication {
     }
 
     #[must_use]
-    pub fn from_postgres_store(backend: PostgresStore) -> Self {
+    pub const fn from_postgres_store(backend: PostgresStore) -> Self {
         Self {
             backend: ApiStore::Postgres(backend),
         }
