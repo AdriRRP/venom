@@ -364,18 +364,19 @@ impl SystemEventQueryIndex {
             Some(SystemEventCategory::Publication) => self.publication_total,
         };
 
-        let events = match query.category {
-            None => self
-                .recent_events
-                .iter()
-                .filter_map(|slot| {
-                    self.retained_events
-                        .get(usize::from(*slot))
-                        .map(|entry| Arc::clone(&entry.event))
-                })
-                .take(limit)
-                .collect::<Vec<_>>(),
-            Some(category) => {
+        let events = query.category.map_or_else(
+            || {
+                self.recent_events
+                    .iter()
+                    .filter_map(|slot| {
+                        self.retained_events
+                            .get(usize::from(*slot))
+                            .map(|entry| Arc::clone(&entry.event))
+                    })
+                    .take(limit)
+                    .collect::<Vec<_>>()
+            },
+            |category| {
                 let mut events = Vec::with_capacity(limit);
                 let mut cursor = self.category_recent_head(category);
                 while let Some(slot) = cursor {
@@ -389,8 +390,8 @@ impl SystemEventQueryIndex {
                     cursor = entry.next_same_category;
                 }
                 events
-            }
-        };
+            },
+        );
         SystemEventsPage {
             total,
             returned: events.len(),
@@ -399,7 +400,7 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn category_recent_head(&self, category: SystemEventCategory) -> Option<u16> {
+    const fn category_recent_head(&self, category: SystemEventCategory) -> Option<u16> {
         match category {
             SystemEventCategory::Scheduler => self.recent_scheduler_head,
             SystemEventCategory::Command => self.recent_command_head,
@@ -408,7 +409,7 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn category_recent_len(&self, category: SystemEventCategory) -> usize {
+    const fn category_recent_len(&self, category: SystemEventCategory) -> usize {
         match category {
             SystemEventCategory::Scheduler => self.recent_scheduler_len,
             SystemEventCategory::Command => self.recent_command_len,
@@ -417,7 +418,7 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn set_category_recent_window(
+    const fn set_category_recent_window(
         &mut self,
         category: SystemEventCategory,
         head: Option<u16>,
