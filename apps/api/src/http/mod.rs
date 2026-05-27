@@ -152,9 +152,7 @@ impl SnapshotRefresh {
             Self::ReadModel {
                 read_model,
                 read_model_source_watermark,
-            } => Arc::new(
-                current.with_read_model_arc(read_model, read_model_source_watermark),
-            ),
+            } => Arc::new(current.with_read_model_arc(read_model, read_model_source_watermark)),
             Self::SystemEvents { system_events } => {
                 Arc::new(current.with_system_event_index_arc(system_events))
             }
@@ -492,13 +490,11 @@ impl ApiState {
             SnapshotRefresh::ReadModel {
                 read_model,
                 read_model_source_watermark,
-            } => {
-                SnapshotRefresh::CombinedReadModelAndSystemEvents {
-                    read_model,
-                    read_model_source_watermark,
-                    system_events,
-                }
-            }
+            } => SnapshotRefresh::CombinedReadModelAndSystemEvents {
+                read_model,
+                read_model_source_watermark,
+                system_events,
+            },
             _ => unreachable!("read-model refresh must produce a read-model lane"),
         }
     }
@@ -594,11 +590,7 @@ impl ApiState {
             .await
     }
 
-    async fn mutate_runtime<T, F, R>(
-        &self,
-        operation: F,
-        refresh: R,
-    ) -> Result<T, ApiError>
+    async fn mutate_runtime<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
     where
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,

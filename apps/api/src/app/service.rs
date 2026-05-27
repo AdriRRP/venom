@@ -603,7 +603,10 @@ fn merge_recent_arc_events(
     merged
 }
 
-fn compare_recent_system_event_order(left: &SystemEvent, right: &SystemEvent) -> std::cmp::Ordering {
+fn compare_recent_system_event_order(
+    left: &SystemEvent,
+    right: &SystemEvent,
+) -> std::cmp::Ordering {
     right
         .occurred_at_unix_ms
         .cmp(&left.occurred_at_unix_ms)
@@ -3966,7 +3969,8 @@ mod tests {
             .runtime
             .clone();
 
-        local.state
+        local
+            .state
             .register_component(venom_domain::ComponentRegistration::new(
                 "component:payments-api",
                 "Payments API",
