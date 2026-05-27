@@ -146,7 +146,6 @@ type SystemEventWindowRow = (
     Option<bool>,
     Option<String>,
     i64,
-    i64,
 );
 
 #[derive(Default)]
@@ -159,19 +158,37 @@ struct SystemEventTotals {
 }
 
 impl PostgresStore {
+    /// Connect one shared Postgres pool for VENOM durable operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be reached.
+    pub async fn connect_pool(database_url: &str) -> Result<PgPool, String> {
+        PgPoolOptions::new()
+            .max_connections(POSTGRES_POOL_MAX_CONNECTIONS)
+            .connect(database_url)
+            .await
+            .map_err(|error| format!("postgres connect failed: {error}"))
+    }
+
     /// Open or create the Postgres durable backend and rebuild in-memory state.
     ///
     /// # Errors
     ///
     /// Returns an error string when Postgres cannot be reached, initialized, or replayed.
+    #[cfg(test)]
     pub async fn open(database_url: &str, schema: &str) -> Result<Self, String> {
-        let names = TableNames::new(schema)?;
-        let pool = PgPoolOptions::new()
-            .max_connections(POSTGRES_POOL_MAX_CONNECTIONS)
-            .connect(database_url)
-            .await
-            .map_err(|error| format!("postgres connect failed: {error}"))?;
+        let pool = Self::connect_pool(database_url).await?;
+        Self::open_with_pool(pool, schema).await
+    }
 
+    /// Open or create the Postgres durable backend over one shared pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be initialized or replayed.
+    pub async fn open_with_pool(pool: PgPool, schema: &str) -> Result<Self, String> {
+        let names = TableNames::new(schema)?;
         let mut backend = Self {
             pool,
             names,
@@ -227,20 +244,19 @@ impl PostgresStore {
             .changed_lane_mask(self.observed_change_watermark(), current_change_watermark)
             .await?;
         if lane_mask & CHANGE_LANE_INVENTORY != 0 {
-            self.refresh_inventory_from_remote().await?;
-        } else {
-            if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
-                self.refresh_component_bindings_from_remote().await?;
-            }
-            if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
-                self.refresh_collections_from_remote().await?;
-            }
-            if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
-                self.refresh_collection_scan_schedules_from_remote().await?;
-            }
-            if lane_mask & CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS != 0 {
-                self.refresh_provider_runtime_configs_from_remote().await?;
-            }
+            self.refresh_inventory_core_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
+            self.refresh_component_bindings_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
+            self.refresh_collections_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
+            self.refresh_collection_scan_schedules_from_remote().await?;
+        }
+        if lane_mask & CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS != 0 {
+            self.refresh_provider_runtime_configs_from_remote().await?;
         }
         if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
             self.refresh_read_model_from_remote(lane_mask).await?;
@@ -1906,6 +1922,7 @@ impl PostgresStore {
 
         match provider.scan(&request).await {
             Ok(report) => {
+                self.refresh_from_remote_if_stale().await?;
                 self.complete_scan_command(command_id, request, provider.provider_key(), report)
                     .await
             }
@@ -3229,19 +3246,12 @@ impl PostgresStore {
         })
     }
 
-    async fn refresh_inventory_from_remote(&mut self) -> Result<(), String> {
+    async fn refresh_inventory_core_from_remote(&mut self) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
         backend.load_components().await?;
         backend.load_context_profiles().await?;
-        backend.load_component_context_profiles().await?;
         backend.load_component_tags().await?;
-        backend.load_component_tag_memberships().await?;
-        backend.load_collections().await?;
-        backend.load_collection_sources().await?;
-        backend.load_collection_memberships().await?;
-        backend.load_collection_scan_schedules().await?;
-        backend.load_artifact_bindings().await?;
-        backend.load_provider_runtime_configs().await?;
         self.ingestion = backend.ingestion;
         self.refresh_inventory_snapshot_cache();
         Ok(())
@@ -3993,15 +4003,14 @@ impl PostgresStore {
         let rows = sqlx::query_as::<_, SystemEventWindowRow>(&format!(
             concat!(
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
-                "command_id, integration_event_id, finding_count, retryable, detail, global_rank, category_rank ",
+                "command_id, integration_event_id, finding_count, retryable, detail, global_rank ",
                 "FROM (",
                 "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
                 "command_id, integration_event_id, finding_count, retryable, detail, ",
-                "ROW_NUMBER() OVER (ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS global_rank, ",
-                "ROW_NUMBER() OVER (PARTITION BY category ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS category_rank ",
+                "ROW_NUMBER() OVER (ORDER BY occurred_at_unix_ms DESC, event_id DESC) AS global_rank ",
                 "FROM {}",
                 ") ranked ",
-                "WHERE global_rank <= $1 OR category_rank <= $1 ",
+                "WHERE global_rank <= $1 ",
                 "ORDER BY occurred_at_unix_ms DESC, event_id DESC"
             ),
             self.names.system_events
@@ -4026,7 +4035,6 @@ impl PostgresStore {
                 retryable,
                 detail,
                 global_rank,
-                category_rank,
             ) = row;
             let event = Arc::new(parse_system_event_row((
                 event_id,
@@ -4044,17 +4052,12 @@ impl PostgresStore {
             if global_rank <= limit {
                 windows.recent_events.push(event.clone());
             }
-            if category_rank <= limit {
-                match category.as_str() {
-                    "scheduler" => windows.recent_scheduler_events.push(event),
-                    "command" => windows.recent_command_events.push(event),
-                    "governance" => windows.recent_governance_events.push(event),
-                    "publication" => windows.recent_publication_events.push(event),
-                    _ => {
-                        return Err(format!(
-                            "postgres system events contain unknown category: {category}"
-                        ));
-                    }
+            match category.as_str() {
+                "scheduler" | "command" | "governance" | "publication" => {}
+                _ => {
+                    return Err(format!(
+                        "postgres system events contain unknown category: {category}"
+                    ));
                 }
             }
         }
@@ -4353,14 +4356,17 @@ impl PostgresReadSnapshotLoader {
         let lane_mask = self
             .changed_lane_mask(since_change_watermark, change_watermark)
             .await?;
-        let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
-            self.load_inventory_snapshot().await?
-        } else {
-            let inventory = if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
-                self.load_component_binding_inventory_snapshot(base_inventory)
-                    .await?
+        let inventory = {
+            let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
+                self.load_inventory_core_snapshot(base_inventory).await?
             } else {
                 base_inventory
+            };
+            let inventory = if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
+                self.load_component_binding_inventory_snapshot(inventory)
+                    .await?
+            } else {
+                inventory
             };
             let inventory = if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
                 self.load_collection_inventory_snapshot(inventory).await?
@@ -4419,6 +4425,18 @@ impl PostgresReadSnapshotLoader {
         })
     }
 
+    async fn load_inventory_core_snapshot(
+        &self,
+        base_inventory: Arc<ComponentInventory>,
+    ) -> Result<Arc<ComponentInventory>, String> {
+        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = FindingIngestion::from_inventory_arc(base_inventory);
+        backend.load_components().await?;
+        backend.load_context_profiles().await?;
+        backend.load_component_tags().await?;
+        Ok(backend.inventory_snapshot_arc())
+    }
+
     async fn changed_lane_mask(
         &self,
         since_change_watermark: u64,
@@ -4464,23 +4482,6 @@ impl PostgresReadSnapshotLoader {
         } else {
             Ok(lane_mask)
         }
-    }
-
-    async fn load_inventory_snapshot(&self) -> Result<Arc<ComponentInventory>, String> {
-        let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.load_components().await?;
-        backend.load_context_profiles().await?;
-        backend.load_component_context_profiles().await?;
-        backend.load_component_tags().await?;
-        backend.load_component_tag_memberships().await?;
-        backend.load_collections().await?;
-        backend.load_collection_sources().await?;
-        backend.load_collection_memberships().await?;
-        backend.load_collection_scan_schedules().await?;
-        backend.load_artifact_bindings().await?;
-        backend.load_provider_runtime_configs().await?;
-        backend.refresh_inventory_snapshot_cache();
-        Ok(backend.inventory_snapshot_arc())
     }
 
     async fn load_component_binding_inventory_snapshot(

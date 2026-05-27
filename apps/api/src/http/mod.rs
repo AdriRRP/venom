@@ -221,13 +221,15 @@ impl ApiState {
     ///
     /// Returns an error string when the Postgres durable backend cannot be opened.
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
-        let state_service = ApiApplication::open_postgres(database_url, schema)
+        let pool =
+            crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
+        let state_service = ApiApplication::open_postgres_with_pool(pool.clone(), schema)
             .await
             .map_err(|error| error.to_string())?;
-        let runtime_service = ApiApplication::open_postgres(database_url, schema)
+        let runtime_service = ApiApplication::open_postgres_with_pool(pool.clone(), schema)
             .await
             .map_err(|error| error.to_string())?;
-        let publication_service = ApiApplication::open_postgres(database_url, schema)
+        let publication_service = ApiApplication::open_postgres_with_pool(pool, schema)
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self::new_partitioned(
@@ -572,7 +574,7 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::State, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::State, true, operation, refresh)
             .await
     }
 
@@ -581,7 +583,20 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::Runtime, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::Runtime, true, operation, refresh)
+            .await
+    }
+
+    async fn mutate_runtime_postgres_relaxed<T, F, R>(
+        &self,
+        operation: F,
+        refresh: R,
+    ) -> Result<T, ApiError>
+    where
+        F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
+        R: FnOnce(&ApiApplication) -> SnapshotRefresh,
+    {
+        self.mutate_on_lane(ApiMutationLane::Runtime, false, operation, refresh)
             .await
     }
 
@@ -590,13 +605,14 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::Publication, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::Publication, true, operation, refresh)
             .await
     }
 
     async fn mutate_on_lane<T, F, R>(
         &self,
         lane: ApiMutationLane,
+        use_state_read_barrier: bool,
         operation: F,
         refresh: R,
     ) -> Result<T, ApiError>
@@ -609,11 +625,12 @@ impl ApiState {
         } else {
             None
         };
-        let _read_consistency_guard = if lane.requires_state_read_barrier() {
-            Some(self.inner.write_consistency_barrier.read().await)
-        } else {
-            None
-        };
+        let _read_consistency_guard =
+            if use_state_read_barrier && lane.requires_state_read_barrier() {
+                Some(self.inner.write_consistency_barrier.read().await)
+            } else {
+                None
+            };
         let _local_runtime_mutation_guard = if self.inner.remote_read_snapshot_loader.is_none()
             && lane.requires_local_runtime_mutation_barrier()
         {
@@ -724,7 +741,7 @@ impl ApiState {
 
         for _ in 0..max_commands {
             let step = self
-                .mutate_runtime(
+                .mutate_runtime_postgres_relaxed(
                     |service| {
                         let request = DrainWorkerCommand {
                             max_commands: Some(1),

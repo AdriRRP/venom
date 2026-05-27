@@ -218,6 +218,18 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W176-shared-postgres-pool-across-api-lanes`
+    Reuse one `PgPool` across the partitioned Postgres-backed API lanes instead
+    of opening three independent pools for the same schema and process.
+75. `W177-runtime-worker-state-barrier-narrowing`
+    Let the scan-command worker lane avoid the state read barrier where it can
+    refresh to the latest durable state immediately before applying outcomes.
+76. `W178-inventory-core-remote-refresh-narrowing`
+    Refresh only the changed inventory-core durable tables during detached
+    Postgres reads instead of reloading the whole inventory-core subgraph.
+77. `W179-single-window-system-event-categories`
+    Derive category-scoped recent event views from one shared recent window
+    instead of storing separate recent slot lists per category.
 74. `W172-http-publication-lane-barrier-narrowing`
     Stop serializing publication writes behind the state/runtime consistency
     barrier when the publication lane does not depend on mutable state

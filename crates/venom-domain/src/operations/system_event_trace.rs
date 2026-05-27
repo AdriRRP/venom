@@ -166,10 +166,6 @@ pub struct SystemEventQueryIndex {
     retained_event_slots: BTreeMap<Box<str>, u16>,
     retained_events: Vec<Arc<SystemEvent>>,
     recent_events: Vec<u16>,
-    recent_scheduler_events: Vec<u16>,
-    recent_command_events: Vec<u16>,
-    recent_governance_events: Vec<u16>,
-    recent_publication_events: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -208,10 +204,6 @@ impl SystemEventQueryIndex {
             retained_event_slots: BTreeMap::new(),
             retained_events: Vec::new(),
             recent_events: Vec::new(),
-            recent_scheduler_events: Vec::new(),
-            recent_command_events: Vec::new(),
-            recent_governance_events: Vec::new(),
-            recent_publication_events: Vec::new(),
         }
     }
 
@@ -238,19 +230,15 @@ impl SystemEventQueryIndex {
         match self.retained_events[usize::from(slot)].category() {
             SystemEventCategory::Scheduler => {
                 self.scheduler_total += 1;
-                push_bounded_slot(&mut self.recent_scheduler_events, slot);
             }
             SystemEventCategory::Command => {
                 self.command_total += 1;
-                push_bounded_slot(&mut self.recent_command_events, slot);
             }
             SystemEventCategory::Governance => {
                 self.governance_total += 1;
-                push_bounded_slot(&mut self.recent_governance_events, slot);
             }
             SystemEventCategory::Publication => {
                 self.publication_total += 1;
-                push_bounded_slot(&mut self.recent_publication_events, slot);
             }
         }
         push_bounded_slot(&mut self.recent_events, slot);
@@ -265,82 +253,22 @@ impl SystemEventQueryIndex {
             command_total: left.command_total + right.command_total,
             governance_total: left.governance_total + right.governance_total,
             publication_total: left.publication_total + right.publication_total,
-            ..Self::from_recent_id_windows(
+            ..Self::from_recent_id_windows(merge_recent_events(
+                &left.recent_events,
                 &left.retained_events,
+                &right.recent_events,
                 &right.retained_events,
-                merge_recent_events(
-                    &left.recent_events,
-                    &left.retained_events,
-                    &right.recent_events,
-                    &right.retained_events,
-                ),
-                merge_recent_events(
-                    &left.recent_scheduler_events,
-                    &left.retained_events,
-                    &right.recent_scheduler_events,
-                    &right.retained_events,
-                ),
-                merge_recent_events(
-                    &left.recent_command_events,
-                    &left.retained_events,
-                    &right.recent_command_events,
-                    &right.retained_events,
-                ),
-                merge_recent_events(
-                    &left.recent_governance_events,
-                    &left.retained_events,
-                    &right.recent_governance_events,
-                    &right.retained_events,
-                ),
-                merge_recent_events(
-                    &left.recent_publication_events,
-                    &left.retained_events,
-                    &right.recent_publication_events,
-                    &right.retained_events,
-                ),
-            )
+            ))
         }
     }
 
-    fn from_recent_id_windows(
-        _left_retained: &[Arc<SystemEvent>],
-        _right_retained: &[Arc<SystemEvent>],
-        recent_events: Vec<Arc<SystemEvent>>,
-        recent_scheduler_events: Vec<Arc<SystemEvent>>,
-        recent_command_events: Vec<Arc<SystemEvent>>,
-        recent_governance_events: Vec<Arc<SystemEvent>>,
-        recent_publication_events: Vec<Arc<SystemEvent>>,
-    ) -> Self {
+    fn from_recent_id_windows(recent_events: Vec<Arc<SystemEvent>>) -> Self {
         let mut index = Self::new();
         load_recent_window(
             &mut index.retained_event_slots,
             &mut index.retained_events,
             &mut index.recent_events,
             recent_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_scheduler_events,
-            recent_scheduler_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_command_events,
-            recent_command_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_governance_events,
-            recent_governance_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_publication_events,
-            recent_publication_events,
         );
         index
     }
@@ -359,40 +287,12 @@ impl SystemEventQueryIndex {
             retained_event_slots: BTreeMap::new(),
             retained_events: Vec::new(),
             recent_events: Vec::new(),
-            recent_scheduler_events: Vec::new(),
-            recent_command_events: Vec::new(),
-            recent_governance_events: Vec::new(),
-            recent_publication_events: Vec::new(),
         };
         load_recent_window(
             &mut index.retained_event_slots,
             &mut index.retained_events,
             &mut index.recent_events,
             windows.recent_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_scheduler_events,
-            windows.recent_scheduler_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_command_events,
-            windows.recent_command_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_governance_events,
-            windows.recent_governance_events,
-        );
-        load_recent_window(
-            &mut index.retained_event_slots,
-            &mut index.retained_events,
-            &mut index.recent_publication_events,
-            windows.recent_publication_events,
         );
         index.retain_only_windowed_events();
         index
@@ -401,24 +301,24 @@ impl SystemEventQueryIndex {
     #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
         let limit = query.normalized_limit();
-        let (total, source) = match query.category {
-            None => (self.total, &self.recent_events),
-            Some(SystemEventCategory::Scheduler) => {
-                (self.scheduler_total, &self.recent_scheduler_events)
-            }
-            Some(SystemEventCategory::Command) => (self.command_total, &self.recent_command_events),
-            Some(SystemEventCategory::Governance) => {
-                (self.governance_total, &self.recent_governance_events)
-            }
-            Some(SystemEventCategory::Publication) => {
-                (self.publication_total, &self.recent_publication_events)
-            }
+        let total = match query.category {
+            None => self.total,
+            Some(SystemEventCategory::Scheduler) => self.scheduler_total,
+            Some(SystemEventCategory::Command) => self.command_total,
+            Some(SystemEventCategory::Governance) => self.governance_total,
+            Some(SystemEventCategory::Publication) => self.publication_total,
         };
 
-        let events = source
+        let events = self
+            .recent_events
             .iter()
-            .take(limit)
             .filter_map(|slot| self.retained_events.get(usize::from(*slot)).map(Arc::clone))
+            .filter(|event| {
+                query
+                    .category
+                    .is_none_or(|category| event.category() == category)
+            })
+            .take(limit)
             .collect::<Vec<_>>();
         SystemEventsPage {
             total,
@@ -429,14 +329,7 @@ impl SystemEventQueryIndex {
     }
     fn retain_only_windowed_events(&mut self) {
         let mut retained_slots = BTreeSet::<u16>::new();
-        for slot in self
-            .recent_events
-            .iter()
-            .chain(self.recent_scheduler_events.iter())
-            .chain(self.recent_command_events.iter())
-            .chain(self.recent_governance_events.iter())
-            .chain(self.recent_publication_events.iter())
-        {
+        for slot in self.recent_events.iter() {
             retained_slots.insert(*slot);
         }
         let mut remap = BTreeMap::<u16, u16>::new();
@@ -452,10 +345,6 @@ impl SystemEventQueryIndex {
             ));
         }
         remap_recent_slots(&mut self.recent_events, &remap);
-        remap_recent_slots(&mut self.recent_scheduler_events, &remap);
-        remap_recent_slots(&mut self.recent_command_events, &remap);
-        remap_recent_slots(&mut self.recent_governance_events, &remap);
-        remap_recent_slots(&mut self.recent_publication_events, &remap);
         self.retained_event_slots = next_events
             .iter()
             .enumerate()
