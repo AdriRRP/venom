@@ -110,7 +110,7 @@ struct TailRefreshCursors {
 
 impl PostgresReadSnapshotBase {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
@@ -5490,6 +5490,7 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::PostgresReadSnapshotBase;
     use super::PostgresStore;
     use super::change_journal_gap_requires_full_refresh;
     use std::sync::Arc;
