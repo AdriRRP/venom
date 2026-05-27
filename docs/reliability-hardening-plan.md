@@ -309,6 +309,19 @@ Completed:
     state by changed snapshot lanes instead of detached full rebuilds, make the
     `ReleaseBoard` lazy over source arcs, and compact recent system-event
     indexing so retained events are stored once and referenced cheaply.
+79. `W184-postgres-lane-residency-sharing`
+    Share the hot Postgres scan-command and integration-outbox residency across
+    forked API lanes through copy-on-write sources instead of cloning them at
+    bootstrap.
+80. `W185-postgres-read-model-remote-delta-tightening`
+    Narrow detached Postgres findings refresh so governance-only and
+    findings-only remote changes reuse unaffected in-memory read-model state.
+81. `W186-local-system-events-merge-delta-cache`
+    Reuse one cached merged local system-event index when only one source lane
+    changed instead of rebuilding the merge from both sources every time.
+82. `W187-state-runtime-barrier-scope-tightening`
+    Keep the state/runtime consistency barrier only around runtime mutations
+    that truly need inventory-read correctness at decision time.
 
 ## Exit condition
 

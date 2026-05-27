@@ -61,6 +61,7 @@ impl std::error::Error for ApiApplicationError {}
 pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
+    read_model_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     release_board: Mutex<Option<Arc<ReleaseBoard>>>,
@@ -71,12 +72,14 @@ impl ApiReadSnapshot {
     pub const fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
+        read_model_source_watermark: u64,
         system_event_index: Arc<SystemEventQueryIndex>,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     ) -> Self {
         Self {
             inventory,
             read_model,
+            read_model_source_watermark,
             system_event_index,
             command_statuses,
             release_board: Mutex::new(None),
@@ -88,6 +91,7 @@ impl ApiReadSnapshot {
         Self {
             inventory,
             read_model: Arc::clone(&self.read_model),
+            read_model_source_watermark: self.read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
             release_board: Mutex::new(None),
@@ -95,10 +99,15 @@ impl ApiReadSnapshot {
     }
 
     #[must_use]
-    pub fn with_read_model_arc(&self, read_model: Arc<FindingReadModel>) -> Self {
+    pub fn with_read_model_arc(
+        &self,
+        read_model: Arc<FindingReadModel>,
+        read_model_source_watermark: u64,
+    ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model,
+            read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses: Arc::clone(&self.command_statuses),
             release_board: Mutex::new(None),
@@ -113,6 +122,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
+            read_model_source_watermark: self.read_model_source_watermark,
             system_event_index,
             command_statuses: Arc::clone(&self.command_statuses),
             release_board: Mutex::new(None),
@@ -127,6 +137,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
+            read_model_source_watermark: self.read_model_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             command_statuses,
             release_board: Mutex::new(None),
@@ -155,6 +166,11 @@ impl ApiReadSnapshot {
     #[must_use]
     pub(crate) fn read_model_arc(&self) -> Arc<FindingReadModel> {
         Arc::clone(&self.read_model)
+    }
+
+    #[must_use]
+    pub(crate) const fn read_model_source_watermark(&self) -> u64 {
+        self.read_model_source_watermark
     }
 
     #[must_use]
@@ -465,6 +481,8 @@ struct LocalStore {
 struct MergedSystemEventSnapshot {
     state: Arc<SystemEventQueryIndex>,
     runtime: Arc<SystemEventQueryIndex>,
+    state_windows: venom_domain::SystemEventRecentWindows,
+    runtime_windows: venom_domain::SystemEventRecentWindows,
     merged: Arc<SystemEventQueryIndex>,
 }
 
@@ -483,17 +501,116 @@ impl LocalStore {
             return Arc::clone(&snapshot.merged);
         }
 
-        let merged = Arc::new(SystemEventQueryIndex::merged(
-            state.as_ref(),
-            runtime.as_ref(),
+        let (state_windows, runtime_windows) = match cache.as_ref() {
+            Some(snapshot) if Arc::ptr_eq(&snapshot.state, &state) => {
+                (snapshot.state_windows.clone(), runtime.recent_windows())
+            }
+            Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
+                (state.recent_windows(), snapshot.runtime_windows.clone())
+            }
+            _ => (state.recent_windows(), runtime.recent_windows()),
+        };
+        let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
+            merge_system_event_window_totals(&state.window_totals(), &runtime.window_totals()),
+            merge_system_event_recent_windows(&state_windows, &runtime_windows),
         ));
         *cache = Some(MergedSystemEventSnapshot {
             state,
             runtime,
+            state_windows,
+            runtime_windows,
             merged: Arc::clone(&merged),
         });
         merged
     }
+}
+
+const fn merge_system_event_window_totals(
+    left: &venom_domain::SystemEventWindowTotals,
+    right: &venom_domain::SystemEventWindowTotals,
+) -> venom_domain::SystemEventWindowTotals {
+    venom_domain::SystemEventWindowTotals {
+        total: left.total + right.total,
+        scheduler_total: left.scheduler_total + right.scheduler_total,
+        command_total: left.command_total + right.command_total,
+        governance_total: left.governance_total + right.governance_total,
+        publication_total: left.publication_total + right.publication_total,
+    }
+}
+
+fn merge_system_event_recent_windows(
+    left: &venom_domain::SystemEventRecentWindows,
+    right: &venom_domain::SystemEventRecentWindows,
+) -> venom_domain::SystemEventRecentWindows {
+    venom_domain::SystemEventRecentWindows {
+        recent_events: merge_recent_arc_events(&left.recent_events, &right.recent_events),
+        recent_scheduler_events: merge_recent_arc_events(
+            &left.recent_scheduler_events,
+            &right.recent_scheduler_events,
+        ),
+        recent_command_events: merge_recent_arc_events(
+            &left.recent_command_events,
+            &right.recent_command_events,
+        ),
+        recent_governance_events: merge_recent_arc_events(
+            &left.recent_governance_events,
+            &right.recent_governance_events,
+        ),
+        recent_publication_events: merge_recent_arc_events(
+            &left.recent_publication_events,
+            &right.recent_publication_events,
+        ),
+    }
+}
+
+fn merge_recent_arc_events(
+    left: &[Arc<SystemEvent>],
+    right: &[Arc<SystemEvent>],
+) -> Vec<Arc<SystemEvent>> {
+    let mut merged = Vec::with_capacity(
+        (left.len() + right.len()).min(venom_domain::operations::MAX_SYSTEM_EVENTS_LIMIT),
+    );
+    let mut left_index = 0;
+    let mut right_index = 0;
+
+    while merged.len() < venom_domain::operations::MAX_SYSTEM_EVENTS_LIMIT
+        && (left_index < left.len() || right_index < right.len())
+    {
+        let take_left = match (left.get(left_index), right.get(right_index)) {
+            (Some(left_event), Some(right_event)) => {
+                compare_recent_system_event_order(left_event, right_event).is_lt()
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_left {
+            merged.push(Arc::clone(
+                left.get(left_index)
+                    .expect("left recent event should exist for merge"),
+            ));
+            left_index += 1;
+        } else {
+            merged.push(Arc::clone(
+                right
+                    .get(right_index)
+                    .expect("right recent event should exist for merge"),
+            ));
+            right_index += 1;
+        }
+    }
+
+    merged
+}
+
+fn compare_recent_system_event_order(
+    left: &SystemEvent,
+    right: &SystemEvent,
+) -> std::cmp::Ordering {
+    right
+        .occurred_at_unix_ms
+        .cmp(&left.occurred_at_unix_ms)
+        .then_with(|| left.event_id.cmp(&right.event_id))
 }
 
 impl ApiApplication {
@@ -552,12 +669,14 @@ impl ApiApplication {
             ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
+                0,
                 local.system_event_index_snapshot_arc(),
                 local.runtime.command_statuses_snapshot_arc(),
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
+                postgres.read_model_source_watermark(),
                 postgres.system_event_index_snapshot_arc(),
                 postgres.command_statuses_snapshot_arc(),
             ),
@@ -577,6 +696,14 @@ impl ApiApplication {
         match &self.backend {
             ApiStore::Local(local) => local.state.read_model_snapshot_arc(),
             ApiStore::Postgres(postgres) => postgres.read_model_snapshot_arc(),
+        }
+    }
+
+    #[must_use]
+    pub const fn read_model_source_watermark(&self) -> u64 {
+        match &self.backend {
+            ApiStore::Local(_) => 0,
+            ApiStore::Postgres(postgres) => postgres.read_model_source_watermark(),
         }
     }
 
@@ -3727,10 +3854,12 @@ fn merge_publish_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiApplication, ComponentRegistrationRequest, RequestScanCommand};
+    use super::{ApiApplication, ComponentRegistrationRequest, LocalStore, RequestScanCommand};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use venom_domain::durable_state::DurableState;
+    use venom_domain::scanning::ScanCommandQueue;
 
     fn temp_path(name: &str, suffix: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3814,5 +3943,58 @@ mod tests {
 
         let statuses = follower.command_statuses_snapshot_arc();
         assert_eq!(statuses.len(), 1);
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_reuses_cached_peer_window() {
+        let state_path = temp_path("merged-events-cache", "state");
+        let runtime_path = temp_path("merged-events-cache", "runtime");
+        let state = DurableState::open(state_path.clone()).expect("state should open");
+        let runtime = ScanCommandQueue::open(runtime_path.clone()).expect("runtime should open");
+        let mut local = LocalStore {
+            state_path,
+            runtime_path,
+            state,
+            runtime,
+            merged_system_event_snapshot_cache: std::sync::Mutex::new(None),
+        };
+
+        let _first = local.system_event_index_snapshot_arc();
+        let first_cache = local
+            .merged_system_event_snapshot_cache
+            .lock()
+            .expect("merged cache should not be poisoned")
+            .as_ref()
+            .expect("merged cache should exist after first read")
+            .runtime
+            .clone();
+
+        local
+            .state
+            .register_component(venom_domain::ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .expect("state mutation should persist");
+
+        let _second = local.system_event_index_snapshot_arc();
+        let runtime_cache = {
+            let cache = local
+                .merged_system_event_snapshot_cache
+                .lock()
+                .expect("merged cache should not be poisoned");
+            let snapshot = cache
+                .as_ref()
+                .expect("merged cache should be refreshed after state change");
+            let tuple = (
+                snapshot.runtime.clone(),
+                snapshot.runtime_windows.recent_events.len(),
+                snapshot.runtime.recent_windows().recent_events.len(),
+            );
+            drop(cache);
+            tuple
+        };
+        assert!(std::sync::Arc::ptr_eq(&first_cache, &runtime_cache.0));
+        assert_eq!(runtime_cache.1, runtime_cache.2);
     }
 }

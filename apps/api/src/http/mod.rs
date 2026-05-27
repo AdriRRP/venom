@@ -90,10 +90,6 @@ impl ApiMutationLane {
         matches!(self, Self::State)
     }
 
-    const fn requires_state_read_barrier(self) -> bool {
-        matches!(self, Self::Runtime)
-    }
-
     const fn requires_local_runtime_mutation_barrier(self) -> bool {
         matches!(self, Self::Runtime | Self::Publication)
     }
@@ -121,12 +117,14 @@ enum SnapshotRefresh {
     },
     ReadModel {
         read_model: Arc<venom_domain::FindingReadModel>,
+        read_model_source_watermark: u64,
     },
     SystemEvents {
         system_events: Arc<SystemEventQueryIndex>,
     },
     CombinedReadModelAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
+        read_model_source_watermark: u64,
         system_events: Arc<SystemEventQueryIndex>,
     },
     CombinedCommandStatusesAndSystemEvents {
@@ -140,6 +138,7 @@ enum SnapshotRefresh {
     },
     CombinedReadModelCommandStatusesAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
+        read_model_source_watermark: u64,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
         system_events: Arc<SystemEventQueryIndex>,
     },
@@ -150,15 +149,19 @@ impl SnapshotRefresh {
         match self {
             Self::Unchanged => Arc::clone(current),
             Self::Inventory { inventory } => Arc::new(current.with_inventory_arc(inventory)),
-            Self::ReadModel { read_model } => Arc::new(current.with_read_model_arc(read_model)),
+            Self::ReadModel {
+                read_model,
+                read_model_source_watermark,
+            } => Arc::new(current.with_read_model_arc(read_model, read_model_source_watermark)),
             Self::SystemEvents { system_events } => {
                 Arc::new(current.with_system_event_index_arc(system_events))
             }
             Self::CombinedReadModelAndSystemEvents {
                 read_model,
+                read_model_source_watermark,
                 system_events,
             } => {
-                let next = current.with_read_model_arc(read_model);
+                let next = current.with_read_model_arc(read_model, read_model_source_watermark);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
             Self::CombinedCommandStatusesAndSystemEvents {
@@ -179,10 +182,11 @@ impl SnapshotRefresh {
             }
             Self::CombinedReadModelCommandStatusesAndSystemEvents {
                 read_model,
+                read_model_source_watermark,
                 command_statuses,
                 system_events,
             } => {
-                let next = current.with_read_model_arc(read_model);
+                let next = current.with_read_model_arc(read_model, read_model_source_watermark);
                 let next = next.with_command_statuses_arc(command_statuses);
                 Arc::new(next.with_system_event_index_arc(system_events))
             }
@@ -344,6 +348,7 @@ impl ApiState {
                         self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
                         current_snapshot.inventory_arc(),
                         current_snapshot.read_model_arc(),
+                        current_snapshot.read_model_source_watermark(),
                         current_snapshot.system_event_index_arc(),
                         current_snapshot.command_statuses_arc(),
                     )
@@ -361,6 +366,7 @@ impl ApiState {
                 let next_snapshot = Arc::new(ApiReadSnapshot::new(
                     loaded.inventory,
                     loaded.read_model,
+                    loaded.read_model_source_watermark,
                     loaded.system_event_index,
                     loaded.command_statuses,
                 ));
@@ -434,6 +440,7 @@ impl ApiState {
                     self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
                     current_snapshot.inventory_arc(),
                     current_snapshot.read_model_arc(),
+                    current_snapshot.read_model_source_watermark(),
                     current_snapshot.system_event_index_arc(),
                     current_snapshot.command_statuses_arc(),
                 )
@@ -443,6 +450,7 @@ impl ApiState {
                         Arc::new(ApiReadSnapshot::new(
                             loaded.inventory,
                             loaded.read_model,
+                            loaded.read_model_source_watermark,
                             loaded.system_event_index,
                             loaded.command_statuses,
                         )),
@@ -461,6 +469,7 @@ impl ApiState {
     fn refresh_read_model_snapshot(service: &ApiApplication) -> SnapshotRefresh {
         SnapshotRefresh::ReadModel {
             read_model: service.read_model_snapshot_arc(),
+            read_model_source_watermark: service.read_model_source_watermark(),
         }
     }
 
@@ -478,12 +487,14 @@ impl ApiState {
         let snapshot = Self::refresh_read_model_snapshot(service);
         let system_events = service.system_event_index_snapshot_arc();
         match snapshot {
-            SnapshotRefresh::ReadModel { read_model } => {
-                SnapshotRefresh::CombinedReadModelAndSystemEvents {
-                    read_model,
-                    system_events,
-                }
-            }
+            SnapshotRefresh::ReadModel {
+                read_model,
+                read_model_source_watermark,
+            } => SnapshotRefresh::CombinedReadModelAndSystemEvents {
+                read_model,
+                read_model_source_watermark,
+                system_events,
+            },
             _ => unreachable!("read-model refresh must produce a read-model lane"),
         }
     }
@@ -512,6 +523,7 @@ impl ApiState {
     ) -> SnapshotRefresh {
         SnapshotRefresh::CombinedReadModelCommandStatusesAndSystemEvents {
             read_model: service.read_model_snapshot_arc(),
+            read_model_source_watermark: service.read_model_source_watermark(),
             command_statuses: service.command_statuses_snapshot_arc(),
             system_events: service.system_event_index_snapshot_arc(),
         }
@@ -574,20 +586,16 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::State, true, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::State, operation, refresh)
             .await
     }
 
-    async fn mutate_runtime_postgres_relaxed<T, F, R>(
-        &self,
-        operation: F,
-        refresh: R,
-    ) -> Result<T, ApiError>
+    async fn mutate_runtime<T, F, R>(&self, operation: F, refresh: R) -> Result<T, ApiError>
     where
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::Runtime, false, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::Runtime, operation, refresh)
             .await
     }
 
@@ -596,14 +604,13 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        self.mutate_on_lane(ApiMutationLane::Publication, true, operation, refresh)
+        self.mutate_on_lane(ApiMutationLane::Publication, operation, refresh)
             .await
     }
 
     async fn mutate_on_lane<T, F, R>(
         &self,
         lane: ApiMutationLane,
-        use_state_read_barrier: bool,
         operation: F,
         refresh: R,
     ) -> Result<T, ApiError>
@@ -616,12 +623,6 @@ impl ApiState {
         } else {
             None
         };
-        let _read_consistency_guard =
-            if use_state_read_barrier && lane.requires_state_read_barrier() {
-                Some(self.inner.write_consistency_barrier.read().await)
-            } else {
-                None
-            };
         let _local_runtime_mutation_guard = if self.inner.remote_read_snapshot_loader.is_none()
             && lane.requires_local_runtime_mutation_barrier()
         {
@@ -732,7 +733,7 @@ impl ApiState {
 
         for _ in 0..max_commands {
             let step = self
-                .mutate_runtime_postgres_relaxed(
+                .mutate_runtime(
                     |service| {
                         let request = DrainWorkerCommand {
                             max_commands: Some(1),
@@ -790,7 +791,7 @@ impl ApiState {
 
         for _ in 0..max_collections {
             let step = self
-                .mutate_runtime_postgres_relaxed(
+                .mutate_runtime(
                     |service| {
                         let request = DrainCollectionScanWorkerCommand {
                             max_collections: Some(1),
@@ -1891,13 +1892,11 @@ mod tests {
     }
 
     #[test]
-    fn publication_lane_does_not_take_the_state_consistency_barrier() {
+    fn runtime_and_publication_lanes_do_not_take_the_state_consistency_barrier() {
         assert!(ApiMutationLane::State.requires_state_write_barrier());
-        assert!(!ApiMutationLane::State.requires_state_read_barrier());
-        assert!(ApiMutationLane::Runtime.requires_state_read_barrier());
-        assert!(!ApiMutationLane::Publication.requires_state_read_barrier());
         assert!(!ApiMutationLane::Publication.requires_state_write_barrier());
         assert!(ApiMutationLane::Publication.requires_local_runtime_mutation_barrier());
+        assert!(ApiMutationLane::Runtime.requires_local_runtime_mutation_barrier());
     }
 
     #[tokio::test]

@@ -54,9 +54,10 @@ pub struct PostgresStore {
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
-    commands: BTreeMap<Box<str>, ScanCommandRecord>,
-    order: Vec<Box<str>>,
-    pending_integration_events: Vec<PendingIntegrationEvent>,
+    provider_report_row_high_watermark: u64,
+    commands: Arc<CommandRecordMap>,
+    order: Arc<CommandOrder>,
+    pending_integration_events: Arc<PendingIntegrationEventList>,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
 }
@@ -79,6 +80,7 @@ pub struct PostgresReadSnapshotLoader {
 pub struct LoadedPostgresReadSnapshot {
     pub inventory: Arc<ComponentInventory>,
     pub read_model: Arc<FindingReadModel>,
+    pub read_model_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
     pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     pub change_watermark: u64,
@@ -120,6 +122,9 @@ pub struct DrainDueCollectionScansResult {
 }
 
 type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule)>;
+type CommandRecordMap = BTreeMap<Box<str>, ScanCommandRecord>;
+type CommandOrder = Vec<Box<str>>;
+type PendingIntegrationEventList = Vec<PendingIntegrationEvent>;
 type SystemEventRow = (
     String,
     i64,
@@ -200,9 +205,10 @@ impl PostgresStore {
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             integration_runtime_config: None,
-            commands: BTreeMap::new(),
-            order: Vec::new(),
-            pending_integration_events: Vec::new(),
+            provider_report_row_high_watermark: 0,
+            commands: Arc::new(BTreeMap::new()),
+            order: Arc::new(Vec::new()),
+            pending_integration_events: Arc::new(Vec::new()),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         };
@@ -223,9 +229,10 @@ impl PostgresStore {
             inventory_snapshot_cache: Arc::clone(&base.inventory_snapshot_cache),
             read_model_snapshot_cache: Arc::clone(&base.read_model_snapshot_cache),
             integration_runtime_config: base.integration_runtime_config.clone(),
-            commands: base.commands.clone(),
-            order: base.order.clone(),
-            pending_integration_events: base.pending_integration_events.clone(),
+            provider_report_row_high_watermark: base.provider_report_row_high_watermark,
+            commands: Arc::clone(&base.commands),
+            order: Arc::clone(&base.order),
+            pending_integration_events: Arc::clone(&base.pending_integration_events),
             system_event_index_snapshot_cache: Arc::clone(&base.system_event_index_snapshot_cache),
             command_statuses_snapshot_cache: Arc::clone(&base.command_statuses_snapshot_cache),
         }
@@ -242,9 +249,10 @@ impl PostgresStore {
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             integration_runtime_config: None,
-            commands: BTreeMap::new(),
-            order: Vec::new(),
-            pending_integration_events: Vec::new(),
+            provider_report_row_high_watermark: 0,
+            commands: Arc::new(BTreeMap::new()),
+            order: Arc::new(Vec::new()),
+            pending_integration_events: Arc::new(Vec::new()),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
         }
@@ -874,11 +882,11 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres transaction begin failed: {error}"))?;
 
-        sqlx::query(&format!(
+        let provider_report_row_id = sqlx::query_scalar::<_, i64>(&format!(
             concat!(
                 "INSERT INTO {} ",
                 "(provider_key, component_key, artifact_kind, artifact_identity, observed_at_micros, freshness, knowledge_revision, findings) ",
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"
             ),
             self.names.provider_reports
         ))
@@ -890,7 +898,7 @@ impl PostgresStore {
         .bind(freshness_name(report.freshness))
         .bind(report.knowledge_revision.as_deref())
         .bind(Json(report.findings.clone()))
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
 
@@ -916,9 +924,12 @@ impl PostgresStore {
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.provider_report_row_high_watermark = self.provider_report_row_high_watermark.max(
+            u64::try_from(provider_report_row_id)
+                .map_err(|_| "postgres provider report id out of range".to_owned())?,
+        );
         self.refresh_read_model_and_release_board_snapshot_caches();
-        self.pending_integration_events
-            .push(pending_integration_event);
+        Arc::make_mut(&mut self.pending_integration_events).push(pending_integration_event);
         Ok(change_set)
     }
 
@@ -1466,6 +1477,11 @@ impl PostgresStore {
     }
 
     #[must_use]
+    pub const fn read_model_source_watermark(&self) -> u64 {
+        self.provider_report_row_high_watermark
+    }
+
+    #[must_use]
     pub fn read_model_arc(&self) -> Arc<FindingReadModel> {
         Arc::clone(&self.read_model)
     }
@@ -1576,8 +1592,8 @@ impl PostgresStore {
             .await?;
         self.commit_transaction(transaction).await?;
 
-        self.order.push(command_id.clone());
-        self.commands.insert(
+        Arc::make_mut(&mut self.order).push(command_id.clone());
+        Arc::make_mut(&mut self.commands).insert(
             command_id.clone(),
             ScanCommandRecord {
                 request,
@@ -1644,9 +1660,9 @@ impl PostgresStore {
             .zip(system_events)
         {
             self.push_system_event(event);
-            self.order.push(command_id.clone());
+            Arc::make_mut(&mut self.order).push(command_id.clone());
             let snapshot_command_id = command_id.clone();
-            self.commands.insert(
+            Arc::make_mut(&mut self.commands).insert(
                 command_id,
                 ScanCommandRecord {
                     request,
@@ -2011,17 +2027,21 @@ impl PostgresStore {
                 .into_boxed_str(),
             ),
         };
-        self.persist_completed_scan_command(
-            command_id.as_ref(),
-            &report,
-            &finding_changes_event,
-            &scan_command_completed_event,
-            &system_event,
-        )
-        .await?;
+        let provider_report_row_id = self
+            .persist_completed_scan_command(
+                command_id.as_ref(),
+                &report,
+                &finding_changes_event,
+                &scan_command_completed_event,
+                &system_event,
+            )
+            .await?;
 
         self.ingestion = candidate_ingestion;
         self.read_model = candidate_read_model;
+        self.provider_report_row_high_watermark = self
+            .provider_report_row_high_watermark
+            .max(provider_report_row_id);
         self.refresh_read_model_and_release_board_snapshot_caches();
         let completed = CompletedScanCommand {
             command_id,
@@ -2117,9 +2137,9 @@ impl PostgresStore {
             self.push_system_event(event);
         }
         for (command_id, request) in command_ids.iter().cloned().zip(requests) {
-            self.order.push(command_id.clone());
+            Arc::make_mut(&mut self.order).push(command_id.clone());
             let snapshot_command_id = command_id.clone();
-            self.commands.insert(
+            Arc::make_mut(&mut self.commands).insert(
                 command_id,
                 ScanCommandRecord {
                     request,
@@ -2308,9 +2328,10 @@ impl PostgresStore {
         finding_changes_event: &PendingIntegrationEvent,
         scan_command_completed_event: &PendingIntegrationEvent,
         system_event: &SystemEvent,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         let mut transaction = self.begin_transaction().await?;
-        self.insert_provider_report(&mut transaction, report)
+        let provider_report_row_id = self
+            .insert_provider_report(&mut transaction, report)
             .await?;
         self.insert_pending_integration_events(
             &mut transaction,
@@ -2338,7 +2359,9 @@ impl PostgresStore {
             std::slice::from_ref(system_event),
         )
         .await?;
-        self.commit_transaction(transaction).await
+        self.commit_transaction(transaction).await?;
+        u64::try_from(provider_report_row_id)
+            .map_err(|_| "postgres provider report id out of range".to_owned())
     }
 
     fn apply_completed_scan_command(
@@ -2348,11 +2371,9 @@ impl PostgresStore {
         scan_command_completed_event: PendingIntegrationEvent,
         system_event: SystemEvent,
     ) {
-        self.pending_integration_events.push(finding_changes_event);
-        self.pending_integration_events
-            .push(scan_command_completed_event);
-        let command = self
-            .commands
+        Arc::make_mut(&mut self.pending_integration_events).push(finding_changes_event);
+        Arc::make_mut(&mut self.pending_integration_events).push(scan_command_completed_event);
+        let command = Arc::make_mut(&mut self.commands)
             .get_mut(completed.command_id.as_ref())
             .expect("completed scan command missing from postgres runtime");
         command.status = ScanCommandStatus::Completed;
@@ -2367,12 +2388,12 @@ impl PostgresStore {
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         report: &ProviderScanReport,
-    ) -> Result<(), String> {
-        sqlx::query(&format!(
+    ) -> Result<i64, String> {
+        sqlx::query_scalar::<_, i64>(&format!(
             concat!(
                 "INSERT INTO {} ",
                 "(provider_key, component_key, artifact_kind, artifact_identity, observed_at_micros, freshness, knowledge_revision, findings) ",
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"
             ),
             self.names.provider_reports
         ))
@@ -2384,10 +2405,9 @@ impl PostgresStore {
         .bind(freshness_name(report.freshness))
         .bind(report.knowledge_revision.as_deref())
         .bind(Json(report.findings.clone()))
-        .execute(&mut **transaction)
+        .fetch_one(&mut **transaction)
         .await
-        .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
-        Ok(())
+        .map_err(|error| format!("postgres provider report insert failed: {error}"))
     }
 
     async fn insert_pending_integration_events(
@@ -2529,7 +2549,7 @@ impl PostgresStore {
         .await
         .map_err(|sql_error| format!("postgres scan command failure update failed: {sql_error}"))?;
 
-        let Some(command) = self.commands.get_mut(command_id.as_ref()) else {
+        let Some(command) = Arc::make_mut(&mut self.commands).get_mut(command_id.as_ref()) else {
             return Err("failed scan command missing from postgres runtime".to_owned());
         };
         command.status = ScanCommandStatus::Failed;
@@ -3169,9 +3189,10 @@ impl PostgresStore {
         self.governance = FindingGovernance::new();
         self.read_model = Arc::new(FindingReadModel::new());
         self.integration_runtime_config = None;
-        self.commands.clear();
-        self.order.clear();
-        self.pending_integration_events.clear();
+        self.provider_report_row_high_watermark = 0;
+        Arc::make_mut(&mut self.commands).clear();
+        Arc::make_mut(&mut self.order).clear();
+        Arc::make_mut(&mut self.pending_integration_events).clear();
         self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
 
@@ -3320,26 +3341,31 @@ impl PostgresStore {
 
     async fn refresh_read_model_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
+        backend.ingestion = self.ingestion.clone();
         backend.governance = if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
             FindingGovernance::default()
         } else {
             self.governance.clone()
         };
+        backend.provider_report_row_high_watermark = self.provider_report_row_high_watermark;
         backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
             self.read_model.as_ref().clone_active_only()
         } else {
             self.read_model.as_ref().clone()
         });
         if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
-            backend.load_provider_reports().await?;
+            backend
+                .load_provider_reports_after(self.provider_report_row_high_watermark)
+                .await?;
         }
         if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
             backend.load_finding_risk_acceptances().await?;
             backend.load_finding_suppressions().await?;
         }
         let read_model = backend.read_model_arc();
+        self.ingestion = backend.ingestion;
         self.governance = backend.governance;
+        self.provider_report_row_high_watermark = backend.provider_report_row_high_watermark;
         self.read_model = read_model;
         self.refresh_read_model_snapshot_cache();
         Ok(())
@@ -3712,6 +3738,7 @@ impl PostgresStore {
         let reports = sqlx::query_as::<
             _,
             (
+                i64,
                 String,
                 String,
                 String,
@@ -3723,7 +3750,7 @@ impl PostgresStore {
             ),
         >(&format!(
             concat!(
-                "SELECT provider_key, component_key, artifact_kind, artifact_identity, ",
+                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
                 "observed_at_micros, freshness, knowledge_revision, findings ",
                 "FROM {} ORDER BY id"
             ),
@@ -3733,6 +3760,7 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres provider reports load failed: {error}"))?;
         for (
+            id,
             provider_key,
             component_key,
             artifact_kind,
@@ -3752,14 +3780,79 @@ impl PostgresStore {
                 knowledge_revision: knowledge_revision.map(String::into_boxed_str),
                 findings: findings.0,
             };
-            self.ingestion
-                .record_scan_report(&report)
-                .map_err(|error| {
-                    format!("postgres provider report replay failed: {}", error.as_str())
-                })?;
-            self.read_model_mut().record_scan_report(&report);
+            self.apply_provider_report_row(id, &report)?;
         }
 
+        Ok(())
+    }
+
+    async fn load_provider_reports_after(&mut self, after_id: u64) -> Result<(), String> {
+        let reports = sqlx::query_as::<
+            _,
+            (
+                i64,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                Option<String>,
+                Json<Vec<ReportedFinding>>,
+            ),
+        >(&format!(
+            concat!(
+                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
+                "observed_at_micros, freshness, knowledge_revision, findings ",
+                "FROM {} WHERE id > $1 ORDER BY id"
+            ),
+            self.names.provider_reports
+        ))
+        .bind(
+            i64::try_from(after_id)
+                .map_err(|_| "postgres provider report cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report delta load failed: {error}"))?;
+        for (
+            id,
+            provider_key,
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            observed_at_micros,
+            freshness,
+            knowledge_revision,
+            findings,
+        ) in reports
+        {
+            let report = ProviderScanReport {
+                provider_key: provider_key.into_boxed_str(),
+                component_key: component_key.into_boxed_str(),
+                artifact: ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                observed_at: micros_to_system_time(observed_at_micros)?,
+                freshness: parse_freshness(&freshness)?,
+                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
+                findings: findings.0,
+            };
+            self.apply_provider_report_row(id, &report)?;
+        }
+        Ok(())
+    }
+
+    fn apply_provider_report_row(
+        &mut self,
+        id: i64,
+        report: &ProviderScanReport,
+    ) -> Result<(), String> {
+        self.ingestion.replay_scan_report(report).map_err(|error| {
+            format!("postgres provider report replay failed: {}", error.as_str())
+        })?;
+        self.read_model_mut().record_scan_report(report);
+        self.provider_report_row_high_watermark = self.provider_report_row_high_watermark.max(
+            u64::try_from(id).map_err(|_| "postgres provider report id out of range".to_owned())?,
+        );
         Ok(())
     }
 
@@ -3949,9 +4042,9 @@ impl PostgresStore {
                 ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
                 parse_freshness(&freshness)?,
             );
-            self.order.push(command_id.clone());
+            Arc::make_mut(&mut self.order).push(command_id.clone());
             self.set_command_status_snapshot(command_id.as_ref(), status);
-            self.commands
+            Arc::make_mut(&mut self.commands)
                 .insert(command_id, ScanCommandRecord { request, status });
         }
 
@@ -3969,7 +4062,8 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres integration outbox load failed: {error}"))?;
-        self.pending_integration_events = events.into_iter().map(|(payload,)| payload.0).collect();
+        self.pending_integration_events =
+            Arc::new(events.into_iter().map(|(payload,)| payload.0).collect());
         Ok(())
     }
 
@@ -4113,7 +4207,7 @@ impl PostgresStore {
             .iter()
             .position(|event| event.event_id.as_ref() == event_id)
         {
-            self.pending_integration_events.remove(index);
+            Arc::make_mut(&mut self.pending_integration_events).remove(index);
         }
     }
 
@@ -4382,6 +4476,7 @@ impl PostgresReadSnapshotLoader {
         since_change_watermark: u64,
         base_inventory: Arc<ComponentInventory>,
         base_read_model: Arc<FindingReadModel>,
+        base_read_model_source_watermark: u64,
         base_system_event_index: Arc<SystemEventQueryIndex>,
         base_command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
     ) -> Result<LoadedPostgresReadSnapshot, String> {
@@ -4390,6 +4485,7 @@ impl PostgresReadSnapshotLoader {
             return Ok(LoadedPostgresReadSnapshot {
                 inventory: base_inventory,
                 read_model: base_read_model,
+                read_model_source_watermark: base_read_model_source_watermark,
                 system_event_index: base_system_event_index,
                 command_statuses: base_command_statuses,
                 change_watermark,
@@ -4430,11 +4526,23 @@ impl PostgresReadSnapshotLoader {
             }
         };
         let read_model = if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
-            self.load_read_model_snapshot(Arc::clone(&inventory), base_read_model, lane_mask)
-                .await?
+            self.load_read_model_snapshot(
+                Arc::clone(&inventory),
+                base_read_model,
+                base_read_model_source_watermark,
+                lane_mask,
+            )
+            .await?
         } else {
             base_read_model
         };
+        let read_model_source_watermark =
+            if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
+                self.load_read_model_source_watermark(base_read_model_source_watermark, lane_mask)
+                    .await?
+            } else {
+                base_read_model_source_watermark
+            };
         let system_event_index = if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
             self.load_system_event_index_snapshot().await?
         } else {
@@ -4449,6 +4557,7 @@ impl PostgresReadSnapshotLoader {
         Ok(LoadedPostgresReadSnapshot {
             inventory,
             read_model,
+            read_model_source_watermark,
             system_event_index,
             command_statuses,
             change_watermark,
@@ -4584,6 +4693,7 @@ impl PostgresReadSnapshotLoader {
         &self,
         inventory: Arc<ComponentInventory>,
         base_read_model: Arc<FindingReadModel>,
+        base_read_model_source_watermark: u64,
         lane_mask: i32,
     ) -> Result<Arc<FindingReadModel>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
@@ -4593,13 +4703,16 @@ impl PostgresReadSnapshotLoader {
         } else {
             backend.governance
         };
+        backend.provider_report_row_high_watermark = base_read_model_source_watermark;
         backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
             base_read_model.as_ref().clone_active_only()
         } else {
             base_read_model.as_ref().clone()
         });
         if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
-            backend.load_provider_reports().await?;
+            backend
+                .load_provider_reports_after(base_read_model_source_watermark)
+                .await?;
         }
         if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
             backend.load_finding_risk_acceptances().await?;
@@ -4607,6 +4720,27 @@ impl PostgresReadSnapshotLoader {
         }
         backend.refresh_read_model_snapshot_cache();
         Ok(backend.read_model_snapshot_arc())
+    }
+
+    async fn load_read_model_source_watermark(
+        &self,
+        base_read_model_source_watermark: u64,
+        lane_mask: i32,
+    ) -> Result<u64, String> {
+        if lane_mask & CHANGE_LANE_READ_MODEL == 0 {
+            return Ok(base_read_model_source_watermark);
+        }
+
+        let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX(id) FROM {}",
+            self.names.provider_reports
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report watermark read failed: {error}"))?
+        .unwrap_or_default();
+        u64::try_from(max_id)
+            .map_err(|_| "postgres provider report watermark out of range".to_owned())
     }
 
     async fn load_system_event_index_snapshot(&self) -> Result<Arc<SystemEventQueryIndex>, String> {
@@ -5095,6 +5229,169 @@ mod tests {
         assert_eq!(
             snapshot_after.active_finding_count("component:payments-api", &artifact()),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_fork_shares_runtime_and_outbox_sources_until_lane_mutation() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("forked_runtime_sources");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+
+        let mut fork = PostgresStore::fork_from(&backend);
+        assert!(Arc::ptr_eq(&backend.commands, &fork.commands));
+        assert!(Arc::ptr_eq(&backend.order, &fork.order));
+        assert!(Arc::ptr_eq(
+            &backend.pending_integration_events,
+            &fork.pending_integration_events
+        ));
+
+        let _ = fork
+            .request_scan(
+                "component:payments-api",
+                artifact(),
+                EvidenceFreshness::Deterministic,
+            )
+            .await
+            .expect("forked scan request should persist");
+        assert!(!Arc::ptr_eq(&backend.commands, &fork.commands));
+        assert!(!Arc::ptr_eq(&backend.order, &fork.order));
+        assert_eq!(backend.pending_commands(), 0);
+        assert_eq!(fork.pending_commands(), 1);
+
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = fork
+            .record_scan_report(&report)
+            .await
+            .expect("forked provider report should persist");
+        assert!(!Arc::ptr_eq(
+            &backend.pending_integration_events,
+            &fork.pending_integration_events
+        ));
+        assert_eq!(backend.pending_integration_events().len(), 0);
+        assert_eq!(fork.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_read_snapshot_advances_read_model_source_watermark_for_new_reports()
+    {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_read_model_cursor");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let first_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&first_report)
+            .await
+            .expect("first provider report should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after first report");
+        let base_inventory = backend.inventory_snapshot_arc();
+        let base_read_model = backend.read_model_snapshot_arc();
+        let base_read_model_source_watermark = backend.read_model_source_watermark();
+        let base_system_event_index = backend.system_event_index_snapshot_arc();
+        let base_command_statuses = backend.command_statuses_snapshot_arc();
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let second_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![
+                ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0")),
+                ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0")),
+            ],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-17");
+        let _ = writer
+            .record_scan_report(&second_report)
+            .await
+            .expect("second provider report should persist");
+
+        let refreshed_snapshot = loader
+            .load(
+                since_change_watermark,
+                base_inventory,
+                Arc::clone(&base_read_model),
+                base_read_model_source_watermark,
+                base_system_event_index,
+                base_command_statuses,
+            )
+            .await
+            .expect("detached fresh read should load");
+
+        assert!(
+            refreshed_snapshot.read_model_source_watermark > base_read_model_source_watermark,
+            "detached read should advance the provider-report cursor"
+        );
+        assert_eq!(
+            base_read_model.active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+        assert_eq!(
+            refreshed_snapshot
+                .read_model
+                .active_finding_count("component:payments-api", &artifact()),
+            2
         );
     }
 
