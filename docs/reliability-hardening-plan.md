@@ -218,6 +218,20 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W172-http-publication-lane-barrier-narrowing`
+    Stop serializing publication writes behind the state/runtime consistency
+    barrier when the publication lane does not depend on mutable state
+    decisions.
+75. `W173-local-tail-sync-stale-refresh`
+    Replace local stale-lane reopen-and-replay with incremental tail replay
+    from the durable JSONL histories.
+76. `W174-postgres-sub-lane-refresh-narrowing`
+    Split broad inventory/read-model remote refreshes into narrower detached
+    sub-lane rebuilds that reuse current shared `Arc` sources.
+77. `W175-system-event-slot-window-compaction`
+    Keep retained recent `system events` in one shared slot store and let
+    recent windows reference compact slot indexes instead of duplicating event
+    ids per window.
 74. `W162-api-health-degraded-observation`
     Surface committed-write remote-observation failures as degraded API health
     instead of silently preserving a healthy shell.

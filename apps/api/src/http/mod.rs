@@ -85,6 +85,20 @@ enum ApiMutationLane {
     Publication,
 }
 
+impl ApiMutationLane {
+    const fn requires_state_write_barrier(self) -> bool {
+        matches!(self, Self::State)
+    }
+
+    const fn requires_state_read_barrier(self) -> bool {
+        matches!(self, Self::Runtime)
+    }
+
+    const fn requires_local_runtime_mutation_barrier(self) -> bool {
+        matches!(self, Self::Runtime | Self::Publication)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiHealthStatus {
     Healthy,
@@ -496,7 +510,7 @@ impl ApiState {
             return Ok(());
         }
 
-        service.reload_local_from_disk().map_err(ApiError::from)?;
+        service.refresh_local_from_disk().map_err(ApiError::from)?;
         slot.observed_local_change_epoch
             .store(current_epoch, Ordering::Relaxed);
         Ok(())
@@ -539,21 +553,19 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        let _write_consistency_guard = match lane {
-            ApiMutationLane::State => Some(self.inner.write_consistency_barrier.write().await),
-            ApiMutationLane::Runtime | ApiMutationLane::Publication => None,
+        let _write_consistency_guard = if lane.requires_state_write_barrier() {
+            Some(self.inner.write_consistency_barrier.write().await)
+        } else {
+            None
         };
-        let _read_consistency_guard = match lane {
-            ApiMutationLane::State => None,
-            ApiMutationLane::Runtime | ApiMutationLane::Publication => {
-                Some(self.inner.write_consistency_barrier.read().await)
-            }
+        let _read_consistency_guard = if lane.requires_state_read_barrier() {
+            Some(self.inner.write_consistency_barrier.read().await)
+        } else {
+            None
         };
         let _local_runtime_mutation_guard = if self.inner.remote_read_snapshot_loader.is_none()
-            && matches!(
-                lane,
-                ApiMutationLane::Runtime | ApiMutationLane::Publication
-            ) {
+            && lane.requires_local_runtime_mutation_barrier()
+        {
             Some(self.inner.local_runtime_mutation_barrier.lock().await)
         } else {
             None
@@ -1763,6 +1775,7 @@ impl axum::response::IntoResponse for ApiError {
 mod tests {
     use super::ApiError;
     use super::ApiHealthStatus;
+    use super::ApiMutationLane;
     use super::ApiState;
     use super::ComponentRegistrationRequest;
     use super::build_router;
@@ -1822,6 +1835,16 @@ mod tests {
         assert!(should_publish_remote_snapshot(9, 8));
         assert!(!should_publish_remote_snapshot(8, 8));
         assert!(!should_publish_remote_snapshot(7, 8));
+    }
+
+    #[test]
+    fn publication_lane_does_not_take_the_state_consistency_barrier() {
+        assert!(ApiMutationLane::State.requires_state_write_barrier());
+        assert!(!ApiMutationLane::State.requires_state_read_barrier());
+        assert!(ApiMutationLane::Runtime.requires_state_read_barrier());
+        assert!(!ApiMutationLane::Publication.requires_state_read_barrier());
+        assert!(!ApiMutationLane::Publication.requires_state_write_barrier());
+        assert!(ApiMutationLane::Publication.requires_local_runtime_mutation_barrier());
     }
 
     #[tokio::test]
