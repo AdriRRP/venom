@@ -1,26 +1,47 @@
-## Why
+# W181. Postgres Lane Bootstrap Forking
 
-One Postgres-backed `ApiState` still paid three full durable rebuilds on open,
-one per lane, even after the pool became shared.
+Wave: `W181-postgres-lane-bootstrap-forking`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `db`
 
-## Scope
+## Goal
 
-- bootstrap one rebuilt Postgres store
-- fork runtime and publication lanes from that base state
-- preserve lane independence after bootstrap while reusing initial snapshot
-  arcs
+Pay one Postgres rebuild at `ApiState` open time and fork the remaining API
+lanes from that bootstrapped state instead of rebuilding all three.
+
+## Feature paths
+
+- `apps/api/src/http/mod.rs`
+- `apps/api/src/app/service.rs`
+- `apps/api/src/infra/postgres_backend.rs`
+
+## Execution lanes
+
+- `unit`
+- `integration`
+
+## Owned paths
+
+- `apps/api/src/http/mod.rs`
+- `apps/api/src/app/service.rs`
+- `apps/api/src/infra/postgres_backend.rs`
 
 ## Slices
 
-### W181-S01 forked lane bootstrap
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W181-S01` | done | open one rebuilt Postgres store, fork runtime/publication lanes from that base, and share initial snapshot arcs across the lane services | `cargo test -p venom-api postgres_open_shares_bootstrap_snapshot_arcs_across_lanes --all-features --offline` |
 
-Status: done
+## Language impact
 
-- add one `PostgresStore::fork_from(...)`
-- open one base store in `ApiState::open_postgres(...)`
-- derive the other two lane services from that bootstrapped store
+`none`
 
-## Verification
+## Invariant impact
 
-- `cargo test -p venom-api postgres_open_shares_bootstrap_snapshot_arcs_across_lanes --all-features --offline`
+`I8`, `I9`, `I11`
 
+## ADR impact
+
+`none`

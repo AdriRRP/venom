@@ -1,26 +1,46 @@
-## Why
+# W183. Runtime Worker Barrier Narrowing
 
-The global `single-flight` is gone, but Postgres runtime workers still took the
-state/runtime consistency barrier too often, reducing throughput without
-improving truth.
+Wave: `W183-runtime-worker-barrier-narrowing`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `db`
 
-## Scope
+## Goal
 
-- move true state registrations back onto the state lane
-- let the collection-scan worker use the relaxed Postgres runtime path
-- revalidate durable state inside the Postgres collection worker before acting
+Reserve the state/runtime consistency barrier for true state writes and let the
+Postgres-backed runtime workers revalidate durable state instead of always
+taking the coarse read barrier.
+
+## Feature paths
+
+- `apps/api/src/http/mod.rs`
+- `apps/api/src/infra/postgres_backend.rs`
+
+## Execution lanes
+
+- `unit`
+- `integration`
+
+## Owned paths
+
+- `apps/api/src/http/mod.rs`
+- `apps/api/src/infra/postgres_backend.rs`
 
 ## Slices
 
-### W183-S01 narrower runtime barrier surface
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W183-S01` | done | move state registrations back to the state lane and run Postgres-backed collection drain work through the relaxed runtime path after durable revalidation | `cargo test -p venom-api postgres_worker_loop_drains_until_idle --all-features --offline` |
 
-Status: done
+## Language impact
 
-- register components, tags, and context profiles through the state lane
-- run collection schedule draining through the relaxed runtime mutation path
-- refresh stale Postgres state inside due-collection draining before planning
+`none`
 
-## Verification
+## Invariant impact
 
-- `cargo test -p venom-api postgres_worker_loop_drains_until_idle --all-features --offline`
-- `cargo test -p venom-api detached_postgres_fresh_read_promotes_the_observed_change_watermark --all-features --offline`
+`I8`, `I9`, `I11`
+
+## ADR impact
+
+`none`

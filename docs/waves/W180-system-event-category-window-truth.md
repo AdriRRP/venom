@@ -1,27 +1,45 @@
-## Why
+# W180. System Event Category Window Truth
 
-`system events` category queries became semantically false after reducing the
-index to one global recent window. A sparse category could report truthful
-historical totals while returning an empty first page.
+Wave: `W180-system-event-category-window-truth`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `db`
 
-## Scope
+## Goal
 
-- keep one retained event store
-- restore truthful recent category pages
-- avoid duplicating full event payloads per category window
+Restore truthful category-scoped recent `system events` pages without going
+back to duplicating full event payloads per category window.
+
+## Feature paths
+
+- `crates/venom-domain/src/operations/system_event_trace.rs`
+- `apps/api/src/infra/postgres_backend.rs`
+
+## Execution lanes
+
+- `unit`
+- `integration`
+
+## Owned paths
+
+- `crates/venom-domain/src/operations/system_event_trace.rs`
+- `apps/api/src/infra/postgres_backend.rs`
 
 ## Slices
 
-### W180-S01 single-retention category windows
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W180-S01` | done | keep one retained event store while rebuilding truthful category-recent pages through shared retained slots and category-specific links | `cargo test -p venom-domain system_event_trace --all-features --offline` |
 
-Status: done
+## Language impact
 
-- extend the event query index with per-category recent links over the shared
-  retained event store
-- rebuild truthful category pages from those links
-- reload Postgres recent windows with both global and category ranks
+`none`
 
-## Verification
+## Invariant impact
 
-- `cargo test -p venom-domain system_event_trace --all-features --offline`
+`I2`, `I8`, `I9`, `I11`
 
+## ADR impact
+
+`none`

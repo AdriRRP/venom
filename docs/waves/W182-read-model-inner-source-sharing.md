@@ -1,25 +1,42 @@
-## Why
+# W182. Read Model Inner Source Sharing
 
-Remote refreshes still paid deep `FindingReadModel` clones because the outer
-snapshot arcs were shared but the inner maps were fully owned.
+Wave: `W182-read-model-inner-source-sharing`
+Status: `done`
+BDD impact: `none`
+Agentic impact: `none`
+Infra profile: `none`
 
-## Scope
+## Goal
 
-- move active findings and governance decisions onto copy-on-write inner arcs
-- preserve read-model semantics and ordering
-- make cloned lanes and refreshes share inner maps until mutation
+Remove avoidable deep clones from `FindingReadModel` by moving its active and
+decision maps onto inner copy-on-write arcs.
+
+## Feature paths
+
+- `crates/venom-domain/src/findings/finding_read_model.rs`
+
+## Execution lanes
+
+- `unit`
+
+## Owned paths
+
+- `crates/venom-domain/src/findings/finding_read_model.rs`
 
 ## Slices
 
-### W182-S01 copy-on-write read model internals
+| Slice | Status | Goal | Verification |
+|---|---|---|---|
+| `W182-S01` | done | share `FindingReadModel` sources across cloned lanes and only copy inner maps on mutation through `Arc::make_mut` | `cargo test -p venom-domain finding_read_model --all-features --offline` |
 
-Status: done
+## Language impact
 
-- store `active` and `decisions` as inner `Arc<BTreeMap<...>>`
-- mutate through `Arc::make_mut`
-- add a domain regression proving inner copy-on-write behavior
+`none`
 
-## Verification
+## Invariant impact
 
-- `cargo test -p venom-domain finding_read_model --all-features --offline`
+`I8`, `I9`, `I11`
 
+## ADR impact
+
+`none`
