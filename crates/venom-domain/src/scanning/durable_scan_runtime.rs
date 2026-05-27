@@ -601,7 +601,9 @@ impl ScanCommandQueue {
         let mut line_index = starting_line;
         loop {
             line.clear();
-            let bytes_read = reader.read_line(&mut line).map_err(ScanCommandQueueError::Io)?;
+            let bytes_read = reader
+                .read_line(&mut line)
+                .map_err(ScanCommandQueueError::Io)?;
             if bytes_read == 0 {
                 break;
             }

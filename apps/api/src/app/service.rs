@@ -3749,17 +3749,19 @@ mod tests {
             .expect("current time should be after unix epoch")
             .as_nanos();
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("venom-api-service-{name}-{suffix}-{nanos}-{counter}.jsonl"))
+        std::env::temp_dir().join(format!(
+            "venom-api-service-{name}-{suffix}-{nanos}-{counter}.jsonl"
+        ))
     }
 
     #[tokio::test]
     async fn local_stale_lane_refresh_uses_tail_sync_for_inventory_changes() {
         let state_path = temp_path("tail-sync", "state");
         let runtime_path = temp_path("tail-sync", "runtime");
-        let mut writer = ApiApplication::open_local(&state_path, &runtime_path)
-            .expect("writer should open");
-        let mut follower = ApiApplication::open_local(&state_path, &runtime_path)
-            .expect("follower should open");
+        let mut writer =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("writer should open");
+        let mut follower =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("follower should open");
 
         writer
             .register_component(ComponentRegistrationRequest {
@@ -3784,10 +3786,10 @@ mod tests {
     async fn local_stale_lane_refresh_uses_tail_sync_for_runtime_changes() {
         let state_path = temp_path("tail-sync-runtime", "state");
         let runtime_path = temp_path("tail-sync-runtime", "runtime");
-        let mut writer = ApiApplication::open_local(&state_path, &runtime_path)
-            .expect("writer should open");
-        let mut follower = ApiApplication::open_local(&state_path, &runtime_path)
-            .expect("follower should open");
+        let mut writer =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("writer should open");
+        let mut follower =
+            ApiApplication::open_local(&state_path, &runtime_path).expect("follower should open");
 
         writer
             .register_component(ComponentRegistrationRequest {
