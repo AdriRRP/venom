@@ -651,7 +651,7 @@ fn collect_category_recent_events(
         .collect()
 }
 
-fn merge_window_totals(
+const fn merge_window_totals(
     left: &SystemEventWindowTotals,
     right: &SystemEventWindowTotals,
 ) -> SystemEventWindowTotals {
