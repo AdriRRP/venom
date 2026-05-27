@@ -3979,11 +3979,10 @@ mod tests {
 
         let _second = local.system_event_index_snapshot_arc();
         let runtime_cache = {
-            let cache = local
+            let snapshot = local
                 .merged_system_event_snapshot_cache
                 .lock()
-                .expect("merged cache should not be poisoned");
-            let snapshot = cache
+                .expect("merged cache should not be poisoned")
                 .as_ref()
                 .expect("merged cache should be refreshed after state change");
             (
