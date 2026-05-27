@@ -595,28 +595,48 @@ impl ApiState {
                 .store(true, Ordering::Relaxed);
         }
         let mut remote_change_watermark = service.observed_remote_change_watermark();
-        let next_snapshot = if let Some(loader) = &self.inner.remote_read_snapshot_loader {
+        let remote_snapshot_refresh = if let Some(loader) = &self.inner.remote_read_snapshot_loader
+        {
             if refresh_from_remote_changed || result.is_ok() {
                 let current_snapshot = self.read_snapshot();
-                let loaded = loader
-                    .load(
-                        self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
-                        current_snapshot.inventory_arc(),
-                        current_snapshot.read_model_arc(),
-                        current_snapshot.system_event_index_arc(),
-                        current_snapshot.command_statuses_arc(),
-                    )
-                    .await
-                    .map_err(ApiError::internal)?;
-                remote_change_watermark = Some(loaded.change_watermark);
-                Some(Arc::new(ApiReadSnapshot::new(
-                    loaded.inventory,
-                    loaded.read_model,
-                    loaded.system_event_index,
-                    loaded.command_statuses,
-                )))
+                Some(
+                    loader
+                        .load(
+                            self.inner.remote_snapshot_watermark.load(Ordering::Relaxed),
+                            current_snapshot.inventory_arc(),
+                            current_snapshot.read_model_arc(),
+                            current_snapshot.system_event_index_arc(),
+                            current_snapshot.command_statuses_arc(),
+                        )
+                        .await,
+                )
             } else {
                 None
+            }
+        } else {
+            None
+        };
+        let next_snapshot = if let Some(refresh_result) = remote_snapshot_refresh {
+            match refresh_result {
+                Ok(loaded) => {
+                    remote_change_watermark = Some(loaded.change_watermark);
+                    Some(Arc::new(ApiReadSnapshot::new(
+                        loaded.inventory,
+                        loaded.read_model,
+                        loaded.system_event_index,
+                        loaded.command_statuses,
+                    )))
+                }
+                Err(error) if result.is_ok() => {
+                    self.inner
+                        .remote_observation_degraded
+                        .store(true, Ordering::Relaxed);
+                    None
+                }
+                Err(error) => {
+                    self.restore_service(lane, service).await;
+                    return Err(ApiError::internal(error));
+                }
             }
         } else if refresh_from_remote_changed {
             Some(Arc::new(service.read_snapshot()))
