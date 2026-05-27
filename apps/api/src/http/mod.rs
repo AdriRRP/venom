@@ -651,7 +651,7 @@ impl ApiState {
                     remote_change_watermark = Some(change_watermark);
                     Some(snapshot)
                 }
-                Err(error) if result.is_ok() => {
+                Err(_error) if result.is_ok() => {
                     self.inner
                         .remote_observation_degraded
                         .store(true, Ordering::Relaxed);
