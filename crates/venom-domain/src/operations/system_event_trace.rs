@@ -329,7 +329,7 @@ impl SystemEventQueryIndex {
     }
     fn retain_only_windowed_events(&mut self) {
         let mut retained_slots = BTreeSet::<u16>::new();
-        for slot in self.recent_events.iter() {
+        for slot in &self.recent_events {
             retained_slots.insert(*slot);
         }
         let mut remap = BTreeMap::<u16, u16>::new();
