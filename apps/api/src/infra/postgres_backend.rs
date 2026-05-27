@@ -5364,7 +5364,7 @@ mod tests {
             .await
             .expect("second provider report should persist");
 
-        let loaded = loader
+        let refreshed_snapshot = loader
             .load(
                 since_change_watermark,
                 base_inventory,
@@ -5377,7 +5377,7 @@ mod tests {
             .expect("detached fresh read should load");
 
         assert!(
-            loaded.read_model_source_watermark > base_read_model_source_watermark,
+            refreshed_snapshot.read_model_source_watermark > base_read_model_source_watermark,
             "detached read should advance the provider-report cursor"
         );
         assert_eq!(
@@ -5385,7 +5385,7 @@ mod tests {
             1
         );
         assert_eq!(
-            loaded
+            refreshed_snapshot
                 .read_model
                 .active_finding_count("component:payments-api", &artifact()),
             2
