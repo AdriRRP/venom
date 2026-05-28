@@ -1,14 +1,14 @@
 use crate::app::service::{
     self, AcceptRiskRequest, AcceptRiskResponse, ActiveFindingsResponse, ApiApplication,
-    ApiReadSnapshot, AssignCollectionContextProfileRequest, AssignCollectionContextProfileResponse,
-    AssignContextProfileRequest, AssignContextProfileResponse, AssignTagContextProfileRequest,
-    AssignTagContextProfileResponse, BindArtifactRequest, BindArtifactResponse,
-    BulkAcceptRiskByTagResponse, BulkAcceptRiskRequest, BulkAcceptRiskResponse,
-    BulkReopenFindingsRequest, BulkReopenFindingsResponse, BulkSuppressFindingsByTagResponse,
-    BulkSuppressFindingsRequest, BulkSuppressFindingsResponse, CollectionActiveFindingsResponse,
-    CollectionDetailResponse, CollectionMembershipRequest, CollectionMembershipResponse,
-    CollectionRegistrationRequest, ComponentRegistrationRequest, ComponentTagMembershipRequest,
-    ComponentTagMembershipResponse, ComponentTagRegistrationRequest,
+    ApiReadSnapshot, ApiReadSnapshotSources, AssignCollectionContextProfileRequest,
+    AssignCollectionContextProfileResponse, AssignContextProfileRequest,
+    AssignContextProfileResponse, AssignTagContextProfileRequest, AssignTagContextProfileResponse,
+    BindArtifactRequest, BindArtifactResponse, BulkAcceptRiskByTagResponse, BulkAcceptRiskRequest,
+    BulkAcceptRiskResponse, BulkReopenFindingsRequest, BulkReopenFindingsResponse,
+    BulkSuppressFindingsByTagResponse, BulkSuppressFindingsRequest, BulkSuppressFindingsResponse,
+    CollectionActiveFindingsResponse, CollectionDetailResponse, CollectionMembershipRequest,
+    CollectionMembershipResponse, CollectionRegistrationRequest, ComponentRegistrationRequest,
+    ComponentTagMembershipRequest, ComponentTagMembershipResponse, ComponentTagRegistrationRequest,
     ConfigureCollectionScanScheduleRequest, ConfigureCollectionScanScheduleResponse,
     ConfigureCollectionSourceRequest, ConfigureCollectionSourceResponse,
     ConfigureIntegrationRuntimeRequest, ConfigureIntegrationRuntimeResponse,
@@ -105,6 +105,7 @@ enum SnapshotRefresh {
     ReadModel {
         read_model: Arc<venom_domain::FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
     },
     SystemEvents {
         system_events: Arc<SystemEventQueryIndex>,
@@ -113,6 +114,7 @@ enum SnapshotRefresh {
     CombinedReadModelAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
         system_events: Arc<SystemEventQueryIndex>,
         system_event_source_cursor: crate::app::read_cursor::EventSourceCursor,
     },
@@ -132,6 +134,7 @@ enum SnapshotRefresh {
     CombinedReadModelCommandStatusesAndSystemEvents {
         read_model: Arc<venom_domain::FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
         command_status_source_cursor: crate::app::read_cursor::RowSourceCursor,
         system_events: Arc<SystemEventQueryIndex>,
@@ -147,7 +150,12 @@ impl SnapshotRefresh {
             Self::ReadModel {
                 read_model,
                 read_model_source_watermark,
-            } => Arc::new(current.with_read_model_arc(read_model, read_model_source_watermark)),
+                governance_source_watermark,
+            } => Arc::new(current.with_read_model_arc(
+                read_model,
+                read_model_source_watermark,
+                governance_source_watermark,
+            )),
             Self::SystemEvents {
                 system_events,
                 system_event_source_cursor,
@@ -157,10 +165,15 @@ impl SnapshotRefresh {
             Self::CombinedReadModelAndSystemEvents {
                 read_model,
                 read_model_source_watermark,
+                governance_source_watermark,
                 system_events,
                 system_event_source_cursor,
             } => {
-                let next = current.with_read_model_arc(read_model, read_model_source_watermark);
+                let next = current.with_read_model_arc(
+                    read_model,
+                    read_model_source_watermark,
+                    governance_source_watermark,
+                );
                 Arc::new(
                     next.with_system_event_index_arc(system_events, system_event_source_cursor),
                 )
@@ -194,12 +207,17 @@ impl SnapshotRefresh {
             Self::CombinedReadModelCommandStatusesAndSystemEvents {
                 read_model,
                 read_model_source_watermark,
+                governance_source_watermark,
                 command_statuses,
                 command_status_source_cursor,
                 system_events,
                 system_event_source_cursor,
             } => {
-                let next = current.with_read_model_arc(read_model, read_model_source_watermark);
+                let next = current.with_read_model_arc(
+                    read_model,
+                    read_model_source_watermark,
+                    governance_source_watermark,
+                );
                 let next =
                     next.with_command_statuses_arc(command_statuses, command_status_source_cursor);
                 Arc::new(
@@ -222,10 +240,10 @@ impl ApiState {
     ) -> Result<Self, String> {
         let state_path = state_path.into();
         let runtime_path = runtime_path.into();
-        let state_service = ApiApplication::open_local(state_path.clone(), runtime_path.clone())
+        let state_service = ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
-        let volatile_service = ApiApplication::open_local(state_path, runtime_path)
-            .map_err(|error| error.to_string())?;
+        let volatile_service = ApiApplication::fork_local_from(&state_service)
+            .ok_or_else(|| "local api service fork unavailable".to_owned())?;
         Ok(Self::new_partitioned(state_service, volatile_service))
     }
 
@@ -355,11 +373,14 @@ impl ApiState {
                 let next_snapshot = Arc::new(ApiReadSnapshot::new(
                     loaded.inventory,
                     loaded.read_model,
-                    loaded.read_model_source_watermark,
-                    loaded.system_event_index,
-                    loaded.system_event_source_cursor,
-                    loaded.command_statuses,
-                    loaded.command_status_source_cursor,
+                    ApiReadSnapshotSources {
+                        read_model_source_watermark: loaded.read_model_source_watermark,
+                        governance_source_watermark: loaded.governance_source_watermark,
+                        system_event_index: loaded.system_event_index,
+                        system_event_source_cursor: loaded.system_event_source_cursor,
+                        command_statuses: loaded.command_statuses,
+                        command_status_source_cursor: loaded.command_status_source_cursor,
+                    },
                 ));
                 self.publish_snapshot(Arc::clone(&next_snapshot), Some(loaded.change_watermark));
                 return Ok(next_snapshot);
@@ -438,11 +459,14 @@ impl ApiState {
                         Arc::new(ApiReadSnapshot::new(
                             loaded.inventory,
                             loaded.read_model,
-                            loaded.read_model_source_watermark,
-                            loaded.system_event_index,
-                            loaded.system_event_source_cursor,
-                            loaded.command_statuses,
-                            loaded.command_status_source_cursor,
+                            ApiReadSnapshotSources {
+                                read_model_source_watermark: loaded.read_model_source_watermark,
+                                governance_source_watermark: loaded.governance_source_watermark,
+                                system_event_index: loaded.system_event_index,
+                                system_event_source_cursor: loaded.system_event_source_cursor,
+                                command_statuses: loaded.command_statuses,
+                                command_status_source_cursor: loaded.command_status_source_cursor,
+                            },
                         )),
                         loaded.change_watermark,
                     )
@@ -460,6 +484,7 @@ impl ApiState {
         SnapshotRefresh::ReadModel {
             read_model: service.read_model_snapshot_arc(),
             read_model_source_watermark: service.read_model_source_watermark(),
+            governance_source_watermark: service.governance_source_watermark(),
         }
     }
 
@@ -481,9 +506,11 @@ impl ApiState {
             SnapshotRefresh::ReadModel {
                 read_model,
                 read_model_source_watermark,
+                governance_source_watermark,
             } => SnapshotRefresh::CombinedReadModelAndSystemEvents {
                 read_model,
                 read_model_source_watermark,
+                governance_source_watermark,
                 system_events,
                 system_event_source_cursor: service.system_event_source_cursor(),
             },
@@ -520,6 +547,7 @@ impl ApiState {
         SnapshotRefresh::CombinedReadModelCommandStatusesAndSystemEvents {
             read_model: service.read_model_snapshot_arc(),
             read_model_source_watermark: service.read_model_source_watermark(),
+            governance_source_watermark: service.governance_source_watermark(),
             command_statuses: service.command_statuses_snapshot_arc(),
             command_status_source_cursor: service.command_status_source_cursor(),
             system_events: service.system_event_index_snapshot_arc(),
