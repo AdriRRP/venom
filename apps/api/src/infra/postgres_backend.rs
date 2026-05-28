@@ -5510,6 +5510,7 @@ impl PostgresReadSnapshotLoader {
         if lane_mask & CHANGE_LANE_COMPONENT_TAGS != 0 {
             backend.load_component_tags().await?;
         }
+        backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
     }
 
@@ -6171,6 +6172,7 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::CHANGE_LANE_CONTEXT_PROFILES;
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
     use super::PostgresStore;
@@ -6559,12 +6561,38 @@ mod tests {
             .await
             .expect("writer backend should reopen");
         let _ = writer
-            .register_context_profile(ContextProfileRegistration::overlay(
+            .register_context_profile(ContextProfileRegistration::new(
                 "context:corp-api-baseline",
                 "Corporate API Baseline",
+                false,
+                false,
+                false,
             ))
             .await
             .expect("context profile should persist");
+        let current_change_watermark = loader
+            .current_change_watermark()
+            .await
+            .expect("current watermark should advance after context profile registration");
+        assert!(current_change_watermark > since_change_watermark);
+        let stored_profile_count = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*) FROM {}",
+            writer.names.context_profiles
+        ))
+        .fetch_one(&writer.pool)
+        .await
+        .expect("stored context profile count should be readable");
+        assert_eq!(stored_profile_count, 1);
+        let lane_mask = loader
+            .changed_lane_mask(since_change_watermark, current_change_watermark)
+            .await
+            .expect("inventory-core lane mask should be readable");
+        assert_ne!(lane_mask & CHANGE_LANE_CONTEXT_PROFILES, 0);
+        let direct_inventory = loader
+            .load_inventory_core_snapshot(Arc::clone(&snapshot_base.inventory), lane_mask)
+            .await
+            .expect("direct inventory-core reload should succeed");
+        assert_eq!(direct_inventory.managed_context_profiles(), 1);
 
         let refreshed_after_profile = loader
             .load(since_change_watermark, snapshot_base)
