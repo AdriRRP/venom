@@ -121,7 +121,7 @@ impl Default for SystemEventsQuery {
 
 impl SystemEventsQuery {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             category: None,
             limit: DEFAULT_SYSTEM_EVENTS_LIMIT,

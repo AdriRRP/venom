@@ -266,7 +266,8 @@ mod tests {
         let _ = tracker.record_scan_report(&report(Vec::new()));
 
         assert!(!Arc::ptr_eq(&tracker.snapshots, &cloned.snapshots));
-        let replayed = cloned.clone().record_scan_report(&snapshot);
+        let mut replayed_clone = cloned;
+        let replayed = replayed_clone.record_scan_report(&snapshot);
         assert_eq!(replayed.active, 1);
     }
 }
