@@ -529,11 +529,14 @@ impl LocalStore {
         let (state_windows, runtime_windows) = match cache.as_ref() {
             Some(snapshot) if Arc::ptr_eq(&snapshot.state, &state) => {
                 if let Some(runtime_delta) = runtime.delta_since(snapshot.runtime.as_ref()) {
+                    let runtime_windows = merge_system_event_recent_windows(
+                        &snapshot.runtime_windows,
+                        &runtime_delta.recent_windows(),
+                    );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
                         &runtime_delta,
                     ));
-                    let runtime_windows = runtime.recent_windows();
                     *cache = Some(MergedSystemEventSnapshot {
                         state,
                         runtime,
@@ -547,11 +550,14 @@ impl LocalStore {
             }
             Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
                 if let Some(state_delta) = state.delta_since(snapshot.state.as_ref()) {
+                    let state_windows = merge_system_event_recent_windows(
+                        &snapshot.state_windows,
+                        &state_delta.recent_windows(),
+                    );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
                         &state_delta,
                     ));
-                    let state_windows = state.recent_windows();
                     *cache = Some(MergedSystemEventSnapshot {
                         state,
                         runtime,

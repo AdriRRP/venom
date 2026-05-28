@@ -1,6 +1,7 @@
 use crate::{ArtifactRef, PackageCoordinate};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Canonical identity of one finding inside one managed component and artifact.
 ///
@@ -140,7 +141,7 @@ impl FindingGovernanceState {
 /// Write-side owner of durable governance decisions for findings.
 #[derive(Debug, Clone, Default)]
 pub struct FindingGovernance {
-    decisions: BTreeMap<FindingRef, FindingDecision>,
+    decisions: Arc<BTreeMap<FindingRef, FindingDecision>>,
 }
 
 impl FindingGovernance {
@@ -151,7 +152,7 @@ impl FindingGovernance {
 
     #[must_use]
     pub fn decision(&self, finding: &FindingRef) -> Option<&FindingDecision> {
-        self.decisions.get(finding)
+        self.decisions.as_ref().get(finding)
     }
 
     pub fn accept_risk(
@@ -163,7 +164,7 @@ impl FindingGovernance {
         let change = if self.decision(&finding) == Some(&next) {
             AcceptRiskChange::Unchanged
         } else {
-            self.decisions.insert(finding, next);
+            Arc::make_mut(&mut self.decisions).insert(finding, next);
             AcceptRiskChange::Accepted
         };
 
@@ -171,7 +172,7 @@ impl FindingGovernance {
     }
 
     pub fn replay_risk_acceptance(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
-        self.decisions
+        Arc::make_mut(&mut self.decisions)
             .insert(finding, FindingDecision::RiskAccepted(acceptance));
     }
 
@@ -184,7 +185,7 @@ impl FindingGovernance {
         let change = if self.decision(&finding) == Some(&next) {
             SuppressFindingChange::Unchanged
         } else {
-            self.decisions.insert(finding, next);
+            Arc::make_mut(&mut self.decisions).insert(finding, next);
             SuppressFindingChange::Suppressed
         };
 
@@ -195,12 +196,12 @@ impl FindingGovernance {
     }
 
     pub fn replay_suppression(&mut self, finding: FindingRef, suppression: Suppression) {
-        self.decisions
+        Arc::make_mut(&mut self.decisions)
             .insert(finding, FindingDecision::Suppressed(suppression));
     }
 
     pub fn reopen(&mut self, finding: &FindingRef) -> ReopenFindingResult {
-        let change = if self.decisions.remove(finding).is_some() {
+        let change = if Arc::make_mut(&mut self.decisions).remove(finding).is_some() {
             ReopenFindingChange::Reopened
         } else {
             ReopenFindingChange::Unchanged
@@ -210,7 +211,7 @@ impl FindingGovernance {
     }
 
     pub fn replay_reopen(&mut self, finding: &FindingRef) {
-        self.decisions.remove(finding);
+        Arc::make_mut(&mut self.decisions).remove(finding);
     }
 }
 
@@ -309,6 +310,7 @@ mod tests {
         SuppressFindingChange, Suppression,
     };
     use crate::{ArtifactKind, ArtifactRef, PackageCoordinate};
+    use std::sync::Arc;
 
     fn finding() -> FindingRef {
         FindingRef::new(
@@ -370,5 +372,20 @@ mod tests {
 
         assert_eq!(result.change, ReopenFindingChange::Reopened);
         assert!(governance.decision(&target).is_none());
+    }
+
+    #[test]
+    fn clone_uses_copy_on_write_for_decisions() {
+        let mut governance = FindingGovernance::new();
+        let target = finding();
+        let _ = governance.accept_risk(target.clone(), RiskAcceptance::new("Accepted"));
+
+        let cloned = governance.clone();
+        assert!(Arc::ptr_eq(&governance.decisions, &cloned.decisions));
+
+        let _ = governance.reopen(&target);
+
+        assert!(!Arc::ptr_eq(&governance.decisions, &cloned.decisions));
+        assert!(cloned.decision(&target).is_some());
     }
 }
