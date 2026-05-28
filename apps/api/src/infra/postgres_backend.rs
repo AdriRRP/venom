@@ -1081,7 +1081,8 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1164,7 +1165,8 @@ impl PostgresStore {
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1250,7 +1252,8 @@ impl PostgresStore {
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1305,11 +1308,7 @@ impl PostgresStore {
             self.delete_governance_decision_rows_in_transaction(&mut tx, &finding)
                 .await?;
             self.append_governance_journal_entry_in_transaction(
-                &mut tx,
-                &finding,
-                "reopened",
-                None,
-                None,
+                &mut tx, &finding, "reopened", None, None,
             )
             .await?;
             let system_event_cursor = self
@@ -1322,7 +1321,8 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).reopen(&finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1390,7 +1390,8 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1474,7 +1475,8 @@ impl PostgresStore {
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1561,7 +1563,8 @@ impl PostgresStore {
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1644,7 +1647,8 @@ impl PostgresStore {
                 self.governance.reopen(finding);
                 self.read_model_mut().reopen(finding);
             }
-            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+            self.governance_journal_high_watermark =
+                self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -4465,12 +4469,9 @@ impl PostgresStore {
                     Some(until_unix_ms) => RiskAcceptance::new(reason.ok_or_else(|| {
                         "postgres governance journal risk acceptance missing reason".to_owned()
                     })?)
-                    .until_unix_ms(
-                        u64::try_from(until_unix_ms).map_err(|_| {
-                            "postgres governance journal acceptance until out of range"
-                                .to_owned()
-                        })?,
-                    ),
+                    .until_unix_ms(u64::try_from(until_unix_ms).map_err(|_| {
+                        "postgres governance journal acceptance until out of range".to_owned()
+                    })?),
                     None => RiskAcceptance::new(reason.ok_or_else(|| {
                         "postgres governance journal risk acceptance missing reason".to_owned()
                     })?),
@@ -4479,7 +4480,8 @@ impl PostgresStore {
                     self.governance
                         .replay_risk_acceptance(finding.clone(), acceptance.clone());
                 }
-                self.read_model_mut().replay_risk_acceptance(finding, acceptance);
+                self.read_model_mut()
+                    .replay_risk_acceptance(finding, acceptance);
             }
             "suppressed" => {
                 let suppression = Suppression::new(reason.ok_or_else(|| {
@@ -4489,7 +4491,8 @@ impl PostgresStore {
                     self.governance
                         .replay_suppression(finding.clone(), suppression.clone());
                 }
-                self.read_model_mut().replay_suppression(finding, suppression);
+                self.read_model_mut()
+                    .replay_suppression(finding, suppression);
             }
             "reopened" => {
                 if apply_to_governance {
@@ -4601,7 +4604,10 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_scan_commands_after(&mut self, base_cursor: RowSourceCursor) -> Result<(), String> {
+    async fn load_scan_commands_after(
+        &mut self,
+        base_cursor: RowSourceCursor,
+    ) -> Result<(), String> {
         let commands = sqlx::query_as::<_, (String, String, String, String, String, String, i64)>(&format!(
             concat!(
                 "SELECT command_id, component_key, artifact_kind, artifact_identity, freshness, status, ",
@@ -4628,7 +4634,8 @@ impl PostgresStore {
 
         let mut cursor = base_cursor;
         let mut order = Arc::unwrap_or_clone(Arc::clone(&self.order));
-        let mut command_statuses = Arc::unwrap_or_clone(Arc::clone(&self.command_statuses_snapshot_cache));
+        let mut command_statuses =
+            Arc::unwrap_or_clone(Arc::clone(&self.command_statuses_snapshot_cache));
         let mut records = Arc::unwrap_or_clone(Arc::clone(&self.commands));
         for (
             command_id,
@@ -4638,7 +4645,8 @@ impl PostgresStore {
             freshness,
             status,
             updated_at_micros,
-        ) in commands {
+        ) in commands
+        {
             let command_id = command_id.into_boxed_str();
             let status = parse_scan_command_status(&status)?;
             let request = ScanRequest::new(
@@ -5231,9 +5239,11 @@ impl PostgresStore {
                 .push_bind(reason)
                 .push_bind(until_unix_ms);
         });
-        query.build().execute(&mut **tx).await.map_err(|error| {
-            format!("postgres governance journal batch insert failed: {error}")
-        })?;
+        query
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| format!("postgres governance journal batch insert failed: {error}"))?;
         Ok(())
     }
 }
@@ -6488,7 +6498,7 @@ mod tests {
 
     #[tokio::test]
     async fn detached_postgres_read_snapshot_advances_governance_journal_cursor_for_reopened_findings()
-    {
+     {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
@@ -6563,8 +6573,7 @@ mod tests {
             .await
             .expect("detached fresh read should load");
         assert!(
-            refreshed_snapshot.governance_source_watermark
-                > backend.governance_source_watermark(),
+            refreshed_snapshot.governance_source_watermark > backend.governance_source_watermark(),
             "detached read should advance the governance cursor"
         );
     }
@@ -6601,10 +6610,12 @@ mod tests {
             .await
             .expect("scan request should persist");
 
-        assert!(follower
-            .refresh_from_remote_if_stale()
-            .await
-            .expect("follower refresh should succeed"));
+        assert!(
+            follower
+                .refresh_from_remote_if_stale()
+                .await
+                .expect("follower refresh should succeed")
+        );
         assert_eq!(
             follower.command_status(command_id.as_ref()),
             Some(ScanCommandStatus::Pending)
@@ -6643,10 +6654,12 @@ mod tests {
             .await
             .expect("scan request should persist");
 
-        assert!(follower
-            .refresh_from_remote_if_stale()
-            .await
-            .expect("follower refresh should succeed"));
+        assert!(
+            follower
+                .refresh_from_remote_if_stale()
+                .await
+                .expect("follower refresh should succeed")
+        );
         let kinds = follower
             .system_events_snapshot()
             .into_iter()

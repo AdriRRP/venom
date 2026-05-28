@@ -219,7 +219,10 @@ impl SystemEventQueryIndex {
     }
 
     fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
-        if self.retained_event_slots.contains_key(event.event_id.as_ref()) {
+        if self
+            .retained_event_slots
+            .contains_key(event.event_id.as_ref())
+        {
             return;
         }
         self.total += 1;
@@ -393,7 +396,10 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn from_retained_events(totals: SystemEventWindowTotals, retained_events: Vec<Arc<SystemEvent>>) -> Self {
+    fn from_retained_events(
+        totals: SystemEventWindowTotals,
+        retained_events: Vec<Arc<SystemEvent>>,
+    ) -> Self {
         let mut index = Self::new();
         index.total = totals.total;
         index.scheduler_total = totals.scheduler_total;
@@ -419,7 +425,8 @@ impl SystemEventQueryIndex {
                 SystemEventCategory::Governance => &mut governance,
                 SystemEventCategory::Publication => &mut publication,
             };
-            let keep = global < MAX_SYSTEM_EVENTS_LIMIT || *category_count < MAX_SYSTEM_EVENTS_LIMIT;
+            let keep =
+                global < MAX_SYSTEM_EVENTS_LIMIT || *category_count < MAX_SYSTEM_EVENTS_LIMIT;
             if keep {
                 retained.push(Arc::clone(event));
                 global += 1;
@@ -725,7 +732,7 @@ mod tests {
 
     #[test]
     fn system_event_query_index_keeps_truthful_recent_category_pages_without_category_slot_topology()
-    {
+     {
         category_query_uses_category_recent_window_not_only_global_recent_window();
     }
 }
