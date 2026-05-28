@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Default number of recent operator-facing system events returned in one query.
@@ -121,7 +121,7 @@ impl Default for SystemEventsQuery {
 
 impl SystemEventsQuery {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             category: None,
             limit: DEFAULT_SYSTEM_EVENTS_LIMIT,
@@ -163,7 +163,7 @@ pub struct SystemEventQueryIndex {
     command_total: usize,
     governance_total: usize,
     publication_total: usize,
-    retained_event_slots: BTreeMap<Box<str>, u16>,
+    retained_event_ids: HashSet<Box<str>>,
     retained_events: Vec<Arc<SystemEvent>>,
 }
 
@@ -193,14 +193,14 @@ impl Default for SystemEventQueryIndex {
 
 impl SystemEventQueryIndex {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             total: 0,
             scheduler_total: 0,
             command_total: 0,
             governance_total: 0,
             publication_total: 0,
-            retained_event_slots: BTreeMap::new(),
+            retained_event_ids: HashSet::new(),
             retained_events: Vec::new(),
         }
     }
@@ -219,10 +219,7 @@ impl SystemEventQueryIndex {
     }
 
     fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
-        if self
-            .retained_event_slots
-            .contains_key(event.event_id.as_ref())
-        {
+        if self.retained_event_ids.contains(event.event_id.as_ref()) {
             return;
         }
         self.total += 1;
@@ -434,17 +431,10 @@ impl SystemEventQueryIndex {
             }
         }
         self.retained_events = retained;
-        self.retained_event_slots = self
+        self.retained_event_ids = self
             .retained_events
             .iter()
-            .enumerate()
-            .map(|(index, event)| {
-                (
-                    event.event_id.clone(),
-                    u16::try_from(index)
-                        .expect("bounded retained system event windows should fit in u16 slots"),
-                )
-            })
+            .map(|event| event.event_id.clone())
             .collect();
     }
 }

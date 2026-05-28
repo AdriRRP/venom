@@ -142,19 +142,23 @@ impl PostgresReadSnapshotBase {
     }
 }
 
-const CHANGE_LANE_INVENTORY: i32 = 1;
-const CHANGE_LANE_COMPONENT_BINDINGS: i32 = 1 << 1;
-const CHANGE_LANE_COLLECTIONS: i32 = 1 << 2;
-const CHANGE_LANE_READ_MODEL: i32 = 1 << 3;
-const CHANGE_LANE_GOVERNANCE: i32 = 1 << 4;
-const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 5;
-const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 6;
-const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 7;
-const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 8;
-const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 9;
-const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 10;
+const CHANGE_LANE_COMPONENTS: i32 = 1;
+const CHANGE_LANE_CONTEXT_PROFILES: i32 = 1 << 1;
+const CHANGE_LANE_COMPONENT_TAGS: i32 = 1 << 2;
+const CHANGE_LANE_COMPONENT_BINDINGS: i32 = 1 << 3;
+const CHANGE_LANE_COLLECTIONS: i32 = 1 << 4;
+const CHANGE_LANE_READ_MODEL: i32 = 1 << 5;
+const CHANGE_LANE_GOVERNANCE: i32 = 1 << 6;
+const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 7;
+const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 8;
+const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 9;
+const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 10;
+const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 11;
+const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 12;
+const CHANGE_LANE_INVENTORY_CORE: i32 =
+    CHANGE_LANE_COMPONENTS | CHANGE_LANE_CONTEXT_PROFILES | CHANGE_LANE_COMPONENT_TAGS;
 const POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
-const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY
+const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY_CORE
     | CHANGE_LANE_COMPONENT_BINDINGS
     | CHANGE_LANE_COLLECTIONS
     | CHANGE_LANE_READ_MODEL
@@ -368,8 +372,8 @@ impl PostgresStore {
         let lane_mask = self
             .changed_lane_mask(self.observed_change_watermark(), current_change_watermark)
             .await?;
-        if lane_mask & CHANGE_LANE_INVENTORY != 0 {
-            self.refresh_inventory_core_from_remote().await?;
+        if lane_mask & CHANGE_LANE_INVENTORY_CORE != 0 {
+            self.refresh_inventory_core_from_remote(lane_mask).await?;
         }
         if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
             self.refresh_component_bindings_from_remote().await?;
@@ -2974,10 +2978,10 @@ impl PostgresStore {
             ),
             self.names.schema,
             self.names.change_watermark,
-            CHANGE_LANE_INVENTORY,
-            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_COMPONENTS,
+            CHANGE_LANE_CONTEXT_PROFILES,
             CHANGE_LANE_COMPONENT_BINDINGS,
-            CHANGE_LANE_INVENTORY,
+            CHANGE_LANE_COMPONENT_TAGS,
             CHANGE_LANE_COMPONENT_BINDINGS,
             CHANGE_LANE_COLLECTIONS,
             CHANGE_LANE_COLLECTIONS,
@@ -3628,12 +3632,18 @@ impl PostgresStore {
         })
     }
 
-    async fn refresh_inventory_core_from_remote(&mut self) -> Result<(), String> {
+    async fn refresh_inventory_core_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
-        backend.load_components().await?;
-        backend.load_context_profiles().await?;
-        backend.load_component_tags().await?;
+        if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
+            backend.load_components().await?;
+        }
+        if lane_mask & CHANGE_LANE_CONTEXT_PROFILES != 0 {
+            backend.load_context_profiles().await?;
+        }
+        if lane_mask & CHANGE_LANE_COMPONENT_TAGS != 0 {
+            backend.load_component_tags().await?;
+        }
         self.ingestion = backend.ingestion;
         self.refresh_inventory_snapshot_cache();
         Ok(())
@@ -4085,8 +4095,12 @@ impl PostgresStore {
         >(&format!(
             concat!(
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings ",
-                "FROM {} ORDER BY id"
+                "observed_at_micros, freshness, knowledge_revision, findings FROM (",
+                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
+                "observed_at_micros, freshness, knowledge_revision, findings, ",
+                "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
+                "FROM {}",
+                ") latest WHERE row_rank = 1 ORDER BY id"
             ),
             self.names.provider_reports
         ))
@@ -4137,8 +4151,12 @@ impl PostgresStore {
         >(&format!(
             concat!(
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings ",
-                "FROM {} WHERE id > $1 ORDER BY id"
+                "observed_at_micros, freshness, knowledge_revision, findings FROM (",
+                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
+                "observed_at_micros, freshness, knowledge_revision, findings, ",
+                "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
+                "FROM {} WHERE id > $1",
+                ") latest WHERE row_rank = 1 ORDER BY id"
             ),
             self.names.provider_reports
         ))
@@ -5344,8 +5362,9 @@ impl PostgresReadSnapshotLoader {
         inventory: Arc<ComponentInventory>,
         lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
-        let inventory = if lane_mask & CHANGE_LANE_INVENTORY != 0 {
-            self.load_inventory_core_snapshot(inventory).await?
+        let inventory = if lane_mask & CHANGE_LANE_INVENTORY_CORE != 0 {
+            self.load_inventory_core_snapshot(inventory, lane_mask)
+                .await?
         } else {
             inventory
         };
@@ -5478,12 +5497,19 @@ impl PostgresReadSnapshotLoader {
     async fn load_inventory_core_snapshot(
         &self,
         base_inventory: Arc<ComponentInventory>,
+        lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = FindingIngestion::from_inventory_arc(base_inventory);
-        backend.load_components().await?;
-        backend.load_context_profiles().await?;
-        backend.load_component_tags().await?;
+        if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
+            backend.load_components().await?;
+        }
+        if lane_mask & CHANGE_LANE_CONTEXT_PROFILES != 0 {
+            backend.load_context_profiles().await?;
+        }
+        if lane_mask & CHANGE_LANE_COMPONENT_TAGS != 0 {
+            backend.load_component_tags().await?;
+        }
         Ok(backend.inventory_snapshot_arc())
     }
 
@@ -6155,10 +6181,11 @@ mod tests {
     use venom_domain::{
         ArtifactKind, ArtifactRef, BulkGovernanceQuery, CollectionRegistration, CollectionSource,
         CollectionSourceMode, ComponentListCollectionSource, ComponentRegistration,
-        EvidenceFreshness, FindingGovernanceState, FindingProvider, FindingProviderError,
-        IntegrationEvent, IntegrationEventPublishError, IntegrationEventPublisher,
-        PackageCoordinate, PendingIntegrationEvent, ProviderScanReport, ReportedFinding,
-        RiskAcceptance, RunNextScanResult, ScanCommandStatus, SystemEventKind,
+        ComponentTagRegistration, ContextProfileRegistration, EvidenceFreshness,
+        FindingGovernanceState, FindingProvider, FindingProviderError, IntegrationEvent,
+        IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance,
+        RunNextScanResult, ScanCommandStatus, SystemEventKind,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -6490,6 +6517,115 @@ mod tests {
                 .read_model
                 .active_finding_count("component:payments-api", &artifact()),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_read_snapshot_reloads_inventory_core_sub_lanes_incrementally() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_inventory_core_sub_lanes");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after component registration");
+        let snapshot_base = PostgresReadSnapshotBase::new(
+            backend.inventory_snapshot_arc(),
+            backend.read_model_snapshot_arc(),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: backend.read_model_source_watermark(),
+                governance_source_watermark: backend.governance_source_watermark(),
+                system_event_index: backend.system_event_index_snapshot_arc(),
+                system_event_source_cursor: backend.system_event_source_cursor(),
+                command_statuses: backend.command_statuses_snapshot_arc(),
+                command_status_source_cursor: backend.command_status_source_cursor(),
+            },
+        );
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let _ = writer
+            .register_context_profile(ContextProfileRegistration::overlay(
+                "context:corp-api-baseline",
+                "Corporate API Baseline",
+            ))
+            .await
+            .expect("context profile should persist");
+
+        let refreshed_after_profile = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load context profile delta");
+
+        assert_eq!(
+            refreshed_after_profile.inventory.managed_context_profiles(),
+            1
+        );
+        assert!(
+            refreshed_after_profile
+                .inventory
+                .context_profile("context:corp-api-baseline")
+                .is_some()
+        );
+        assert_eq!(
+            refreshed_after_profile.inventory.managed_component_tags(),
+            0
+        );
+
+        let next_base = PostgresReadSnapshotBase::new(
+            Arc::clone(&refreshed_after_profile.inventory),
+            Arc::clone(&refreshed_after_profile.read_model),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: refreshed_after_profile.read_model_source_watermark,
+                governance_source_watermark: refreshed_after_profile.governance_source_watermark,
+                system_event_index: Arc::clone(&refreshed_after_profile.system_event_index),
+                system_event_source_cursor: refreshed_after_profile
+                    .system_event_source_cursor
+                    .clone(),
+                command_statuses: Arc::clone(&refreshed_after_profile.command_statuses),
+                command_status_source_cursor: refreshed_after_profile
+                    .command_status_source_cursor
+                    .clone(),
+            },
+        );
+
+        let _ = writer
+            .register_component_tag(ComponentTagRegistration::new(
+                "tag:corp-api",
+                "Corporate API",
+            ))
+            .await
+            .expect("component tag should persist");
+
+        let refreshed_after_tag = loader
+            .load(refreshed_after_profile.change_watermark, next_base)
+            .await
+            .expect("detached fresh read should load component tag delta");
+
+        assert_eq!(refreshed_after_tag.inventory.managed_context_profiles(), 1);
+        assert_eq!(refreshed_after_tag.inventory.managed_component_tags(), 1);
+        assert_eq!(
+            refreshed_after_tag
+                .inventory
+                .component_tags()
+                .into_iter()
+                .map(|tag| tag.tag_key)
+                .collect::<Vec<_>>(),
+            vec![Box::<str>::from("tag:corp-api")]
         );
     }
 

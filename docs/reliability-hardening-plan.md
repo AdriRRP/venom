@@ -262,6 +262,24 @@ Completed:
 87. `W197-system-event-index-topology-elision`
     Remove dedicated category-slot topology from `SystemEventQueryIndex` and
     answer recent category views from one truthful retained-event store.
+88. `W198-governance-and-tracker-arc-sharing`
+    Keep `FindingTracker` snapshots and `FindingGovernance` decisions under
+    copy-on-write `Arc` ownership so forked live API lanes do not deep-clone
+    those residual mutable maps.
+89. `W199-provider-report-latest-delta-refresh`
+    Refresh detached Postgres findings lanes from the latest changed provider
+    report head per artifact instead of replaying every intermediate row after
+    the watermark.
+90. `W200-inventory-core-sub-lane-refresh`
+    Split detached Postgres inventory-core refresh into component,
+    context-profile, and component-tag sub-lanes so narrow changes do not
+    reload unrelated durable tables.
+91. `W201-local-system-event-side-window-reuse`
+    Reuse cached recent windows for the unchanged local `system events` side
+    and merge only the bounded delta from the changed side.
+92. `W202-system-event-retained-id-set-compaction`
+    Replace retained slot bookkeeping in `SystemEventQueryIndex` with one
+    retained id set while preserving truthful recent category pages.
 74. `W176-shared-postgres-pool-across-api-lanes`
     Reuse one `PgPool` across the partitioned Postgres-backed API lanes instead
     of opening three independent pools for the same schema and process.

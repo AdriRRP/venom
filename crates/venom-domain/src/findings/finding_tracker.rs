@@ -1,6 +1,7 @@
 use crate::{ArtifactRef, ProviderScanReport, ReportedFinding};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Observable effect of recording one provider scan report.
 ///
@@ -33,7 +34,7 @@ impl FindingChangeSet {
 /// withdrawal by comparing canonical fingerprints over time.
 #[derive(Debug, Clone, Default)]
 pub struct FindingTracker {
-    snapshots: HashMap<TrackedArtifactKey, Vec<FindingFingerprint>>,
+    snapshots: Arc<HashMap<TrackedArtifactKey, Vec<FindingFingerprint>>>,
 }
 
 impl FindingTracker {
@@ -52,7 +53,9 @@ impl FindingTracker {
             TrackedArtifactKey::new(report.component_key.clone(), report.artifact.clone());
         let current = canonicalize_findings(&report.findings);
 
-        let previous = self.snapshots.entry(artifact_key).or_default();
+        let previous = Arc::make_mut(&mut self.snapshots)
+            .entry(artifact_key)
+            .or_default();
         let (discovered, repeated, withdrawn) = diff_sorted(previous, &current);
 
         *previous = current;
@@ -70,7 +73,7 @@ impl FindingTracker {
         let artifact_key =
             TrackedArtifactKey::new(report.component_key.clone(), report.artifact.clone());
         let current = canonicalize_findings(&report.findings);
-        self.snapshots.insert(artifact_key, current);
+        Arc::make_mut(&mut self.snapshots).insert(artifact_key, current);
     }
 
     /// Restore one provider snapshot during replay from already canonical findings.
@@ -85,7 +88,7 @@ impl FindingTracker {
             .iter()
             .map(FindingFingerprint::from)
             .collect::<Vec<_>>();
-        self.snapshots.insert(artifact_key, current);
+        Arc::make_mut(&mut self.snapshots).insert(artifact_key, current);
     }
 }
 
@@ -174,6 +177,7 @@ mod tests {
         ArtifactKind, ArtifactRef, EvidenceFreshness, PackageCoordinate, ProviderScanReport,
         ReportedFinding, Severity,
     };
+    use std::sync::Arc;
     use std::time::SystemTime;
 
     fn report(findings: Vec<ReportedFinding>) -> ProviderScanReport {
@@ -247,6 +251,22 @@ mod tests {
         assert_eq!(replayed.discovered, 0);
         assert_eq!(replayed.repeated, 1);
         assert_eq!(replayed.withdrawn, 0);
+        assert_eq!(replayed.active, 1);
+    }
+
+    #[test]
+    fn clone_uses_copy_on_write_for_snapshots() {
+        let mut tracker = FindingTracker::new();
+        let snapshot = report(vec![openssl_finding()]);
+        let _ = tracker.record_scan_report(&snapshot);
+
+        let cloned = tracker.clone();
+        assert!(Arc::ptr_eq(&tracker.snapshots, &cloned.snapshots));
+
+        let _ = tracker.record_scan_report(&report(Vec::new()));
+
+        assert!(!Arc::ptr_eq(&tracker.snapshots, &cloned.snapshots));
+        let replayed = cloned.clone().record_scan_report(&snapshot);
         assert_eq!(replayed.active, 1);
     }
 }
