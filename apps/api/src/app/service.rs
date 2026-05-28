@@ -1,6 +1,8 @@
 use crate::app::read_cursor::{EventSourceCursor, RowSourceCursor};
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
-use crate::infra::postgres_backend::{DrainDueCollectionScansResult, PostgresStore};
+use crate::infra::postgres_backend::{
+    DrainDueCollectionScansResult, PostgresReadSnapshotSources, PostgresStore,
+};
 pub use crate::infra::postgres_backend::{
     PostgresReadSnapshotBase, PostgresReadSnapshotLoader, PostgresRemoteChangeProbe,
 };
@@ -73,27 +75,32 @@ pub struct ApiReadSnapshot {
     release_board: Mutex<Option<Arc<ReleaseBoard>>>,
 }
 
+#[derive(Debug)]
+pub struct ApiReadSnapshotSources {
+    pub read_model_source_watermark: u64,
+    pub governance_source_watermark: u64,
+    pub system_event_index: Arc<SystemEventQueryIndex>,
+    pub system_event_source_cursor: EventSourceCursor,
+    pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
+    pub command_status_source_cursor: RowSourceCursor,
+}
+
 impl ApiReadSnapshot {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
-        read_model_source_watermark: u64,
-        governance_source_watermark: u64,
-        system_event_index: Arc<SystemEventQueryIndex>,
-        system_event_source_cursor: EventSourceCursor,
-        command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
-        command_status_source_cursor: RowSourceCursor,
+        sources: ApiReadSnapshotSources,
     ) -> Self {
         Self {
             inventory,
             read_model,
-            read_model_source_watermark,
-            governance_source_watermark,
-            system_event_index,
-            system_event_source_cursor,
-            command_statuses,
-            command_status_source_cursor,
+            read_model_source_watermark: sources.read_model_source_watermark,
+            governance_source_watermark: sources.governance_source_watermark,
+            system_event_index: sources.system_event_index,
+            system_event_source_cursor: sources.system_event_source_cursor,
+            command_statuses: sources.command_statuses,
+            command_status_source_cursor: sources.command_status_source_cursor,
             release_board: Mutex::new(None),
         }
     }
@@ -190,12 +197,14 @@ impl ApiReadSnapshot {
         PostgresReadSnapshotBase::new(
             Arc::clone(&self.inventory),
             Arc::clone(&self.read_model),
-            self.read_model_source_watermark,
-            self.governance_source_watermark,
-            Arc::clone(&self.system_event_index),
-            self.system_event_source_cursor.clone(),
-            Arc::clone(&self.command_statuses),
-            self.command_status_source_cursor.clone(),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: self.read_model_source_watermark,
+                governance_source_watermark: self.governance_source_watermark,
+                system_event_index: Arc::clone(&self.system_event_index),
+                system_event_source_cursor: self.system_event_source_cursor.clone(),
+                command_statuses: Arc::clone(&self.command_statuses),
+                command_status_source_cursor: self.command_status_source_cursor.clone(),
+            },
         )
     }
 
@@ -731,22 +740,26 @@ impl ApiApplication {
             ApiStore::Local(local) => ApiReadSnapshot::new(
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
-                0,
-                0,
-                local.system_event_index_snapshot_arc(),
-                EventSourceCursor::default(),
-                local.runtime.command_statuses_snapshot_arc(),
-                RowSourceCursor::default(),
+                ApiReadSnapshotSources {
+                    read_model_source_watermark: 0,
+                    governance_source_watermark: 0,
+                    system_event_index: local.system_event_index_snapshot_arc(),
+                    system_event_source_cursor: EventSourceCursor::default(),
+                    command_statuses: local.runtime.command_statuses_snapshot_arc(),
+                    command_status_source_cursor: RowSourceCursor::default(),
+                },
             ),
             ApiStore::Postgres(postgres) => ApiReadSnapshot::new(
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
-                postgres.read_model_source_watermark(),
-                postgres.governance_source_watermark(),
-                postgres.system_event_index_snapshot_arc(),
-                postgres.system_event_source_cursor(),
-                postgres.command_statuses_snapshot_arc(),
-                postgres.command_status_source_cursor(),
+                ApiReadSnapshotSources {
+                    read_model_source_watermark: postgres.read_model_source_watermark(),
+                    governance_source_watermark: postgres.governance_source_watermark(),
+                    system_event_index: postgres.system_event_index_snapshot_arc(),
+                    system_event_source_cursor: postgres.system_event_source_cursor(),
+                    command_statuses: postgres.command_statuses_snapshot_arc(),
+                    command_status_source_cursor: postgres.command_status_source_cursor(),
+                },
             ),
         }
     }
