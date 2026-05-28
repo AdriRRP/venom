@@ -65,6 +65,7 @@ pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     read_model_source_watermark: u64,
+    governance_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
     system_event_source_cursor: EventSourceCursor,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -78,6 +79,7 @@ impl ApiReadSnapshot {
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
         system_event_index: Arc<SystemEventQueryIndex>,
         system_event_source_cursor: EventSourceCursor,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -87,6 +89,7 @@ impl ApiReadSnapshot {
             inventory,
             read_model,
             read_model_source_watermark,
+            governance_source_watermark,
             system_event_index,
             system_event_source_cursor,
             command_statuses,
@@ -101,6 +104,7 @@ impl ApiReadSnapshot {
             inventory,
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
+            governance_source_watermark: self.governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses: Arc::clone(&self.command_statuses),
@@ -114,11 +118,13 @@ impl ApiReadSnapshot {
         &self,
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
     ) -> Self {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model,
             read_model_source_watermark,
+            governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses: Arc::clone(&self.command_statuses),
@@ -137,6 +143,7 @@ impl ApiReadSnapshot {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
+            governance_source_watermark: self.governance_source_watermark,
             system_event_index,
             system_event_source_cursor,
             command_statuses: Arc::clone(&self.command_statuses),
@@ -155,6 +162,7 @@ impl ApiReadSnapshot {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
             read_model_source_watermark: self.read_model_source_watermark,
+            governance_source_watermark: self.governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
             system_event_source_cursor: self.system_event_source_cursor.clone(),
             command_statuses,
@@ -183,6 +191,7 @@ impl ApiReadSnapshot {
             Arc::clone(&self.inventory),
             Arc::clone(&self.read_model),
             self.read_model_source_watermark,
+            self.governance_source_watermark,
             Arc::clone(&self.system_event_index),
             self.system_event_source_cursor.clone(),
             Arc::clone(&self.command_statuses),
@@ -678,6 +687,22 @@ impl ApiApplication {
     }
 
     #[must_use]
+    pub fn fork_local_from(base: &Self) -> Option<Self> {
+        match &base.backend {
+            ApiStore::Local(local) => Some(Self {
+                backend: ApiStore::Local(LocalStore {
+                    state_path: local.state_path.clone(),
+                    runtime_path: local.runtime_path.clone(),
+                    state: local.state.clone(),
+                    runtime: local.runtime.clone(),
+                    merged_system_event_snapshot_cache: StdMutex::new(None),
+                }),
+            }),
+            ApiStore::Postgres(_) => None,
+        }
+    }
+
+    #[must_use]
     pub const fn from_postgres_store(backend: PostgresStore) -> Self {
         Self {
             backend: ApiStore::Postgres(backend),
@@ -707,6 +732,7 @@ impl ApiApplication {
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
                 0,
+                0,
                 local.system_event_index_snapshot_arc(),
                 EventSourceCursor::default(),
                 local.runtime.command_statuses_snapshot_arc(),
@@ -716,6 +742,7 @@ impl ApiApplication {
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
                 postgres.read_model_source_watermark(),
+                postgres.governance_source_watermark(),
                 postgres.system_event_index_snapshot_arc(),
                 postgres.system_event_source_cursor(),
                 postgres.command_statuses_snapshot_arc(),
@@ -745,6 +772,14 @@ impl ApiApplication {
         match &self.backend {
             ApiStore::Local(_) => 0,
             ApiStore::Postgres(postgres) => postgres.read_model_source_watermark(),
+        }
+    }
+
+    #[must_use]
+    pub const fn governance_source_watermark(&self) -> u64 {
+        match &self.backend {
+            ApiStore::Local(_) => 0,
+            ApiStore::Postgres(postgres) => postgres.governance_source_watermark(),
         }
     }
 
@@ -3911,8 +3946,11 @@ fn merge_publish_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiApplication, ComponentRegistrationRequest, LocalStore, RequestScanCommand};
+    use super::{
+        ApiApplication, ApiStore, ComponentRegistrationRequest, LocalStore, RequestScanCommand,
+    };
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::durable_state::DurableState;
@@ -4003,6 +4041,40 @@ mod tests {
     }
 
     #[test]
+    fn local_open_forks_volatile_lane_from_one_bootstrap_base() {
+        let state_path = temp_path("local-fork", "state");
+        let runtime_path = temp_path("local-fork", "runtime");
+        let base = ApiApplication::open_local(&state_path, &runtime_path)
+            .expect("base local application should open");
+        let fork = ApiApplication::fork_local_from(&base)
+            .expect("local application fork should be available");
+
+        let ApiStore::Local(base_local) = &base.backend else {
+            panic!("base application should use local backend");
+        };
+        let ApiStore::Local(fork_local) = &fork.backend else {
+            panic!("forked application should use local backend");
+        };
+
+        assert!(Arc::ptr_eq(
+            &base_local.state.inventory_snapshot_arc(),
+            &fork_local.state.inventory_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &base_local.state.read_model_snapshot_arc(),
+            &fork_local.state.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &base_local.runtime.command_statuses_snapshot_arc(),
+            &fork_local.runtime.command_statuses_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &base_local.runtime.system_event_index_snapshot_arc(),
+            &fork_local.runtime.system_event_index_snapshot_arc()
+        ));
+    }
+
+    #[test]
     fn local_merged_system_event_snapshot_reuses_cached_peer_window() {
         let state_path = temp_path("merged-events-cache", "state");
         let runtime_path = temp_path("merged-events-cache", "runtime");
@@ -4053,5 +4125,10 @@ mod tests {
         };
         assert!(std::sync::Arc::ptr_eq(&first_cache, &runtime_cache.0));
         assert_eq!(runtime_cache.1, runtime_cache.2);
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_appends_bounded_delta_without_window_rebuild() {
+        local_merged_system_event_snapshot_reuses_cached_peer_window();
     }
 }

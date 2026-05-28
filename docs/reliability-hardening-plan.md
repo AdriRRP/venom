@@ -247,6 +247,21 @@ Completed:
 82. `W192-state-runtime-barrier-elision`
     Remove the leftover state/runtime barrier when lane ownership already
     provides the required serialization boundary.
+83. `W193-local-lane-bootstrap-sharing`
+    Open one local durable application view and fork the second API lane from
+    that in-memory base instead of reopening both histories from disk.
+84. `W194-governance-delta-refresh-journal`
+    Make Postgres read-model refresh consume governance deltas from a durable
+    journal instead of reloading whole acceptance and suppression tables.
+85. `W195-live-observability-tail-refresh`
+    Tail-refresh live Postgres command statuses, pending integration events,
+    and system events from durable row cursors instead of lane reloads.
+86. `W196-local-system-event-merge-shape-tightening`
+    Reuse retained event vectors when one local event side only appends a
+    bounded delta instead of rebuilding merged recent windows wholesale.
+87. `W197-system-event-index-topology-elision`
+    Remove dedicated category-slot topology from `SystemEventQueryIndex` and
+    answer recent category views from one truthful retained-event store.
 74. `W176-shared-postgres-pool-across-api-lanes`
     Reuse one `PgPool` across the partitioned Postgres-backed API lanes instead
     of opening three independent pools for the same schema and process.

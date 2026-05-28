@@ -56,9 +56,11 @@ pub struct PostgresStore {
     read_model_snapshot_cache: Arc<FindingReadModel>,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     provider_report_row_high_watermark: u64,
+    governance_journal_high_watermark: u64,
     commands: Arc<CommandRecordMap>,
     order: Arc<CommandOrder>,
     pending_integration_events: Arc<PendingIntegrationEventList>,
+    pending_integration_source_cursor: RowSourceCursor,
     system_event_index_snapshot_cache: Arc<SystemEventQueryIndex>,
     system_event_source_cursor: EventSourceCursor,
     command_statuses_snapshot_cache: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -84,6 +86,7 @@ pub struct PostgresReadSnapshotBase {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
     read_model_source_watermark: u64,
+    governance_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
     system_event_source_cursor: EventSourceCursor,
     command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -95,6 +98,7 @@ pub struct LoadedPostgresReadSnapshot {
     pub inventory: Arc<ComponentInventory>,
     pub read_model: Arc<FindingReadModel>,
     pub read_model_source_watermark: u64,
+    pub governance_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
     pub system_event_source_cursor: EventSourceCursor,
     pub command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -114,6 +118,7 @@ impl PostgresReadSnapshotBase {
         inventory: Arc<ComponentInventory>,
         read_model: Arc<FindingReadModel>,
         read_model_source_watermark: u64,
+        governance_source_watermark: u64,
         system_event_index: Arc<SystemEventQueryIndex>,
         system_event_source_cursor: EventSourceCursor,
         command_statuses: Arc<BTreeMap<Box<str>, ScanCommandStatus>>,
@@ -123,6 +128,7 @@ impl PostgresReadSnapshotBase {
             inventory,
             read_model,
             read_model_source_watermark,
+            governance_source_watermark,
             system_event_index,
             system_event_source_cursor,
             command_statuses,
@@ -213,6 +219,19 @@ type SystemEventDeltaRow = (
     i64,
 );
 type CommandStatusDeltaRow = (String, String, i64);
+type GovernanceJournalRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+);
 
 #[derive(Default)]
 struct SystemEventTotals {
@@ -266,9 +285,11 @@ impl PostgresStore {
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             integration_runtime_config: None,
             provider_report_row_high_watermark: 0,
+            governance_journal_high_watermark: 0,
             commands: Arc::new(BTreeMap::new()),
             order: Arc::new(Vec::new()),
             pending_integration_events: Arc::new(Vec::new()),
+            pending_integration_source_cursor: RowSourceCursor::default(),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             system_event_source_cursor: EventSourceCursor::default(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
@@ -292,9 +313,11 @@ impl PostgresStore {
             read_model_snapshot_cache: Arc::clone(&base.read_model_snapshot_cache),
             integration_runtime_config: base.integration_runtime_config.clone(),
             provider_report_row_high_watermark: base.provider_report_row_high_watermark,
+            governance_journal_high_watermark: base.governance_journal_high_watermark,
             commands: Arc::clone(&base.commands),
             order: Arc::clone(&base.order),
             pending_integration_events: Arc::clone(&base.pending_integration_events),
+            pending_integration_source_cursor: base.pending_integration_source_cursor.clone(),
             system_event_index_snapshot_cache: Arc::clone(&base.system_event_index_snapshot_cache),
             system_event_source_cursor: base.system_event_source_cursor.clone(),
             command_statuses_snapshot_cache: Arc::clone(&base.command_statuses_snapshot_cache),
@@ -314,9 +337,11 @@ impl PostgresStore {
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
             integration_runtime_config: None,
             provider_report_row_high_watermark: 0,
+            governance_journal_high_watermark: 0,
             commands: Arc::new(BTreeMap::new()),
             order: Arc::new(Vec::new()),
             pending_integration_events: Arc::new(Vec::new()),
+            pending_integration_source_cursor: RowSourceCursor::default(),
             system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
             system_event_source_cursor: EventSourceCursor::default(),
             command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
@@ -1038,6 +1063,14 @@ impl PostgresStore {
             })?;
             self.upsert_risk_acceptance_in_transaction(&mut tx, &finding, &acceptance)
                 .await?;
+            self.append_governance_journal_entry_in_transaction(
+                &mut tx,
+                &finding,
+                "risk-accepted",
+                Some(acceptance.reason.as_ref()),
+                acceptance.until_unix_ms,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1048,6 +1081,7 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).accept_risk(finding, acceptance);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1109,6 +1143,14 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
+            self.append_governance_journal_entries_in_transaction(
+                &mut tx,
+                &changed,
+                "risk-accepted",
+                Some(acceptance.reason.as_ref()),
+                acceptance.until_unix_ms,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1122,6 +1164,7 @@ impl PostgresStore {
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1186,6 +1229,14 @@ impl PostgresStore {
             };
             self.upsert_risk_acceptances_in_transaction(&mut tx, &changed, &acceptance)
                 .await?;
+            self.append_governance_journal_entries_in_transaction(
+                &mut tx,
+                &changed,
+                "risk-accepted",
+                Some(acceptance.reason.as_ref()),
+                acceptance.until_unix_ms,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1199,6 +1250,7 @@ impl PostgresStore {
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
             }
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1252,6 +1304,14 @@ impl PostgresStore {
                 .map_err(|error| format!("postgres finding reopen begin failed: {error}"))?;
             self.delete_governance_decision_rows_in_transaction(&mut tx, &finding)
                 .await?;
+            self.append_governance_journal_entry_in_transaction(
+                &mut tx,
+                &finding,
+                "reopened",
+                None,
+                None,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1262,6 +1322,7 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).reopen(&finding);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1311,6 +1372,14 @@ impl PostgresStore {
                 })?;
             self.upsert_suppression_in_transaction(&mut tx, &finding, &suppression)
                 .await?;
+            self.append_governance_journal_entry_in_transaction(
+                &mut tx,
+                &finding,
+                "suppressed",
+                Some(suppression.reason.as_ref()),
+                None,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1321,6 +1390,7 @@ impl PostgresStore {
             Arc::make_mut(&mut candidate_read_model).suppress(finding, suppression);
             self.governance = candidate_governance;
             self.read_model = candidate_read_model;
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1383,6 +1453,14 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed_findings, &suppression)
                 .await?;
+            self.append_governance_journal_entries_in_transaction(
+                &mut tx,
+                &changed_findings,
+                "suppressed",
+                Some(suppression.reason.as_ref()),
+                None,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1396,6 +1474,7 @@ impl PostgresStore {
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1461,6 +1540,14 @@ impl PostgresStore {
             };
             self.upsert_suppressions_in_transaction(&mut tx, &changed, &suppression)
                 .await?;
+            self.append_governance_journal_entries_in_transaction(
+                &mut tx,
+                &changed,
+                "suppressed",
+                Some(suppression.reason.as_ref()),
+                None,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1474,6 +1561,7 @@ impl PostgresStore {
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
             }
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1537,6 +1625,14 @@ impl PostgresStore {
                 self.delete_governance_decision_rows_in_transaction(&mut tx, finding)
                     .await?;
             }
+            self.append_governance_journal_entries_in_transaction(
+                &mut tx,
+                &reopened_findings,
+                "reopened",
+                None,
+                None,
+            )
+            .await?;
             let system_event_cursor = self
                 .insert_system_event_in_transaction(&mut tx, &event)
                 .await?;
@@ -1548,6 +1644,7 @@ impl PostgresStore {
                 self.governance.reopen(finding);
                 self.read_model_mut().reopen(finding);
             }
+            self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
             self.refresh_read_model_and_release_board_snapshot_caches();
             self.system_event_source_cursor =
                 max_event_source_cursor(&self.system_event_source_cursor, system_event_cursor);
@@ -1572,8 +1669,18 @@ impl PostgresStore {
     }
 
     #[must_use]
+    pub const fn governance_source_watermark(&self) -> u64 {
+        self.governance_journal_high_watermark
+    }
+
+    #[must_use]
     pub fn read_model_arc(&self) -> Arc<FindingReadModel> {
         Arc::clone(&self.read_model)
+    }
+
+    #[cfg(test)]
+    pub const fn governance(&self) -> &FindingGovernance {
+        &self.governance
     }
 
     fn read_model_mut(&mut self) -> &mut FindingReadModel {
@@ -2789,6 +2896,7 @@ impl PostgresStore {
         self.create_provider_reports_table().await?;
         self.create_finding_risk_acceptances_table().await?;
         self.create_finding_suppressions_table().await?;
+        self.create_finding_governance_journal_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
@@ -2843,6 +2951,7 @@ impl PostgresStore {
                 "WHEN 'provider_reports' THEN {} ",
                 "WHEN 'finding_risk_acceptances' THEN {} ",
                 "WHEN 'finding_suppressions' THEN {} ",
+                "WHEN 'finding_governance_journal' THEN {} ",
                 "WHEN 'scan_commands' THEN {} ",
                 "WHEN 'integration_outbox' THEN {} ",
                 "WHEN 'system_events' THEN {} ",
@@ -2869,6 +2978,7 @@ impl PostgresStore {
             CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS,
             CHANGE_LANE_INTEGRATION_RUNTIME,
             CHANGE_LANE_READ_MODEL,
+            CHANGE_LANE_GOVERNANCE,
             CHANGE_LANE_GOVERNANCE,
             CHANGE_LANE_GOVERNANCE,
             CHANGE_LANE_COMMAND_STATUSES,
@@ -2917,6 +3027,7 @@ impl PostgresStore {
             self.names.provider_reports.as_ref(),
             self.names.finding_risk_acceptances.as_ref(),
             self.names.finding_suppressions.as_ref(),
+            self.names.finding_governance_journal.as_ref(),
             self.names.scan_commands.as_ref(),
             self.names.integration_outbox.as_ref(),
             self.names.system_events.as_ref(),
@@ -3294,6 +3405,34 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_finding_governance_journal_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "id BIGSERIAL PRIMARY KEY, ",
+                "component_key TEXT NOT NULL, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "vulnerability_id TEXT NOT NULL, ",
+                "package_name TEXT NOT NULL, ",
+                "package_version TEXT NOT NULL, ",
+                "package_purl TEXT NOT NULL DEFAULT '', ",
+                "decision_kind TEXT NOT NULL, ",
+                "reason TEXT NULL, ",
+                "until_unix_ms BIGINT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.finding_governance_journal
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres finding governance journal table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
     async fn create_scan_commands_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -3376,9 +3515,11 @@ impl PostgresStore {
         self.read_model = Arc::new(FindingReadModel::new());
         self.integration_runtime_config = None;
         self.provider_report_row_high_watermark = 0;
+        self.governance_journal_high_watermark = 0;
         Arc::make_mut(&mut self.commands).clear();
         Arc::make_mut(&mut self.order).clear();
         Arc::make_mut(&mut self.pending_integration_events).clear();
+        self.pending_integration_source_cursor = RowSourceCursor::default();
         self.system_event_index_snapshot_cache = Arc::new(SystemEventQueryIndex::new());
         self.system_event_source_cursor = EventSourceCursor::default();
         self.command_statuses_snapshot_cache = Arc::new(BTreeMap::new());
@@ -3399,6 +3540,7 @@ impl PostgresStore {
         self.load_provider_reports().await?;
         self.load_finding_risk_acceptances().await?;
         self.load_finding_suppressions().await?;
+        self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
@@ -3530,50 +3672,39 @@ impl PostgresStore {
     async fn refresh_read_model_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = self.ingestion.clone();
-        backend.governance = if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            FindingGovernance::default()
-        } else {
-            self.governance.clone()
-        };
+        backend.governance = self.governance.clone();
         backend.provider_report_row_high_watermark = self.provider_report_row_high_watermark;
-        backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            self.read_model.as_ref().clone_active_only()
-        } else {
-            self.read_model.as_ref().clone()
-        });
+        backend.governance_journal_high_watermark = self.governance_journal_high_watermark;
+        backend.read_model = Arc::clone(&self.read_model);
         if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
             backend
                 .load_provider_reports_after(self.provider_report_row_high_watermark)
                 .await?;
         }
         if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            backend.load_finding_risk_acceptances().await?;
-            backend.load_finding_suppressions().await?;
+            backend
+                .load_governance_journal_after(self.governance_journal_high_watermark, true)
+                .await?;
         }
         let read_model = backend.read_model_arc();
         self.ingestion = backend.ingestion;
         self.governance = backend.governance;
         self.provider_report_row_high_watermark = backend.provider_report_row_high_watermark;
+        self.governance_journal_high_watermark = backend.governance_journal_high_watermark;
         self.read_model = read_model;
         self.refresh_read_model_snapshot_cache();
         Ok(())
     }
 
     async fn refresh_command_statuses_from_remote(&mut self) -> Result<(), String> {
-        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.load_scan_commands().await?;
-        let command_statuses = backend.command_statuses_snapshot_arc();
-        self.commands = backend.commands;
-        self.order = backend.order;
-        self.command_statuses_snapshot_cache = command_statuses;
-        self.command_status_source_cursor = backend.command_status_source_cursor;
+        self.load_scan_commands_after(self.command_status_source_cursor.clone())
+            .await?;
         Ok(())
     }
 
     async fn refresh_pending_integration_events_from_remote(&mut self) -> Result<(), String> {
-        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.load_pending_integration_events().await?;
-        self.pending_integration_events = backend.pending_integration_events;
+        self.load_pending_integration_events_after(self.pending_integration_source_cursor.clone())
+            .await?;
         Ok(())
     }
 
@@ -3585,10 +3716,14 @@ impl PostgresStore {
     }
 
     async fn refresh_system_events_from_remote(&mut self) -> Result<(), String> {
-        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.load_system_events().await?;
-        self.system_event_index_snapshot_cache = backend.system_event_index_snapshot_arc();
-        self.system_event_source_cursor = backend.system_event_source_cursor;
+        let (system_event_index, system_event_source_cursor) = self
+            .load_system_event_index_snapshot(
+                Arc::clone(&self.system_event_index_snapshot_cache),
+                self.system_event_source_cursor.clone(),
+            )
+            .await?;
+        self.system_event_index_snapshot_cache = system_event_index;
+        self.system_event_source_cursor = system_event_source_cursor;
         Ok(())
     }
 
@@ -4167,6 +4302,215 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn load_governance_journal_after(
+        &mut self,
+        after_id: u64,
+        apply_to_governance: bool,
+    ) -> Result<(), String> {
+        let rows = sqlx::query_as::<_, GovernanceJournalRow>(&format!(
+            concat!(
+                "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
+                "FROM {} WHERE id > $1 ORDER BY id"
+            ),
+            self.names.finding_governance_journal
+        ))
+        .bind(
+            i64::try_from(after_id)
+                .map_err(|_| "postgres governance journal cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres governance journal load failed: {error}"))?;
+
+        for row in rows {
+            self.apply_governance_journal_row(row, apply_to_governance)?;
+        }
+        Ok(())
+    }
+
+    async fn load_governance_source_watermark(&self) -> Result<u64, String> {
+        let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX(id) FROM {}",
+            self.names.finding_governance_journal
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres governance journal watermark read failed: {error}"))?
+        .unwrap_or_default();
+        u64::try_from(max_id)
+            .map_err(|_| "postgres governance journal watermark out of range".to_owned())
+    }
+
+    async fn load_system_event_index_snapshot(
+        &self,
+        base_system_event_index: Arc<SystemEventQueryIndex>,
+        base_system_event_source_cursor: EventSourceCursor,
+    ) -> Result<(Arc<SystemEventQueryIndex>, EventSourceCursor), String> {
+        let rows = sqlx::query_as::<_, SystemEventDeltaRow>(&format!(
+            concat!(
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, created_at_micros ",
+                "FROM (",
+                "SELECT event_id, occurred_at_unix_ms, category, kind, collection_key, component_key, ",
+                "command_id, integration_event_id, finding_count, retryable, detail, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {}",
+                ") delta ",
+                "WHERE created_at_micros > $1 OR (created_at_micros = $1 AND event_id > $2) ",
+                "ORDER BY created_at_micros DESC, event_id DESC"
+            ),
+            self.names.system_events
+        ))
+        .bind(
+            i64::try_from(base_system_event_source_cursor.unix_micros)
+                .map_err(|_| "postgres system event cursor out of range".to_owned())?,
+        )
+        .bind(
+            base_system_event_source_cursor
+                .tie_breaker
+                .as_deref()
+                .unwrap_or(""),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres system event delta load failed: {error}"))?;
+
+        if rows.is_empty() {
+            return Ok((base_system_event_index, base_system_event_source_cursor));
+        }
+
+        let mut cursor = base_system_event_source_cursor;
+        let mut delta_events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (
+                event_id,
+                occurred_at_unix_ms,
+                category,
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+                created_at_micros,
+            ) = row;
+            cursor = max_event_source_cursor(
+                &cursor,
+                event_source_cursor(
+                    u64::try_from(created_at_micros)
+                        .map_err(|_| "postgres system event created_at out of range".to_owned())?,
+                    event_id.clone().into_boxed_str(),
+                ),
+            );
+            delta_events.push(parse_system_event_row((
+                event_id,
+                occurred_at_unix_ms,
+                category,
+                kind,
+                collection_key,
+                component_key,
+                command_id,
+                integration_event_id,
+                finding_count,
+                retryable,
+                detail,
+            ))?);
+        }
+
+        let delta_index = SystemEventQueryIndex::from_newest_first(delta_events.iter());
+        Ok((
+            Arc::new(SystemEventQueryIndex::merged(
+                base_system_event_index.as_ref(),
+                &delta_index,
+            )),
+            cursor,
+        ))
+    }
+
+    fn apply_governance_journal_row(
+        &mut self,
+        row: GovernanceJournalRow,
+        apply_to_governance: bool,
+    ) -> Result<(), String> {
+        let (
+            id,
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            vulnerability_id,
+            package_name,
+            package_version,
+            package_purl,
+            decision_kind,
+            reason,
+            until_unix_ms,
+        ) = row;
+        let finding = FindingRef::new(
+            component_key,
+            ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+            vulnerability_id,
+            venom_domain::PackageCoordinate {
+                name: package_name.into_boxed_str(),
+                version: package_version.into_boxed_str(),
+                purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+            },
+        );
+
+        match decision_kind.as_str() {
+            "risk-accepted" => {
+                let acceptance = match until_unix_ms {
+                    Some(until_unix_ms) => RiskAcceptance::new(reason.ok_or_else(|| {
+                        "postgres governance journal risk acceptance missing reason".to_owned()
+                    })?)
+                    .until_unix_ms(
+                        u64::try_from(until_unix_ms).map_err(|_| {
+                            "postgres governance journal acceptance until out of range"
+                                .to_owned()
+                        })?,
+                    ),
+                    None => RiskAcceptance::new(reason.ok_or_else(|| {
+                        "postgres governance journal risk acceptance missing reason".to_owned()
+                    })?),
+                };
+                if apply_to_governance {
+                    self.governance
+                        .replay_risk_acceptance(finding.clone(), acceptance.clone());
+                }
+                self.read_model_mut().replay_risk_acceptance(finding, acceptance);
+            }
+            "suppressed" => {
+                let suppression = Suppression::new(reason.ok_or_else(|| {
+                    "postgres governance journal suppression missing reason".to_owned()
+                })?);
+                if apply_to_governance {
+                    self.governance
+                        .replay_suppression(finding.clone(), suppression.clone());
+                }
+                self.read_model_mut().replay_suppression(finding, suppression);
+            }
+            "reopened" => {
+                if apply_to_governance {
+                    self.governance.replay_reopen(&finding);
+                }
+                self.read_model_mut().replay_reopen(&finding);
+            }
+            _ => {
+                return Err(format!(
+                    "postgres governance journal contains unsupported decision kind: {decision_kind}"
+                ));
+            }
+        }
+
+        self.governance_journal_high_watermark = self.governance_journal_high_watermark.max(
+            u64::try_from(id)
+                .map_err(|_| "postgres governance journal id out of range".to_owned())?,
+        );
+        Ok(())
+    }
+
     async fn load_provider_runtime_configs(&mut self) -> Result<(), String> {
         let configs = sqlx::query_as::<_, (String, String)>(&format!(
             "SELECT component_key, provider_key FROM {} ORDER BY component_key",
@@ -4257,19 +4601,166 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_pending_integration_events(&mut self) -> Result<(), String> {
-        let events = sqlx::query_as::<_, (Json<PendingIntegrationEvent>,)>(&format!(
+    async fn load_scan_commands_after(&mut self, base_cursor: RowSourceCursor) -> Result<(), String> {
+        let commands = sqlx::query_as::<_, (String, String, String, String, String, String, i64)>(&format!(
             concat!(
-                "SELECT payload FROM {} ",
-                "WHERE publication_status = 'pending' ORDER BY order_id"
+                "SELECT command_id, component_key, artifact_kind, artifact_identity, freshness, status, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
+                "OR ((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint = $1 AND command_id > $2) ",
+                "ORDER BY (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint ASC, command_id ASC"
+            ),
+            self.names.scan_commands
+        ))
+        .bind(
+            i64::try_from(base_cursor.unix_micros)
+                .map_err(|_| "postgres scan command cursor out of range".to_owned())?,
+        )
+        .bind(base_cursor.tie_breaker.as_deref().unwrap_or(""))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres scan command delta load failed: {error}"))?;
+
+        if commands.is_empty() {
+            self.command_status_source_cursor = base_cursor;
+            return Ok(());
+        }
+
+        let mut cursor = base_cursor;
+        let mut order = Arc::unwrap_or_clone(Arc::clone(&self.order));
+        let mut command_statuses = Arc::unwrap_or_clone(Arc::clone(&self.command_statuses_snapshot_cache));
+        let mut records = Arc::unwrap_or_clone(Arc::clone(&self.commands));
+        for (
+            command_id,
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            freshness,
+            status,
+            updated_at_micros,
+        ) in commands {
+            let command_id = command_id.into_boxed_str();
+            let status = parse_scan_command_status(&status)?;
+            let request = ScanRequest::new(
+                component_key,
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+                parse_freshness(&freshness)?,
+            );
+            if !records.contains_key(command_id.as_ref()) {
+                order.push(command_id.clone());
+            }
+            command_statuses.insert(command_id.clone(), status);
+            records.insert(command_id.clone(), ScanCommandRecord { request, status });
+            cursor = max_row_source_cursor(
+                &cursor,
+                row_source_cursor(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
+                    command_id,
+                ),
+            );
+        }
+
+        self.order = Arc::new(order);
+        self.command_statuses_snapshot_cache = Arc::new(command_statuses);
+        self.commands = Arc::new(records);
+        self.command_status_source_cursor = cursor;
+        Ok(())
+    }
+
+    async fn load_pending_integration_events(&mut self) -> Result<(), String> {
+        let events = sqlx::query_as::<_, (Json<PendingIntegrationEvent>, i64, i64)>(&format!(
+            concat!(
+                "SELECT payload, order_id, ",
+                "GREATEST(COALESCE(published_at_micros, 0), COALESCE(last_attempted_at_micros, 0), (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint) AS updated_at_micros ",
+                "FROM {} WHERE publication_status = 'pending' ORDER BY order_id"
             ),
             self.names.integration_outbox
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres integration outbox load failed: {error}"))?;
-        self.pending_integration_events =
-            Arc::new(events.into_iter().map(|(payload,)| payload.0).collect());
+        let mut cursor = RowSourceCursor::default();
+        let pending = events
+            .into_iter()
+            .map(|(payload, order_id, updated_at_micros)| {
+                cursor = max_row_source_cursor(
+                    &cursor,
+                    row_source_cursor(
+                        u64::try_from(updated_at_micros).map_err(|_| {
+                            "postgres integration outbox updated_at out of range".to_owned()
+                        })?,
+                        payload.0.event_id.clone(),
+                    ),
+                );
+                let _ = order_id;
+                Ok(payload.0)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.pending_integration_events = Arc::new(pending);
+        self.pending_integration_source_cursor = cursor;
+        Ok(())
+    }
+
+    async fn load_pending_integration_events_after(
+        &mut self,
+        base_cursor: RowSourceCursor,
+    ) -> Result<(), String> {
+        let rows = sqlx::query_as::<_, (String, Json<PendingIntegrationEvent>, String, i64)>(&format!(
+            concat!(
+                "SELECT event_id, payload, publication_status, updated_at_micros FROM (",
+                "SELECT event_id, payload, publication_status, ",
+                "GREATEST(COALESCE(published_at_micros, 0), COALESCE(last_attempted_at_micros, 0), ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint) AS updated_at_micros ",
+                "FROM {}",
+                ") delta WHERE updated_at_micros > $1 OR (updated_at_micros = $1 AND event_id > $2) ",
+                "ORDER BY updated_at_micros ASC, event_id ASC"
+            ),
+            self.names.integration_outbox
+        ))
+        .bind(
+            i64::try_from(base_cursor.unix_micros)
+                .map_err(|_| "postgres integration outbox cursor out of range".to_owned())?,
+        )
+        .bind(base_cursor.tie_breaker.as_deref().unwrap_or(""))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres integration outbox delta load failed: {error}"))?;
+
+        if rows.is_empty() {
+            self.pending_integration_source_cursor = base_cursor;
+            return Ok(());
+        }
+
+        let mut cursor = base_cursor;
+        let mut pending = Arc::unwrap_or_clone(Arc::clone(&self.pending_integration_events));
+        for (event_id, payload, publication_status, updated_at_micros) in rows {
+            cursor = max_row_source_cursor(
+                &cursor,
+                row_source_cursor(
+                    u64::try_from(updated_at_micros).map_err(|_| {
+                        "postgres integration outbox updated_at out of range".to_owned()
+                    })?,
+                    event_id.clone().into_boxed_str(),
+                ),
+            );
+            match publication_status.as_str() {
+                "pending" => {
+                    if let Some(existing) = pending
+                        .iter_mut()
+                        .find(|event| event.event_id.as_ref() == event_id.as_str())
+                    {
+                        *existing = payload.0;
+                    } else {
+                        pending.push(payload.0);
+                    }
+                }
+                _ => pending.retain(|event| event.event_id.as_ref() != event_id.as_str()),
+            }
+        }
+
+        self.pending_integration_events = Arc::new(pending);
+        self.pending_integration_source_cursor = cursor;
         Ok(())
     }
 
@@ -4669,6 +5160,82 @@ impl PostgresStore {
         })?;
         Ok(())
     }
+
+    async fn append_governance_journal_entry_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        finding: &FindingRef,
+        decision_kind: &str,
+        reason: Option<&str>,
+        until_unix_ms: Option<u64>,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, decision_kind, reason, until_unix_ms) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+            ),
+            self.names.finding_governance_journal
+        ))
+        .bind(finding.component_key.as_ref())
+        .bind(artifact_kind_name(finding.artifact.kind))
+        .bind(finding.artifact.identity.as_ref())
+        .bind(finding.vulnerability_id.as_ref())
+        .bind(finding.package.name.as_ref())
+        .bind(finding.package.version.as_ref())
+        .bind(finding.package.purl.as_deref().unwrap_or(""))
+        .bind(decision_kind)
+        .bind(reason)
+        .bind(
+            until_unix_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| "governance journal until overflow".to_owned())?,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("postgres governance journal insert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn append_governance_journal_entries_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        findings: &[FindingRef],
+        decision_kind: &str,
+        reason: Option<&str>,
+        until_unix_ms: Option<u64>,
+    ) -> Result<(), String> {
+        if findings.is_empty() {
+            return Ok(());
+        }
+
+        let until_unix_ms = until_unix_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| "governance journal until overflow".to_owned())?;
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {} \
+            (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, decision_kind, reason, until_unix_ms) ",
+            self.names.finding_governance_journal
+        ));
+        query.push_values(findings, |mut row, finding| {
+            row.push_bind(finding.component_key.as_ref())
+                .push_bind(artifact_kind_name(finding.artifact.kind))
+                .push_bind(finding.artifact.identity.as_ref())
+                .push_bind(finding.vulnerability_id.as_ref())
+                .push_bind(finding.package.name.as_ref())
+                .push_bind(finding.package.version.as_ref())
+                .push_bind(finding.package.purl.as_deref().unwrap_or(""))
+                .push_bind(decision_kind)
+                .push_bind(reason)
+                .push_bind(until_unix_ms);
+        });
+        query.build().execute(&mut **tx).await.map_err(|error| {
+            format!("postgres governance journal batch insert failed: {error}")
+        })?;
+        Ok(())
+    }
 }
 
 impl PostgresRemoteChangeProbe {
@@ -4719,6 +5286,7 @@ impl PostgresReadSnapshotLoader {
                 inventory: base.inventory,
                 read_model: base.read_model,
                 read_model_source_watermark: base.read_model_source_watermark,
+                governance_source_watermark: base.governance_source_watermark,
                 system_event_index: base.system_event_index,
                 system_event_source_cursor: base.system_event_source_cursor,
                 command_statuses: base.command_statuses,
@@ -4765,18 +5333,26 @@ impl PostgresReadSnapshotLoader {
                 Arc::clone(&inventory),
                 base.read_model,
                 base.read_model_source_watermark,
+                base.governance_source_watermark,
                 lane_mask,
             )
             .await?
         } else {
             base.read_model
         };
-        let read_model_source_watermark =
+        let (read_model_source_watermark, governance_source_watermark) =
             if lane_mask & (CHANGE_LANE_READ_MODEL | CHANGE_LANE_GOVERNANCE) != 0 {
-                self.load_read_model_source_watermark(base.read_model_source_watermark, lane_mask)
-                    .await?
+                self.load_read_model_source_watermarks(
+                    base.read_model_source_watermark,
+                    base.governance_source_watermark,
+                    lane_mask,
+                )
+                .await?
             } else {
-                base.read_model_source_watermark
+                (
+                    base.read_model_source_watermark,
+                    base.governance_source_watermark,
+                )
             };
         let (system_event_index, system_event_source_cursor) =
             if lane_mask & CHANGE_LANE_SYSTEM_EVENTS != 0 {
@@ -4803,6 +5379,7 @@ impl PostgresReadSnapshotLoader {
             inventory,
             read_model,
             read_model_source_watermark,
+            governance_source_watermark,
             system_event_index,
             system_event_source_cursor,
             command_statuses,
@@ -4822,6 +5399,19 @@ impl PostgresReadSnapshotLoader {
         .and_then(|value| {
             u64::try_from(value).map_err(|_| "postgres change watermark out of range".to_owned())
         })
+    }
+
+    async fn load_governance_source_watermark(&self) -> Result<u64, String> {
+        let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX(id) FROM {}",
+            self.names.finding_governance_journal
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres governance journal watermark read failed: {error}"))?
+        .unwrap_or_default();
+        u64::try_from(max_id)
+            .map_err(|_| "postgres governance journal watermark out of range".to_owned())
     }
 
     async fn load_inventory_core_snapshot(
@@ -4941,53 +5531,54 @@ impl PostgresReadSnapshotLoader {
         inventory: Arc<ComponentInventory>,
         base_read_model: Arc<FindingReadModel>,
         base_read_model_source_watermark: u64,
+        base_governance_source_watermark: u64,
         lane_mask: i32,
     ) -> Result<Arc<FindingReadModel>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
-        backend.governance = if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            FindingGovernance::default()
-        } else {
-            backend.governance
-        };
         backend.provider_report_row_high_watermark = base_read_model_source_watermark;
-        backend.read_model = Arc::new(if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            base_read_model.as_ref().clone_active_only()
-        } else {
-            base_read_model.as_ref().clone()
-        });
+        backend.governance_journal_high_watermark = base_governance_source_watermark;
+        backend.read_model = base_read_model;
         if lane_mask & CHANGE_LANE_READ_MODEL != 0 {
             backend
                 .load_provider_reports_after(base_read_model_source_watermark)
                 .await?;
         }
         if lane_mask & CHANGE_LANE_GOVERNANCE != 0 {
-            backend.load_finding_risk_acceptances().await?;
-            backend.load_finding_suppressions().await?;
+            backend
+                .load_governance_journal_after(base_governance_source_watermark, false)
+                .await?;
         }
         backend.refresh_read_model_snapshot_cache();
         Ok(backend.read_model_snapshot_arc())
     }
 
-    async fn load_read_model_source_watermark(
+    async fn load_read_model_source_watermarks(
         &self,
         base_read_model_source_watermark: u64,
+        base_governance_source_watermark: u64,
         lane_mask: i32,
-    ) -> Result<u64, String> {
-        if lane_mask & CHANGE_LANE_READ_MODEL == 0 {
-            return Ok(base_read_model_source_watermark);
-        }
-
-        let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            "SELECT MAX(id) FROM {}",
-            self.names.provider_reports
-        ))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| format!("postgres provider report watermark read failed: {error}"))?
-        .unwrap_or_default();
-        u64::try_from(max_id)
-            .map_err(|_| "postgres provider report watermark out of range".to_owned())
+    ) -> Result<(u64, u64), String> {
+        let read_model_source_watermark = if lane_mask & CHANGE_LANE_READ_MODEL == 0 {
+            base_read_model_source_watermark
+        } else {
+            let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
+                "SELECT MAX(id) FROM {}",
+                self.names.provider_reports
+            ))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("postgres provider report watermark read failed: {error}"))?
+            .unwrap_or_default();
+            u64::try_from(max_id)
+                .map_err(|_| "postgres provider report watermark out of range".to_owned())?
+        };
+        let governance_source_watermark = if lane_mask & CHANGE_LANE_GOVERNANCE == 0 {
+            base_governance_source_watermark
+        } else {
+            self.load_governance_source_watermark().await?
+        };
+        Ok((read_model_source_watermark, governance_source_watermark))
     }
 
     async fn load_system_event_index_snapshot(
@@ -5173,6 +5764,7 @@ struct TableNames {
     provider_reports: Box<str>,
     finding_risk_acceptances: Box<str>,
     finding_suppressions: Box<str>,
+    finding_governance_journal: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
     system_events: Box<str>,
@@ -5203,6 +5795,8 @@ impl TableNames {
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
             finding_suppressions: format!("{schema}.finding_suppressions").into_boxed_str(),
+            finding_governance_journal: format!("{schema}.finding_governance_journal")
+                .into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
             system_events: format!("{schema}.system_events").into_boxed_str(),
@@ -5778,6 +6372,7 @@ mod tests {
         let base_inventory = backend.inventory_snapshot_arc();
         let base_read_model = backend.read_model_snapshot_arc();
         let base_read_model_source_watermark = backend.read_model_source_watermark();
+        let base_governance_source_watermark = backend.governance_source_watermark();
         let base_system_event_index = backend.system_event_index_snapshot_arc();
         let base_system_event_source_cursor = backend.system_event_source_cursor();
         let base_command_statuses = backend.command_statuses_snapshot_arc();
@@ -5786,6 +6381,7 @@ mod tests {
             base_inventory,
             Arc::clone(&base_read_model),
             base_read_model_source_watermark,
+            base_governance_source_watermark,
             base_system_event_index,
             base_system_event_source_cursor,
             base_command_statuses,
@@ -5831,6 +6427,232 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_reopened_findings_are_replayed_from_governance_journal() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("governance_journal_reopen");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+        let finding = venom_domain::FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+        let _ = backend
+            .accept_risk(finding.clone(), RiskAcceptance::new("approved for now"))
+            .await
+            .expect("risk acceptance should persist");
+        let _ = backend
+            .reopen_finding(finding.clone())
+            .await
+            .expect("reopen should persist");
+
+        let reopened = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+        assert!(reopened.governance().decision(&finding).is_none());
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_read_snapshot_advances_governance_journal_cursor_for_reopened_findings()
+    {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_governance_cursor");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+        let finding = venom_domain::FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+        let _ = backend
+            .accept_risk(finding.clone(), RiskAcceptance::new("approved for now"))
+            .await
+            .expect("risk acceptance should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after acceptance");
+        let snapshot_base = PostgresReadSnapshotBase::new(
+            backend.inventory_snapshot_arc(),
+            backend.read_model_snapshot_arc(),
+            backend.read_model_source_watermark(),
+            backend.governance_source_watermark(),
+            backend.system_event_index_snapshot_arc(),
+            backend.system_event_source_cursor(),
+            backend.command_statuses_snapshot_arc(),
+            backend.command_status_source_cursor(),
+        );
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let _ = writer
+            .reopen_finding(finding)
+            .await
+            .expect("reopen should persist");
+
+        let refreshed_snapshot = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load");
+        assert!(
+            refreshed_snapshot.governance_source_watermark
+                > backend.governance_source_watermark(),
+            "detached read should advance the governance cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_live_refresh_reloads_pending_commands_incrementally() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("live_pending_commands_delta");
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should open");
+        let mut follower = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("follower backend should open");
+        let _ = writer
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = writer
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let command_id = writer
+            .request_scan(
+                "component:payments-api",
+                artifact(),
+                EvidenceFreshness::Deterministic,
+            )
+            .await
+            .expect("scan request should persist");
+
+        assert!(follower
+            .refresh_from_remote_if_stale()
+            .await
+            .expect("follower refresh should succeed"));
+        assert_eq!(
+            follower.command_status(command_id.as_ref()),
+            Some(ScanCommandStatus::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_live_refresh_reloads_system_events_incrementally() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("live_system_events_delta");
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should open");
+        let mut follower = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("follower backend should open");
+        let _ = writer
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = writer
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let _ = writer
+            .request_scan(
+                "component:payments-api",
+                artifact(),
+                EvidenceFreshness::Deterministic,
+            )
+            .await
+            .expect("scan request should persist");
+
+        assert!(follower
+            .refresh_from_remote_if_stale()
+            .await
+            .expect("follower refresh should succeed"));
+        let kinds = follower
+            .system_events_snapshot()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&SystemEventKind::ScanCommandEnqueued));
     }
 
     fn artifact() -> ArtifactRef {
