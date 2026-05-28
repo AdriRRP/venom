@@ -375,8 +375,8 @@ impl SystemEventQueryIndex {
             || {
                 self.retained_events
                     .iter()
-                    .cloned()
                     .take(limit)
+                    .cloned()
                     .collect::<Vec<_>>()
             },
             |category| {
