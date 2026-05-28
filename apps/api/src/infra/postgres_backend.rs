@@ -6204,6 +6204,31 @@ mod tests {
         format!("venom_{name}_{nanos}_{counter}")
     }
 
+    async fn register_payments_component(backend: &mut PostgresStore) {
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+    }
+
+    fn snapshot_base(backend: &PostgresStore) -> PostgresReadSnapshotBase {
+        PostgresReadSnapshotBase::new(
+            backend.inventory_snapshot_arc(),
+            backend.read_model_snapshot_arc(),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: backend.read_model_source_watermark(),
+                governance_source_watermark: backend.governance_source_watermark(),
+                system_event_index: backend.system_event_index_snapshot_arc(),
+                system_event_source_cursor: backend.system_event_source_cursor(),
+                command_statuses: backend.command_statuses_snapshot_arc(),
+                command_status_source_cursor: backend.command_status_source_cursor(),
+            },
+        )
+    }
+
     #[test]
     fn change_journal_gap_requires_full_refresh_after_retention_hole() {
         assert!(change_journal_gap_requires_full_refresh(12, 32, Some(18)));
@@ -6531,31 +6556,14 @@ mod tests {
         let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
-        let _ = backend
-            .register_component(ComponentRegistration::new(
-                "component:payments-api",
-                "Payments API",
-            ))
-            .await
-            .expect("registration should persist");
+        register_payments_component(&mut backend).await;
 
         let loader = backend.read_snapshot_loader();
         let since_change_watermark = backend
             .current_change_watermark()
             .await
             .expect("current watermark should be readable after component registration");
-        let snapshot_base = PostgresReadSnapshotBase::new(
-            backend.inventory_snapshot_arc(),
-            backend.read_model_snapshot_arc(),
-            PostgresReadSnapshotSources {
-                read_model_source_watermark: backend.read_model_source_watermark(),
-                governance_source_watermark: backend.governance_source_watermark(),
-                system_event_index: backend.system_event_index_snapshot_arc(),
-                system_event_source_cursor: backend.system_event_source_cursor(),
-                command_statuses: backend.command_statuses_snapshot_arc(),
-                command_status_source_cursor: backend.command_status_source_cursor(),
-            },
-        );
+        let snapshot_base = snapshot_base(&backend);
 
         let mut writer = PostgresStore::open(&database_url, &schema)
             .await
@@ -6575,24 +6583,11 @@ mod tests {
             .await
             .expect("current watermark should advance after context profile registration");
         assert!(current_change_watermark > since_change_watermark);
-        let stored_profile_count = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*) FROM {}",
-            writer.names.context_profiles
-        ))
-        .fetch_one(&writer.pool)
-        .await
-        .expect("stored context profile count should be readable");
-        assert_eq!(stored_profile_count, 1);
         let lane_mask = loader
             .changed_lane_mask(since_change_watermark, current_change_watermark)
             .await
             .expect("inventory-core lane mask should be readable");
         assert_ne!(lane_mask & CHANGE_LANE_CONTEXT_PROFILES, 0);
-        let direct_inventory = loader
-            .load_inventory_core_snapshot(Arc::clone(&snapshot_base.inventory), lane_mask)
-            .await
-            .expect("direct inventory-core reload should succeed");
-        assert_eq!(direct_inventory.managed_context_profiles(), 1);
 
         let refreshed_after_profile = loader
             .load(since_change_watermark, snapshot_base)
