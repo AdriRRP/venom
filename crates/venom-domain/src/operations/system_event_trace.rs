@@ -244,7 +244,7 @@ impl SystemEventQueryIndex {
         }
         push_recent_window_event(
             &mut self.recent_windows.recent_events,
-            &event,
+            event,
             &mut self.retained_event_refs,
         );
         let category_window = match event.category() {
@@ -253,7 +253,7 @@ impl SystemEventQueryIndex {
             SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
             SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
         };
-        push_recent_window_event(category_window, &event, &mut self.retained_event_refs);
+        push_recent_window_event(category_window, event, &mut self.retained_event_refs);
     }
 
     #[must_use]
