@@ -72,7 +72,8 @@ enum ApiServiceSet {
 
 struct PartitionedServiceSlots {
     state: ServiceSlot,
-    volatile: ServiceSlot,
+    runtime: ServiceSlot,
+    publication: ServiceSlot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,9 +243,15 @@ impl ApiState {
         let runtime_path = runtime_path.into();
         let state_service = ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
-        let volatile_service = ApiApplication::fork_local_from(&state_service)
+        let runtime_service = ApiApplication::fork_local_from(&state_service)
             .ok_or_else(|| "local api service fork unavailable".to_owned())?;
-        Ok(Self::new_partitioned(state_service, volatile_service))
+        let publication_service = ApiApplication::fork_local_from(&state_service)
+            .ok_or_else(|| "local api service fork unavailable".to_owned())?;
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            publication_service,
+        ))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -257,14 +264,25 @@ impl ApiState {
             crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
         let state_backend =
             crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
-        let volatile_backend =
+        let runtime_backend =
+            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
+        let publication_backend =
             crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
         let state_service = ApiApplication::from_postgres_store(state_backend);
-        let volatile_service = ApiApplication::from_postgres_store(volatile_backend);
-        Ok(Self::new_partitioned(state_service, volatile_service))
+        let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
+        let publication_service = ApiApplication::from_postgres_store(publication_backend);
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            publication_service,
+        ))
     }
 
-    fn new_partitioned(state_service: ApiApplication, volatile_service: ApiApplication) -> Self {
+    fn new_partitioned(
+        state_service: ApiApplication,
+        runtime_service: ApiApplication,
+        publication_service: ApiApplication,
+    ) -> Self {
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
             .unwrap_or(0);
@@ -280,8 +298,13 @@ impl ApiState {
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
                     },
-                    volatile: ServiceSlot {
-                        service: Mutex::new(Some(volatile_service)),
+                    runtime: ServiceSlot {
+                        service: Mutex::new(Some(runtime_service)),
+                        ready: Notify::new(),
+                        observed_local_change_epoch: AtomicU64::new(0),
+                    },
+                    publication: ServiceSlot {
+                        service: Mutex::new(Some(publication_service)),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
                     },
@@ -374,6 +397,8 @@ impl ApiState {
                     loaded.inventory,
                     loaded.read_model,
                     ApiReadSnapshotSources {
+                        inventory_definition_source_watermarks: loaded
+                            .inventory_definition_source_watermarks,
                         read_model_source_watermark: loaded.read_model_source_watermark,
                         governance_source_watermark: loaded.governance_source_watermark,
                         system_event_index: loaded.system_event_index,
@@ -460,6 +485,8 @@ impl ApiState {
                             loaded.inventory,
                             loaded.read_model,
                             ApiReadSnapshotSources {
+                                inventory_definition_source_watermarks: loaded
+                                    .inventory_definition_source_watermarks,
                                 read_model_source_watermark: loaded.read_model_source_watermark,
                                 governance_source_watermark: loaded.governance_source_watermark,
                                 system_event_index: loaded.system_event_index,
@@ -559,7 +586,8 @@ impl ApiState {
         match &self.inner.services {
             ApiServiceSet::Partitioned(slots) => match lane {
                 ApiMutationLane::State => &slots.state,
-                ApiMutationLane::Runtime | ApiMutationLane::Publication => &slots.volatile,
+                ApiMutationLane::Runtime => &slots.runtime,
+                ApiMutationLane::Publication => &slots.publication,
             },
         }
     }
@@ -1944,6 +1972,29 @@ mod tests {
             .await;
         state
             .restore_service(ApiMutationLane::Runtime, volatile_service)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn runtime_and_publication_lanes_do_not_share_one_service_slot() {
+        let state = ApiState::open(
+            temp_path("runtime-publication-slot", "state"),
+            temp_path("runtime-publication-slot", "runtime"),
+        )
+        .expect("api state should open");
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let publication_service = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.take_service(ApiMutationLane::Publication),
+        )
+        .await
+        .expect("publication lane should not wait for the runtime slot");
+
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
     }
 

@@ -164,7 +164,6 @@ pub struct SystemEventQueryIndex {
     governance_total: usize,
     publication_total: usize,
     retained_event_ids: HashSet<Box<str>>,
-    retained_events: Vec<Arc<SystemEvent>>,
     recent_windows: SystemEventRecentWindows,
 }
 
@@ -202,7 +201,6 @@ impl SystemEventQueryIndex {
             governance_total: 0,
             publication_total: 0,
             retained_event_ids: HashSet::new(),
-            retained_events: Vec::new(),
             recent_windows: SystemEventRecentWindows::default(),
         }
     }
@@ -239,15 +237,22 @@ impl SystemEventQueryIndex {
                 self.publication_total += 1;
             }
         }
-        self.retained_events.insert(0, event);
-        self.trim_retained_events();
+        push_recent_window_event(&mut self.recent_windows.recent_events, Arc::clone(&event));
+        let category_window = match event.category() {
+            SystemEventCategory::Scheduler => &mut self.recent_windows.recent_scheduler_events,
+            SystemEventCategory::Command => &mut self.recent_windows.recent_command_events,
+            SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
+            SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
+        };
+        push_recent_window_event(category_window, event);
+        self.refresh_retained_event_ids();
     }
 
     #[must_use]
     pub fn merged(left: &Self, right: &Self) -> Self {
-        Self::from_retained_events(
+        Self::from_recent_windows(
             merge_window_totals(&left.window_totals(), &right.window_totals()),
-            merge_recent_arc_events(&left.retained_events, &right.retained_events),
+            merge_recent_windows(&left.recent_windows, &right.recent_windows),
         )
     }
 
@@ -320,8 +325,15 @@ impl SystemEventQueryIndex {
         totals: SystemEventWindowTotals,
         windows: SystemEventRecentWindows,
     ) -> Self {
-        let retained_events = merge_recent_windows_into_retained(windows);
-        Self::from_retained_events(totals, retained_events)
+        let mut index = Self::new();
+        index.total = totals.total;
+        index.scheduler_total = totals.scheduler_total;
+        index.command_total = totals.command_total;
+        index.governance_total = totals.governance_total;
+        index.publication_total = totals.publication_total;
+        index.recent_windows = windows;
+        index.refresh_retained_event_ids();
+        index
     }
 
     #[must_use]
@@ -366,65 +378,24 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn from_retained_events(
-        totals: SystemEventWindowTotals,
-        retained_events: Vec<Arc<SystemEvent>>,
-    ) -> Self {
-        let mut index = Self::new();
-        index.total = totals.total;
-        index.scheduler_total = totals.scheduler_total;
-        index.command_total = totals.command_total;
-        index.governance_total = totals.governance_total;
-        index.publication_total = totals.publication_total;
-        index.retained_events = retained_events;
-        index.trim_retained_events();
-        index
-    }
-
-    fn trim_retained_events(&mut self) {
-        let mut global = 0usize;
-        let mut scheduler = 0usize;
-        let mut command = 0usize;
-        let mut governance = 0usize;
-        let mut publication = 0usize;
-        let mut retained = Vec::new();
-        let mut recent_windows = SystemEventRecentWindows::default();
-        for event in &self.retained_events {
-            let category_count = match event.category() {
-                SystemEventCategory::Scheduler => &mut scheduler,
-                SystemEventCategory::Command => &mut command,
-                SystemEventCategory::Governance => &mut governance,
-                SystemEventCategory::Publication => &mut publication,
-            };
-            let keep =
-                global < MAX_SYSTEM_EVENTS_LIMIT || *category_count < MAX_SYSTEM_EVENTS_LIMIT;
-            if keep {
-                retained.push(Arc::clone(event));
-                global += 1;
-                *category_count += 1;
-                if recent_windows.recent_events.len() < MAX_SYSTEM_EVENTS_LIMIT {
-                    recent_windows.recent_events.push(Arc::clone(event));
-                }
-                let category_window = match event.category() {
-                    SystemEventCategory::Scheduler => &mut recent_windows.recent_scheduler_events,
-                    SystemEventCategory::Command => &mut recent_windows.recent_command_events,
-                    SystemEventCategory::Governance => &mut recent_windows.recent_governance_events,
-                    SystemEventCategory::Publication => {
-                        &mut recent_windows.recent_publication_events
-                    }
-                };
-                if category_window.len() < MAX_SYSTEM_EVENTS_LIMIT {
-                    category_window.push(Arc::clone(event));
-                }
-            }
-        }
-        self.retained_events = retained;
+    fn refresh_retained_event_ids(&mut self) {
         self.retained_event_ids = self
-            .retained_events
+            .recent_windows
+            .recent_events
             .iter()
+            .chain(self.recent_windows.recent_scheduler_events.iter())
+            .chain(self.recent_windows.recent_command_events.iter())
+            .chain(self.recent_windows.recent_governance_events.iter())
+            .chain(self.recent_windows.recent_publication_events.iter())
             .map(|event| event.event_id.clone())
             .collect();
-        self.recent_windows = recent_windows;
+    }
+}
+
+fn push_recent_window_event(window: &mut Vec<Arc<SystemEvent>>, event: Arc<SystemEvent>) {
+    window.insert(0, event);
+    if window.len() > MAX_SYSTEM_EVENTS_LIMIT {
+        window.truncate(MAX_SYSTEM_EVENTS_LIMIT);
     }
 }
 
@@ -496,15 +467,29 @@ fn merge_recent_arc_events(
     merged
 }
 
-fn merge_recent_windows_into_retained(windows: SystemEventRecentWindows) -> Vec<Arc<SystemEvent>> {
-    let mut retained = windows.recent_events;
-    retained.extend(windows.recent_scheduler_events);
-    retained.extend(windows.recent_command_events);
-    retained.extend(windows.recent_governance_events);
-    retained.extend(windows.recent_publication_events);
-    retained.sort_by(|left, right| compare_recent_event_order(left, right));
-    retained.dedup_by(|left, right| left.event_id == right.event_id);
-    retained
+fn merge_recent_windows(
+    left: &SystemEventRecentWindows,
+    right: &SystemEventRecentWindows,
+) -> SystemEventRecentWindows {
+    SystemEventRecentWindows {
+        recent_events: merge_recent_arc_events(&left.recent_events, &right.recent_events),
+        recent_scheduler_events: merge_recent_arc_events(
+            &left.recent_scheduler_events,
+            &right.recent_scheduler_events,
+        ),
+        recent_command_events: merge_recent_arc_events(
+            &left.recent_command_events,
+            &right.recent_command_events,
+        ),
+        recent_governance_events: merge_recent_arc_events(
+            &left.recent_governance_events,
+            &right.recent_governance_events,
+        ),
+        recent_publication_events: merge_recent_arc_events(
+            &left.recent_publication_events,
+            &right.recent_publication_events,
+        ),
+    }
 }
 
 fn compare_recent_event_order(left: &SystemEvent, right: &SystemEvent) -> std::cmp::Ordering {
@@ -713,6 +698,12 @@ mod tests {
     fn system_event_query_index_keeps_truthful_recent_category_pages_without_category_slot_topology()
      {
         category_query_uses_category_recent_window_not_only_global_recent_window();
+    }
+
+    #[test]
+    fn system_event_query_index_keeps_truthful_recent_category_pages_without_retained_vector_duplication()
+     {
+        system_event_query_index_keeps_truthful_recent_category_pages_without_category_slot_topology();
     }
 
     #[test]
