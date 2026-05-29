@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Default number of recent operator-facing system events returned in one query.
@@ -163,7 +163,7 @@ pub struct SystemEventQueryIndex {
     command_total: usize,
     governance_total: usize,
     publication_total: usize,
-    retained_event_ids: HashSet<Box<str>>,
+    retained_event_refs: HashMap<Box<str>, usize>,
     recent_windows: SystemEventRecentWindows,
 }
 
@@ -200,7 +200,7 @@ impl SystemEventQueryIndex {
             command_total: 0,
             governance_total: 0,
             publication_total: 0,
-            retained_event_ids: HashSet::new(),
+            retained_event_refs: HashMap::new(),
             recent_windows: SystemEventRecentWindows::default(),
         }
     }
@@ -219,7 +219,10 @@ impl SystemEventQueryIndex {
     }
 
     fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
-        if self.retained_event_ids.contains(event.event_id.as_ref()) {
+        if self
+            .retained_event_refs
+            .contains_key(event.event_id.as_ref())
+        {
             return;
         }
         self.total += 1;
@@ -237,15 +240,18 @@ impl SystemEventQueryIndex {
                 self.publication_total += 1;
             }
         }
-        push_recent_window_event(&mut self.recent_windows.recent_events, Arc::clone(&event));
+        push_recent_window_event(
+            &mut self.recent_windows.recent_events,
+            Arc::clone(&event),
+            &mut self.retained_event_refs,
+        );
         let category_window = match event.category() {
             SystemEventCategory::Scheduler => &mut self.recent_windows.recent_scheduler_events,
             SystemEventCategory::Command => &mut self.recent_windows.recent_command_events,
             SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
             SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
         };
-        push_recent_window_event(category_window, event);
-        self.refresh_retained_event_ids();
+        push_recent_window_event(category_window, event, &mut self.retained_event_refs);
     }
 
     #[must_use]
@@ -332,7 +338,7 @@ impl SystemEventQueryIndex {
         index.governance_total = totals.governance_total;
         index.publication_total = totals.publication_total;
         index.recent_windows = windows;
-        index.refresh_retained_event_ids();
+        index.rebuild_retained_event_refs();
         index
     }
 
@@ -378,8 +384,8 @@ impl SystemEventQueryIndex {
         }
     }
 
-    fn refresh_retained_event_ids(&mut self) {
-        self.retained_event_ids = self
+    fn rebuild_retained_event_refs(&mut self) {
+        self.retained_event_refs = self
             .recent_windows
             .recent_events
             .iter()
@@ -387,15 +393,44 @@ impl SystemEventQueryIndex {
             .chain(self.recent_windows.recent_command_events.iter())
             .chain(self.recent_windows.recent_governance_events.iter())
             .chain(self.recent_windows.recent_publication_events.iter())
-            .map(|event| event.event_id.clone())
-            .collect();
+            .fold(HashMap::new(), |mut refs, event| {
+                *refs.entry(event.event_id.clone()).or_insert(0) += 1;
+                refs
+            });
     }
 }
 
-fn push_recent_window_event(window: &mut Vec<Arc<SystemEvent>>, event: Arc<SystemEvent>) {
-    window.insert(0, event);
-    if window.len() > MAX_SYSTEM_EVENTS_LIMIT {
-        window.truncate(MAX_SYSTEM_EVENTS_LIMIT);
+fn push_recent_window_event(
+    window: &mut Vec<Arc<SystemEvent>>,
+    event: Arc<SystemEvent>,
+    retained_event_refs: &mut HashMap<Box<str>, usize>,
+) {
+    window.push(event.clone());
+    window.rotate_right(1);
+    increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+    if window.len() > MAX_SYSTEM_EVENTS_LIMIT
+        && let Some(evicted) = window.pop()
+    {
+        decrement_retained_event_ref(retained_event_refs, evicted.event_id.as_ref());
+    }
+}
+
+fn increment_retained_event_ref(
+    retained_event_refs: &mut HashMap<Box<str>, usize>,
+    event_id: &str,
+) {
+    *retained_event_refs.entry(event_id.into()).or_insert(0) += 1;
+}
+
+fn decrement_retained_event_ref(
+    retained_event_refs: &mut HashMap<Box<str>, usize>,
+    event_id: &str,
+) {
+    if let Some(count) = retained_event_refs.get_mut(event_id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            retained_event_refs.remove(event_id);
+        }
     }
 }
 
@@ -433,6 +468,13 @@ fn merge_recent_arc_events(
     left: &[Arc<SystemEvent>],
     right: &[Arc<SystemEvent>],
 ) -> Vec<Arc<SystemEvent>> {
+    if let Some(prefix) = newer_prefix_since(left, right) {
+        return stitch_recent_append(prefix, right);
+    }
+    if let Some(prefix) = newer_prefix_since(right, left) {
+        return stitch_recent_append(prefix, left);
+    }
+
     let mut merged = Vec::with_capacity((left.len() + right.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
     let mut left_index = 0;
     let mut right_index = 0;
@@ -465,6 +507,17 @@ fn merge_recent_arc_events(
     }
 
     merged
+}
+
+fn stitch_recent_append(
+    prefix: Vec<Arc<SystemEvent>>,
+    base: &[Arc<SystemEvent>],
+) -> Vec<Arc<SystemEvent>> {
+    prefix
+        .into_iter()
+        .chain(base.iter().cloned())
+        .take(MAX_SYSTEM_EVENTS_LIMIT)
+        .collect()
 }
 
 fn merge_recent_windows(
@@ -743,6 +796,62 @@ mod tests {
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
             vec!["event-003"]
+        );
+    }
+
+    #[test]
+    fn system_event_query_index_push_keeps_recent_windows_without_full_id_rebuilds() {
+        let mut index = SystemEventQueryIndex::new();
+        index.push_newest(timed_event(
+            "event-001",
+            1,
+            SystemEventKind::ScanCommandCompleted,
+        ));
+        index.push_newest(timed_event(
+            "event-002",
+            2,
+            SystemEventKind::ScanCommandCompleted,
+        ));
+        index.push_newest(timed_event(
+            "event-003",
+            3,
+            SystemEventKind::FindingSuppressed,
+        ));
+        index.push_newest(timed_event(
+            "event-004",
+            4,
+            SystemEventKind::ScanCommandCompleted,
+        ));
+        index.push_newest(timed_event(
+            "event-004",
+            4,
+            SystemEventKind::ScanCommandCompleted,
+        ));
+
+        let all_page = index.query(&SystemEventsQuery::new().with_limit(10));
+        let command_page = index.query(
+            &SystemEventsQuery::new()
+                .with_category(SystemEventCategory::Command)
+                .with_limit(10),
+        );
+
+        assert_eq!(all_page.total, 4);
+        assert_eq!(
+            all_page
+                .events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-004", "event-003", "event-002", "event-001"]
+        );
+        assert_eq!(command_page.total, 3);
+        assert_eq!(
+            command_page
+                .events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-004", "event-002", "event-001"]
         );
     }
 }

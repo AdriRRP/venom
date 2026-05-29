@@ -401,6 +401,25 @@ Completed:
 82. `W187-state-runtime-barrier-scope-tightening`
     Keep the state/runtime consistency barrier only around runtime mutations
     that truly need inventory-read correctness at decision time.
+83. `W213-postgres-lane-residency-convergence`
+    Rebase idle Postgres API lanes onto the latest restored lane state so hot
+    resident arcs reconverge instead of drifting into long-lived duplicated
+    residency after lane-local mutations.
+84. `W214-read-model-identity-journal-refresh`
+    Track changed provider-report and governance identities in durable journals
+    so Postgres findings refreshes can load affected identities from compact
+    cursors instead of scanning broad watermark ranges on hot tables.
+85. `W215-collection-lane-delta-refresh`
+    Track collection source, membership, and schedule changes durably so
+    collection lane refreshes can replay only affected collections and members
+    instead of reloading whole collection subgraphs.
+86. `W216-local-system-event-merge-tight-tail`
+    Preserve and extend merged local system-event windows from append deltas as
+    far as possible before falling back to full bounded window recomposition.
+87. `W217-system-event-index-push-compaction`
+    Replace front-insert and full retained-id rebuild work in the system-event
+    query index with bounded push/pop bookkeeping and compact recent-window
+    storage.
 
 ## Exit condition
 

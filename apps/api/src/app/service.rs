@@ -734,6 +734,20 @@ impl ApiApplication {
     }
 
     #[must_use]
+    pub const fn is_postgres(&self) -> bool {
+        matches!(self.backend, ApiStore::Postgres(_))
+    }
+
+    pub fn rebase_postgres_live_sources_from(&mut self, source: &Self) {
+        match (&mut self.backend, &source.backend) {
+            (ApiStore::Postgres(target), ApiStore::Postgres(source)) => {
+                target.rebase_live_sources_from(source);
+            }
+            _ => {}
+        }
+    }
+
+    #[must_use]
     pub fn remote_change_probe(&self) -> Option<PostgresRemoteChangeProbe> {
         match &self.backend {
             ApiStore::Local(_) => None,
@@ -3987,7 +4001,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use venom_domain::durable_state::DurableState;
     use venom_domain::scanning::ScanCommandQueue;
-
     fn temp_path(name: &str, suffix: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -4167,5 +4180,10 @@ mod tests {
     #[test]
     fn local_merged_system_event_snapshot_preserves_cached_windows_across_bounded_peer_deltas() {
         local_merged_system_event_snapshot_appends_bounded_delta_without_window_rebuild();
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_reuses_cached_peer_window_for_longer_append_tails() {
+        local_merged_system_event_snapshot_preserves_cached_windows_across_bounded_peer_deltas();
     }
 }
