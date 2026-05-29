@@ -242,7 +242,7 @@ impl SystemEventQueryIndex {
         }
         push_recent_window_event(
             &mut self.recent_windows.recent_events,
-            Arc::clone(&event),
+            &event,
             &mut self.retained_event_refs,
         );
         let category_window = match event.category() {
@@ -251,7 +251,7 @@ impl SystemEventQueryIndex {
             SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
             SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
         };
-        push_recent_window_event(category_window, event, &mut self.retained_event_refs);
+        push_recent_window_event(category_window, &event, &mut self.retained_event_refs);
     }
 
     #[must_use]
@@ -402,10 +402,10 @@ impl SystemEventQueryIndex {
 
 fn push_recent_window_event(
     window: &mut Vec<Arc<SystemEvent>>,
-    event: Arc<SystemEvent>,
+    event: &Arc<SystemEvent>,
     retained_event_refs: &mut HashMap<Box<str>, usize>,
 ) {
-    window.push(event.clone());
+    window.push(Arc::clone(event));
     window.rotate_right(1);
     increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
     if window.len() > MAX_SYSTEM_EVENTS_LIMIT
