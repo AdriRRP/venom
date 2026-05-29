@@ -1055,8 +1055,8 @@ impl PostgresStore {
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
-        let result =
-            Arc::make_mut(&mut candidate_governance).accept_risk(finding.clone(), acceptance.clone());
+        let result = Arc::make_mut(&mut candidate_governance)
+            .accept_risk(finding.clone(), acceptance.clone());
         if result.change == AcceptRiskChange::Accepted {
             let component_key = finding.component_key.clone();
             let reason = acceptance.reason.clone();
@@ -1779,7 +1779,9 @@ impl PostgresStore {
 
     #[must_use]
     pub fn configured_provider(&self, component_key: &str) -> Option<&str> {
-        self.ingestion_ref().inventory().configured_provider(component_key)
+        self.ingestion_ref()
+            .inventory()
+            .configured_provider(component_key)
     }
 
     #[must_use]
@@ -2337,7 +2339,8 @@ impl PostgresStore {
     ) -> (Vec<DueCollectionScan>, DueCollectionScanRows, usize) {
         let due_scans = CollectionScanScheduler::new(self.ingestion_ref().inventory())
             .collect_due(now_unix_ms, max_collections);
-        let schedule_rows = Self::build_due_schedule_rows(self.ingestion_ref().inventory(), &due_scans);
+        let schedule_rows =
+            Self::build_due_schedule_rows(self.ingestion_ref().inventory(), &due_scans);
         let pending_due_remaining = self
             .ingestion_ref()
             .inventory()
@@ -4238,9 +4241,11 @@ impl PostgresStore {
         id: i64,
         report: &ProviderScanReport,
     ) -> Result<(), String> {
-        self.ingestion_mut().replay_scan_report(report).map_err(|error| {
-            format!("postgres provider report replay failed: {}", error.as_str())
-        })?;
+        self.ingestion_mut()
+            .replay_scan_report(report)
+            .map_err(|error| {
+                format!("postgres provider report replay failed: {}", error.as_str())
+            })?;
         self.read_model_mut().record_scan_report(report);
         self.provider_report_row_high_watermark = self.provider_report_row_high_watermark.max(
             u64::try_from(id).map_err(|_| "postgres provider report id out of range".to_owned())?,
@@ -6147,9 +6152,9 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::CHANGE_LANE_CONTEXT_PROFILES;
     use super::CHANGE_LANE_COLLECTION_MEMBERSHIPS;
     use super::CHANGE_LANE_COLLECTION_SOURCES;
+    use super::CHANGE_LANE_CONTEXT_PROFILES;
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
     use super::PostgresStore;
@@ -6163,8 +6168,8 @@ mod tests {
         ComponentTagRegistration, ContextProfileRegistration, EvidenceFreshness,
         FindingGovernanceState, FindingProvider, FindingProviderError, IntegrationEvent,
         IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
-        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance, Suppression,
-        RunNextScanResult, ScanCommandStatus, SystemEventKind,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance,
+        RunNextScanResult, ScanCommandStatus, Suppression, SystemEventKind,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -6732,14 +6737,20 @@ mod tests {
             .await
             .expect("risk acceptance should persist");
 
-        sqlx::query(&format!("DELETE FROM {}", backend.names.finding_risk_acceptances))
-            .execute(&backend.pool)
-            .await
-            .expect("legacy acceptances table should be clearable");
-        sqlx::query(&format!("DELETE FROM {}", backend.names.finding_suppressions))
-            .execute(&backend.pool)
-            .await
-            .expect("legacy suppressions table should be clearable");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.finding_risk_acceptances
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("legacy acceptances table should be clearable");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.finding_suppressions
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("legacy suppressions table should be clearable");
 
         let reopened = PostgresStore::open(&database_url, &schema)
             .await
@@ -6810,7 +6821,10 @@ mod tests {
             .await
             .expect("risk acceptance should persist");
         let _ = writer
-            .suppress_finding(finding.clone(), Suppression::new("duplicate downstream finding"))
+            .suppress_finding(
+                finding.clone(),
+                Suppression::new("duplicate downstream finding"),
+            )
             .await
             .expect("suppression should persist");
 
@@ -6827,11 +6841,8 @@ mod tests {
             refreshed
                 .read_model
                 .query_active_findings(
-                    &venom_domain::ActiveFindingsQuery::new(
-                        "component:payments-api",
-                        artifact(),
-                    )
-                    .with_governance_state(venom_domain::FindingGovernanceState::Suppressed),
+                    &venom_domain::ActiveFindingsQuery::new("component:payments-api", artifact(),)
+                        .with_governance_state(venom_domain::FindingGovernanceState::Suppressed),
                 )
                 .total,
             1
@@ -6937,13 +6948,13 @@ mod tests {
             .await
             .expect("current watermark should advance after collection membership update");
         let membership_lane_mask = loader
-            .changed_lane_mask(refreshed_after_source.change_watermark, membership_watermark)
+            .changed_lane_mask(
+                refreshed_after_source.change_watermark,
+                membership_watermark,
+            )
             .await
             .expect("collection membership lane mask should be readable");
-        assert_ne!(
-            membership_lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS,
-            0
-        );
+        assert_ne!(membership_lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS, 0);
         assert_eq!(membership_lane_mask & CHANGE_LANE_COLLECTION_SOURCES, 0);
 
         let refreshed_after_membership = loader

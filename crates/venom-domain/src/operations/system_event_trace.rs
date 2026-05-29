@@ -406,13 +406,9 @@ impl SystemEventQueryIndex {
                     recent_windows.recent_events.push(Arc::clone(event));
                 }
                 let category_window = match event.category() {
-                    SystemEventCategory::Scheduler => {
-                        &mut recent_windows.recent_scheduler_events
-                    }
+                    SystemEventCategory::Scheduler => &mut recent_windows.recent_scheduler_events,
                     SystemEventCategory::Command => &mut recent_windows.recent_command_events,
-                    SystemEventCategory::Governance => {
-                        &mut recent_windows.recent_governance_events
-                    }
+                    SystemEventCategory::Governance => &mut recent_windows.recent_governance_events,
                     SystemEventCategory::Publication => {
                         &mut recent_windows.recent_publication_events
                     }
