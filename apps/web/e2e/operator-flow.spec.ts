@@ -159,8 +159,13 @@ test("operator console can manage one release collection and execute one schedul
 	await page
 		.getByRole("button", { name: "Configure Collection Source" })
 		.click();
+	const collectionSourceCard = page
+		.locator(".result-card")
+		.filter({ hasText: "Last collection source" });
 	await expect(
-		page.getByText(/Source: replace from 1 declared components\./i),
+		collectionSourceCard.getByText(
+			/Source: replace from 1 declared components\./i,
+		),
 	).toBeVisible();
 	await page
 		.getByRole("button", { name: "Materialize Collection Source" })
