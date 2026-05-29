@@ -218,6 +218,21 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W208-http-volatile-lane-splitting`
+    Split `runtime` and `publication` into independent live HTTP lanes so
+    publication work no longer waits behind runtime drains.
+75. `W209-read-model-identity-delta-refresh`
+    Refresh provider-report and governance deltas by changed identities instead
+    of replaying whole watermark ranges into the Postgres read model.
+76. `W210-inventory-core-delta-refresh`
+    Refresh Postgres inventory-core and collection-definition lanes from
+    changed identities instead of full subgraph reloads.
+77. `W211-system-event-index-topology-compaction`
+    Remove the extra retained-event vector from `SystemEventQueryIndex` while
+    keeping truthful recent windows, totals, and merge semantics.
+78. `W212-local-system-event-merge-tightening`
+    Preserve cached local merged-system-event windows across bounded peer
+    deltas instead of rebuilding the fused view unnecessarily.
 74. `W203-postgres-live-state-fork-compaction`
     Share forked Postgres live lane state for ingestion and governance through
     copy-on-write `Arc` ownership so state and volatile lanes do not duplicate

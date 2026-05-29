@@ -1,7 +1,8 @@
 use crate::app::read_cursor::{EventSourceCursor, RowSourceCursor};
 use crate::infra::http_integration_publisher::{HTTP_EVENT_PUBLISHER_KEY, HttpEventPublisher};
 use crate::infra::postgres_backend::{
-    DrainDueCollectionScansResult, PostgresReadSnapshotSources, PostgresStore,
+    DrainDueCollectionScansResult, InventoryDefinitionSourceWatermarks,
+    PostgresReadSnapshotSources, PostgresStore,
 };
 pub use crate::infra::postgres_backend::{
     PostgresReadSnapshotBase, PostgresReadSnapshotLoader, PostgresRemoteChangeProbe,
@@ -66,6 +67,7 @@ impl std::error::Error for ApiApplicationError {}
 pub struct ApiReadSnapshot {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
+    inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     read_model_source_watermark: u64,
     governance_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
@@ -77,6 +79,7 @@ pub struct ApiReadSnapshot {
 
 #[derive(Debug)]
 pub struct ApiReadSnapshotSources {
+    pub inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     pub read_model_source_watermark: u64,
     pub governance_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
@@ -95,6 +98,7 @@ impl ApiReadSnapshot {
         Self {
             inventory,
             read_model,
+            inventory_definition_source_watermarks: sources.inventory_definition_source_watermarks,
             read_model_source_watermark: sources.read_model_source_watermark,
             governance_source_watermark: sources.governance_source_watermark,
             system_event_index: sources.system_event_index,
@@ -110,6 +114,7 @@ impl ApiReadSnapshot {
         Self {
             inventory,
             read_model: Arc::clone(&self.read_model),
+            inventory_definition_source_watermarks: self.inventory_definition_source_watermarks,
             read_model_source_watermark: self.read_model_source_watermark,
             governance_source_watermark: self.governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
@@ -130,6 +135,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model,
+            inventory_definition_source_watermarks: self.inventory_definition_source_watermarks,
             read_model_source_watermark,
             governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
@@ -149,6 +155,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
+            inventory_definition_source_watermarks: self.inventory_definition_source_watermarks,
             read_model_source_watermark: self.read_model_source_watermark,
             governance_source_watermark: self.governance_source_watermark,
             system_event_index,
@@ -168,6 +175,7 @@ impl ApiReadSnapshot {
         Self {
             inventory: Arc::clone(&self.inventory),
             read_model: Arc::clone(&self.read_model),
+            inventory_definition_source_watermarks: self.inventory_definition_source_watermarks,
             read_model_source_watermark: self.read_model_source_watermark,
             governance_source_watermark: self.governance_source_watermark,
             system_event_index: Arc::clone(&self.system_event_index),
@@ -198,6 +206,7 @@ impl ApiReadSnapshot {
             Arc::clone(&self.inventory),
             Arc::clone(&self.read_model),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: self.inventory_definition_source_watermarks,
                 read_model_source_watermark: self.read_model_source_watermark,
                 governance_source_watermark: self.governance_source_watermark,
                 system_event_index: Arc::clone(&self.system_event_index),
@@ -747,6 +756,8 @@ impl ApiApplication {
                 local.state.inventory_snapshot_arc(),
                 local.state.read_model_snapshot_arc(),
                 ApiReadSnapshotSources {
+                    inventory_definition_source_watermarks:
+                        InventoryDefinitionSourceWatermarks::default(),
                     read_model_source_watermark: 0,
                     governance_source_watermark: 0,
                     system_event_index: local.system_event_index_snapshot_arc(),
@@ -759,6 +770,8 @@ impl ApiApplication {
                 postgres.inventory_snapshot_arc(),
                 postgres.read_model_snapshot_arc(),
                 ApiReadSnapshotSources {
+                    inventory_definition_source_watermarks: postgres
+                        .inventory_definition_source_watermarks(),
                     read_model_source_watermark: postgres.read_model_source_watermark(),
                     governance_source_watermark: postgres.governance_source_watermark(),
                     system_event_index: postgres.system_event_index_snapshot_arc(),
@@ -4149,5 +4162,10 @@ mod tests {
     #[test]
     fn local_merged_system_event_snapshot_appends_bounded_delta_without_window_rebuild() {
         local_merged_system_event_snapshot_reuses_cached_peer_window();
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_preserves_cached_windows_across_bounded_peer_deltas() {
+        local_merged_system_event_snapshot_appends_bounded_delta_without_window_rebuild();
     }
 }

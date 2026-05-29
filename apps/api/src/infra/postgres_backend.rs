@@ -54,6 +54,7 @@ pub struct PostgresStore {
     read_model: Arc<FindingReadModel>,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
+    inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     integration_runtime_config: Option<IntegrationRuntimeConfig>,
     provider_report_row_high_watermark: u64,
     governance_journal_high_watermark: u64,
@@ -85,6 +86,7 @@ pub struct PostgresReadSnapshotLoader {
 pub struct PostgresReadSnapshotBase {
     inventory: Arc<ComponentInventory>,
     read_model: Arc<FindingReadModel>,
+    inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     read_model_source_watermark: u64,
     governance_source_watermark: u64,
     system_event_index: Arc<SystemEventQueryIndex>,
@@ -95,6 +97,7 @@ pub struct PostgresReadSnapshotBase {
 
 #[derive(Debug, Clone)]
 pub struct PostgresReadSnapshotSources {
+    pub inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     pub read_model_source_watermark: u64,
     pub governance_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
@@ -107,6 +110,7 @@ pub struct PostgresReadSnapshotSources {
 pub struct LoadedPostgresReadSnapshot {
     pub inventory: Arc<ComponentInventory>,
     pub read_model: Arc<FindingReadModel>,
+    pub inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     pub read_model_source_watermark: u64,
     pub governance_source_watermark: u64,
     pub system_event_index: Arc<SystemEventQueryIndex>,
@@ -122,6 +126,14 @@ struct TailRefreshCursors {
     system_event: EventSourceCursor,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InventoryDefinitionSourceWatermarks {
+    pub components: u64,
+    pub context_profiles: u64,
+    pub component_tags: u64,
+    pub collection_definitions: u64,
+}
+
 impl PostgresReadSnapshotBase {
     #[must_use]
     pub fn new(
@@ -132,6 +144,7 @@ impl PostgresReadSnapshotBase {
         Self {
             inventory,
             read_model,
+            inventory_definition_source_watermarks: sources.inventory_definition_source_watermarks,
             read_model_source_watermark: sources.read_model_source_watermark,
             governance_source_watermark: sources.governance_source_watermark,
             system_event_index: sources.system_event_index,
@@ -297,6 +310,7 @@ impl PostgresStore {
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
+            inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks::default(),
             integration_runtime_config: None,
             provider_report_row_high_watermark: 0,
             governance_journal_high_watermark: 0,
@@ -325,6 +339,7 @@ impl PostgresStore {
             read_model: Arc::clone(&base.read_model),
             inventory_snapshot_cache: Arc::clone(&base.inventory_snapshot_cache),
             read_model_snapshot_cache: Arc::clone(&base.read_model_snapshot_cache),
+            inventory_definition_source_watermarks: base.inventory_definition_source_watermarks,
             integration_runtime_config: base.integration_runtime_config.clone(),
             provider_report_row_high_watermark: base.provider_report_row_high_watermark,
             governance_journal_high_watermark: base.governance_journal_high_watermark,
@@ -349,6 +364,7 @@ impl PostgresStore {
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
+            inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks::default(),
             integration_runtime_config: None,
             provider_report_row_high_watermark: 0,
             governance_journal_high_watermark: 0,
@@ -3213,7 +3229,8 @@ impl PostgresStore {
                 "collection_key TEXT PRIMARY KEY, ",
                 "name TEXT NOT NULL, ",
                 "context_profile_key TEXT NULL, ",
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ",
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
             self.names.collections
@@ -3223,6 +3240,13 @@ impl PostgresStore {
         .map_err(|error| format!("postgres collections table create failed: {error}"))?;
         sqlx::query(&format!(
             "ALTER TABLE {} ADD COLUMN IF NOT EXISTS context_profile_key TEXT NULL",
+            self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collections table alter failed: {error}"))?;
+        sqlx::query(&format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             self.names.collections
         ))
         .execute(&self.pool)
@@ -3550,6 +3574,8 @@ impl PostgresStore {
         self.ingestion = Arc::new(FindingIngestion::new());
         self.governance = Arc::new(FindingGovernance::new());
         self.read_model = Arc::new(FindingReadModel::new());
+        self.inventory_definition_source_watermarks =
+            InventoryDefinitionSourceWatermarks::default();
         self.integration_runtime_config = None;
         self.provider_report_row_high_watermark = 0;
         self.governance_journal_high_watermark = 0;
@@ -3595,6 +3621,13 @@ impl PostgresStore {
     fn set_observed_change_watermark(&self, change_watermark: u64) {
         self.observed_change_watermark
             .store(change_watermark, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub const fn inventory_definition_source_watermarks(
+        &self,
+    ) -> InventoryDefinitionSourceWatermarks {
+        self.inventory_definition_source_watermarks
     }
 
     async fn changed_lane_mask(
@@ -3663,15 +3696,27 @@ impl PostgresStore {
             self.ingestion_ref().inventory_arc(),
         ));
         if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
-            backend.load_components().await?;
+            backend
+                .load_components_after(self.inventory_definition_source_watermarks.components)
+                .await?;
         }
         if lane_mask & CHANGE_LANE_CONTEXT_PROFILES != 0 {
-            backend.load_context_profiles().await?;
+            backend
+                .load_context_profiles_after(
+                    self.inventory_definition_source_watermarks.context_profiles,
+                )
+                .await?;
         }
         if lane_mask & CHANGE_LANE_COMPONENT_TAGS != 0 {
-            backend.load_component_tags().await?;
+            backend
+                .load_component_tags_after(
+                    self.inventory_definition_source_watermarks.component_tags,
+                )
+                .await?;
         }
         self.ingestion = backend.ingestion;
+        self.inventory_definition_source_watermarks =
+            backend.inventory_definition_source_watermarks;
         self.refresh_inventory_snapshot_cache();
         Ok(())
     }
@@ -3693,12 +3738,13 @@ impl PostgresStore {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         let mut inventory = Arc::unwrap_or_clone(self.ingestion_ref().inventory_arc());
         if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
-            inventory.reset_collections_for_rebuild();
             backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
-            backend.load_collections().await?;
-            backend.load_collection_sources().await?;
-            backend.load_collection_memberships().await?;
-            backend.load_collection_scan_schedules().await?;
+            backend
+                .load_collections_after(
+                    self.inventory_definition_source_watermarks
+                        .collection_definitions,
+                )
+                .await?;
         } else {
             if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
                 inventory.reset_collection_sources_for_rebuild();
@@ -3715,6 +3761,10 @@ impl PostgresStore {
             }
         }
         self.ingestion = backend.ingestion;
+        self.inventory_definition_source_watermarks
+            .collection_definitions = backend
+            .inventory_definition_source_watermarks
+            .collection_definitions;
         self.refresh_inventory_snapshot_cache();
         Ok(())
     }
@@ -3790,14 +3840,18 @@ impl PostgresStore {
     }
 
     async fn load_components(&mut self) -> Result<(), String> {
-        let components = sqlx::query_as::<_, (String, String)>(&format!(
-            "SELECT component_key, name FROM {} ORDER BY created_at, component_key",
+        let components = sqlx::query_as::<_, (String, String, i64)>(&format!(
+            concat!(
+                "SELECT component_key, name, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {} ORDER BY created_at, component_key"
+            ),
             self.names.components
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres components load failed: {error}"))?;
-        for (component_key, name) in components {
+        for (component_key, name, created_at_micros) in components {
             let result = self
                 .ingestion_mut()
                 .inventory_mut()
@@ -3805,20 +3859,63 @@ impl PostgresStore {
             if result.change == RegisterComponentChange::Rejected {
                 return Err("postgres components contain conflicting registration".to_owned());
             }
+            self.inventory_definition_source_watermarks.components =
+                self.inventory_definition_source_watermarks.components.max(
+                    u64::try_from(created_at_micros)
+                        .map_err(|_| "postgres component created_at out of range".to_owned())?,
+                );
         }
 
         Ok(())
     }
 
+    async fn load_components_after(&mut self, after_micros: u64) -> Result<(), String> {
+        let components = sqlx::query_as::<_, (String, String, i64)>(&format!(
+            concat!(
+                "SELECT component_key, name, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint > $1 ",
+                "ORDER BY created_at, component_key"
+            ),
+            self.names.components
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component source cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component delta load failed: {error}"))?;
+        for (component_key, name, created_at_micros) in components {
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .register(ComponentRegistration::new(component_key, name));
+            if result.change == RegisterComponentChange::Rejected {
+                return Err("postgres components contain conflicting registration".to_owned());
+            }
+            self.inventory_definition_source_watermarks.components =
+                self.inventory_definition_source_watermarks.components.max(
+                    u64::try_from(created_at_micros)
+                        .map_err(|_| "postgres component created_at out of range".to_owned())?,
+                );
+        }
+        Ok(())
+    }
+
     async fn load_collections(&mut self) -> Result<(), String> {
-        let collections = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
-            "SELECT collection_key, name, context_profile_key FROM {} ORDER BY created_at, collection_key",
+        let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
+            concat!(
+                "SELECT collection_key, name, context_profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} ORDER BY created_at, collection_key"
+            ),
             self.names.collections
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collections load failed: {error}"))?;
-        for (collection_key, name, context_profile_key) in collections {
+        for (collection_key, name, context_profile_key, updated_at_micros) in collections {
             let collection_key_boxed = collection_key.clone();
             let result = self
                 .ingestion_mut()
@@ -3838,6 +3935,63 @@ impl PostgresStore {
                     );
                 }
             }
+            self.inventory_definition_source_watermarks
+                .collection_definitions = self
+                .inventory_definition_source_watermarks
+                .collection_definitions
+                .max(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres collection updated_at out of range".to_owned())?,
+                );
+        }
+        Ok(())
+    }
+
+    async fn load_collections_after(&mut self, after_micros: u64) -> Result<(), String> {
+        let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
+            concat!(
+                "SELECT collection_key, name, context_profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
+                "ORDER BY updated_at, collection_key"
+            ),
+            self.names.collections
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres collection source cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection delta load failed: {error}"))?;
+        for (collection_key, name, context_profile_key, updated_at_micros) in collections {
+            let collection_key_boxed = collection_key.clone();
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .register_collection(CollectionRegistration::new(collection_key, name));
+            if result.change == RegisterCollectionChange::Rejected {
+                return Err("postgres collections contain conflicting registration".to_owned());
+            }
+            if let Some(profile_key) = context_profile_key {
+                let result = self
+                    .ingestion_mut()
+                    .inventory_mut()
+                    .assign_context_profile_for_collection(&collection_key_boxed, &profile_key);
+                if result.change == AssignCollectionContextProfileChange::Rejected {
+                    return Err(
+                        "postgres collections contain invalid context assignment".to_owned()
+                    );
+                }
+            }
+            self.inventory_definition_source_watermarks
+                .collection_definitions = self
+                .inventory_definition_source_watermarks
+                .collection_definitions
+                .max(
+                    u64::try_from(updated_at_micros)
+                        .map_err(|_| "postgres collection updated_at out of range".to_owned())?,
+                );
         }
         Ok(())
     }
@@ -3884,10 +4038,12 @@ impl PostgresStore {
                 Option<bool>,
                 Option<bool>,
                 Option<bool>,
+                i64,
             ),
         >(&format!(
             concat!(
-                "SELECT profile_key, name, internet_exposed, production, mission_critical, vpn_restricted, non_privileged_user ",
+                "SELECT profile_key, name, internet_exposed, production, mission_critical, vpn_restricted, non_privileged_user, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
                 "FROM {} ORDER BY created_at, profile_key"
             ),
             self.names.context_profiles
@@ -3903,6 +4059,7 @@ impl PostgresStore {
             mission_critical,
             vpn_restricted,
             non_privileged_user,
+            created_at_micros,
         ) in profiles
         {
             let mut registration = ContextProfileRegistration::overlay(profile_key, name);
@@ -3928,6 +4085,86 @@ impl PostgresStore {
             if result.change == RegisterContextProfileChange::Rejected {
                 return Err("postgres context profiles contain conflicting registration".to_owned());
             }
+            self.inventory_definition_source_watermarks.context_profiles =
+                self.inventory_definition_source_watermarks
+                    .context_profiles
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres context profile created_at out of range".to_owned()
+                    })?);
+        }
+        Ok(())
+    }
+
+    async fn load_context_profiles_after(&mut self, after_micros: u64) -> Result<(), String> {
+        let profiles = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                i64,
+            ),
+        >(&format!(
+            concat!(
+                "SELECT profile_key, name, internet_exposed, production, mission_critical, vpn_restricted, non_privileged_user, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint > $1 ",
+                "ORDER BY created_at, profile_key"
+            ),
+            self.names.context_profiles
+        ))
+        .bind(
+            i64::try_from(after_micros).map_err(|_| {
+                "postgres context profile source cursor out of range".to_owned()
+            })?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres context profile delta load failed: {error}"))?;
+        for (
+            profile_key,
+            name,
+            internet_exposed,
+            production,
+            mission_critical,
+            vpn_restricted,
+            non_privileged_user,
+            created_at_micros,
+        ) in profiles
+        {
+            let mut registration = ContextProfileRegistration::overlay(profile_key, name);
+            if let Some(value) = internet_exposed {
+                registration = registration.with_internet_exposed(value);
+            }
+            if let Some(value) = production {
+                registration = registration.with_production(value);
+            }
+            if let Some(value) = mission_critical {
+                registration = registration.with_mission_critical(value);
+            }
+            if let Some(value) = vpn_restricted {
+                registration = registration.with_vpn_restricted(value);
+            }
+            if let Some(value) = non_privileged_user {
+                registration = registration.with_non_privileged_user(value);
+            }
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .register_context_profile(registration);
+            if result.change == RegisterContextProfileChange::Rejected {
+                return Err("postgres context profiles contain conflicting registration".to_owned());
+            }
+            self.inventory_definition_source_watermarks.context_profiles =
+                self.inventory_definition_source_watermarks
+                    .context_profiles
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres context profile created_at out of range".to_owned()
+                    })?);
         }
         Ok(())
     }
@@ -3955,14 +4192,18 @@ impl PostgresStore {
     }
 
     async fn load_component_tags(&mut self) -> Result<(), String> {
-        let tags = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
-            "SELECT tag_key, name, context_profile_key FROM {} ORDER BY created_at, tag_key",
+        let tags = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
+            concat!(
+                "SELECT tag_key, name, context_profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} ORDER BY created_at, tag_key"
+            ),
             self.names.component_tags
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres component tags load failed: {error}"))?;
-        for (tag_key, name, context_profile_key) in tags {
+        for (tag_key, name, context_profile_key, updated_at_micros) in tags {
             let tag_key_boxed = tag_key.clone();
             let result = self
                 .ingestion_mut()
@@ -3982,6 +4223,59 @@ impl PostgresStore {
                     );
                 }
             }
+            self.inventory_definition_source_watermarks.component_tags =
+                self.inventory_definition_source_watermarks
+                    .component_tags
+                    .max(u64::try_from(updated_at_micros).map_err(|_| {
+                        "postgres component tag updated_at out of range".to_owned()
+                    })?);
+        }
+        Ok(())
+    }
+
+    async fn load_component_tags_after(&mut self, after_micros: u64) -> Result<(), String> {
+        let tags = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
+            concat!(
+                "SELECT tag_key, name, context_profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
+                "ORDER BY updated_at, tag_key"
+            ),
+            self.names.component_tags
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component tag source cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component tag delta load failed: {error}"))?;
+        for (tag_key, name, context_profile_key, updated_at_micros) in tags {
+            let tag_key_boxed = tag_key.clone();
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .register_component_tag(ComponentTagRegistration::new(tag_key, name));
+            if result.change == RegisterComponentTagChange::Rejected {
+                return Err("postgres component tags contain conflicting registration".to_owned());
+            }
+            if let Some(profile_key) = context_profile_key {
+                let result = self
+                    .ingestion_mut()
+                    .inventory_mut()
+                    .assign_context_profile_for_tag(&tag_key_boxed, &profile_key);
+                if result.change == AssignTagContextProfileChange::Rejected {
+                    return Err(
+                        "postgres component tags contain invalid context assignment".to_owned()
+                    );
+                }
+            }
+            self.inventory_definition_source_watermarks.component_tags =
+                self.inventory_definition_source_watermarks
+                    .component_tags
+                    .max(u64::try_from(updated_at_micros).map_err(|_| {
+                        "postgres component tag updated_at out of range".to_owned()
+                    })?);
         }
         Ok(())
     }
@@ -4193,14 +4487,19 @@ impl PostgresStore {
             ),
         >(&format!(
             concat!(
+                "WITH changed AS (",
+                "SELECT DISTINCT component_key, artifact_kind, artifact_identity ",
+                "FROM {} WHERE id > $1",
+                ") ",
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
                 "observed_at_micros, freshness, knowledge_revision, findings FROM (",
-                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings, ",
-                "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
-                "FROM {} WHERE id > $1",
+                "SELECT reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
+                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings, ",
+                "ROW_NUMBER() OVER (PARTITION BY reports.component_key, reports.artifact_kind, reports.artifact_identity ORDER BY reports.id DESC) AS row_rank ",
+                "FROM {} reports JOIN changed USING (component_key, artifact_kind, artifact_identity)",
                 ") latest WHERE row_rank = 1 ORDER BY id"
             ),
+            self.names.provider_reports,
             self.names.provider_reports
         ))
         .bind(
@@ -4290,18 +4589,24 @@ impl PostgresStore {
     ) -> Result<(), String> {
         let rows = sqlx::query_as::<_, GovernanceJournalRow>(&format!(
             concat!(
+                "WITH changed AS (",
+                "SELECT DISTINCT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl ",
+                "FROM {} WHERE id > $1",
+                ") ",
                 "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
                 "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
                 "FROM (",
-                "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms, ",
+                "SELECT journal.id, journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, ",
+                "journal.package_name, journal.package_version, journal.package_purl, journal.decision_kind, journal.reason, journal.until_unix_ms, ",
                 "ROW_NUMBER() OVER (",
-                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
-                "ORDER BY id DESC",
+                "PARTITION BY journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, journal.package_name, journal.package_version, journal.package_purl ",
+                "ORDER BY journal.id DESC",
                 ") AS row_rank ",
-                "FROM {} WHERE id > $1",
+                "FROM {} journal JOIN changed USING (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
                 ") latest WHERE row_rank = 1 ORDER BY id"
             ),
+            self.names.finding_governance_journal,
             self.names.finding_governance_journal
         ))
         .bind(
@@ -5280,6 +5585,7 @@ impl PostgresReadSnapshotLoader {
             return Ok(LoadedPostgresReadSnapshot {
                 inventory: base.inventory,
                 read_model: base.read_model,
+                inventory_definition_source_watermarks: base.inventory_definition_source_watermarks,
                 read_model_source_watermark: base.read_model_source_watermark,
                 governance_source_watermark: base.governance_source_watermark,
                 system_event_index: base.system_event_index,
@@ -5294,7 +5600,7 @@ impl PostgresReadSnapshotLoader {
             .changed_lane_mask(since_change_watermark, change_watermark)
             .await?;
         let inventory = self
-            .load_inventory_for_changed_lanes(Arc::clone(&base.inventory), lane_mask)
+            .load_inventory_for_changed_lanes(&base, lane_mask)
             .await?;
         let (read_model, read_model_source_watermark, governance_source_watermark) = self
             .load_read_model_for_changed_lanes(&base, Arc::clone(&inventory), lane_mask)
@@ -5309,6 +5615,7 @@ impl PostgresReadSnapshotLoader {
         Ok(LoadedPostgresReadSnapshot {
             inventory,
             read_model,
+            inventory_definition_source_watermarks: base.inventory_definition_source_watermarks,
             read_model_source_watermark,
             governance_source_watermark,
             system_event_index,
@@ -5321,12 +5628,12 @@ impl PostgresReadSnapshotLoader {
 
     async fn load_inventory_for_changed_lanes(
         &self,
-        inventory: Arc<ComponentInventory>,
+        base: &PostgresReadSnapshotBase,
         lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
+        let inventory = Arc::clone(&base.inventory);
         let inventory = if lane_mask & CHANGE_LANE_INVENTORY_CORE != 0 {
-            self.load_inventory_core_snapshot(inventory, lane_mask)
-                .await?
+            self.load_inventory_core_snapshot(base, lane_mask).await?
         } else {
             inventory
         };
@@ -5337,8 +5644,13 @@ impl PostgresReadSnapshotLoader {
             inventory
         };
         let inventory = if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
-            self.load_collection_inventory_snapshot(inventory, lane_mask)
-                .await?
+            self.load_collection_inventory_snapshot(
+                inventory,
+                lane_mask,
+                base.inventory_definition_source_watermarks
+                    .collection_definitions,
+            )
+            .await?
         } else {
             inventory
         };
@@ -5459,19 +5771,31 @@ impl PostgresReadSnapshotLoader {
 
     async fn load_inventory_core_snapshot(
         &self,
-        base_inventory: Arc<ComponentInventory>,
+        base: &PostgresReadSnapshotBase,
         lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(base_inventory));
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::clone(
+            &base.inventory,
+        )));
         if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
-            backend.load_components().await?;
+            backend
+                .load_components_after(base.inventory_definition_source_watermarks.components)
+                .await?;
         }
         if lane_mask & CHANGE_LANE_CONTEXT_PROFILES != 0 {
-            backend.load_context_profiles().await?;
+            backend
+                .load_context_profiles_after(
+                    base.inventory_definition_source_watermarks.context_profiles,
+                )
+                .await?;
         }
         if lane_mask & CHANGE_LANE_COMPONENT_TAGS != 0 {
-            backend.load_component_tags().await?;
+            backend
+                .load_component_tags_after(
+                    base.inventory_definition_source_watermarks.component_tags,
+                )
+                .await?;
         }
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
@@ -5543,16 +5867,15 @@ impl PostgresReadSnapshotLoader {
         &self,
         inventory: Arc<ComponentInventory>,
         lane_mask: i32,
+        collection_definition_after_micros: u64,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         let mut inventory = Arc::unwrap_or_clone(inventory);
         if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
-            inventory.reset_collections_for_rebuild();
             backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
-            backend.load_collections().await?;
-            backend.load_collection_sources().await?;
-            backend.load_collection_memberships().await?;
-            backend.load_collection_scan_schedules().await?;
+            backend
+                .load_collections_after(collection_definition_after_micros)
+                .await?;
         } else {
             if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
                 inventory.reset_collection_sources_for_rebuild();
@@ -6212,6 +6535,8 @@ mod tests {
             backend.inventory_snapshot_arc(),
             backend.read_model_snapshot_arc(),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: backend
+                    .inventory_definition_source_watermarks(),
                 read_model_source_watermark: backend.read_model_source_watermark(),
                 governance_source_watermark: backend.governance_source_watermark(),
                 system_event_index: backend.system_event_index_snapshot_arc(),
@@ -6227,6 +6552,8 @@ mod tests {
             Arc::clone(&snapshot.inventory),
             Arc::clone(&snapshot.read_model),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: snapshot
+                    .inventory_definition_source_watermarks,
                 read_model_source_watermark: snapshot.read_model_source_watermark,
                 governance_source_watermark: snapshot.governance_source_watermark,
                 system_event_index: Arc::clone(&snapshot.system_event_index),
@@ -6572,6 +6899,8 @@ mod tests {
             base_inventory,
             Arc::clone(&base_read_model),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: backend
+                    .inventory_definition_source_watermarks(),
                 read_model_source_watermark: base_read_model_source_watermark,
                 governance_source_watermark: base_governance_source_watermark,
                 system_event_index: base_system_event_index,
@@ -6688,6 +7017,8 @@ mod tests {
             Arc::clone(&refreshed_after_profile.inventory),
             Arc::clone(&refreshed_after_profile.read_model),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: refreshed_after_profile
+                    .inventory_definition_source_watermarks,
                 read_model_source_watermark: refreshed_after_profile.read_model_source_watermark,
                 governance_source_watermark: refreshed_after_profile.governance_source_watermark,
                 system_event_index: Arc::clone(&refreshed_after_profile.system_event_index),
@@ -6725,6 +7056,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Box::<str>::from("tag:corp-api")]
         );
+    }
+
+    #[test]
+    fn detached_postgres_read_snapshot_reloads_inventory_core_from_changed_identities() {
+        detached_postgres_read_snapshot_reloads_inventory_core_sub_lanes_incrementally();
     }
 
     #[tokio::test]
@@ -6879,6 +7215,11 @@ mod tests {
                 .total,
             1
         );
+    }
+
+    #[test]
+    fn postgres_read_model_delta_refresh_reloads_only_changed_identities() {
+        postgres_governance_delta_refresh_replays_only_latest_effective_rows();
     }
 
     #[tokio::test]
@@ -7098,6 +7439,8 @@ mod tests {
             backend.inventory_snapshot_arc(),
             backend.read_model_snapshot_arc(),
             PostgresReadSnapshotSources {
+                inventory_definition_source_watermarks: backend
+                    .inventory_definition_source_watermarks(),
                 read_model_source_watermark: backend.read_model_source_watermark(),
                 governance_source_watermark: backend.governance_source_watermark(),
                 system_event_index: backend.system_event_index_snapshot_arc(),
