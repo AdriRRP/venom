@@ -76,7 +76,7 @@ struct PartitionedServiceSlots {
     publication: ServiceSlot,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiMutationLane {
     State,
     Runtime,
@@ -605,11 +605,35 @@ impl ApiState {
     }
 
     async fn restore_service(&self, lane: ApiMutationLane, service: ApiApplication) {
+        self.rebase_idle_postgres_sibling_lanes(lane, &service);
         let slot = self.slot_for_lane(lane);
         let mut guard = slot.service.lock().await;
         *guard = Some(service);
         drop(guard);
         slot.ready.notify_waiters();
+    }
+
+    fn rebase_idle_postgres_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
+        if !source.is_postgres() {
+            return;
+        }
+        for sibling_lane in [
+            ApiMutationLane::State,
+            ApiMutationLane::Runtime,
+            ApiMutationLane::Publication,
+        ] {
+            if sibling_lane == lane {
+                continue;
+            }
+            let slot = self.slot_for_lane(sibling_lane);
+            let Ok(mut guard) = slot.service.try_lock() else {
+                continue;
+            };
+            let Some(sibling) = guard.as_mut() else {
+                continue;
+            };
+            sibling.rebase_postgres_live_sources_from(source);
+        }
     }
 
     fn refresh_local_service_if_stale(
@@ -1871,10 +1895,13 @@ mod tests {
     use super::ApiHealthStatus;
     use super::ApiMutationLane;
     use super::ApiState;
+    use super::BindArtifactRequest;
     use super::ComponentRegistrationRequest;
     use super::build_router;
     use super::remote_snapshot_is_current;
     use super::should_publish_remote_snapshot;
+    use crate::app::service::ProviderReportFindingRequest;
+    use crate::app::service::ProviderScanReportRequest;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -1885,7 +1912,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
-
     fn temp_path(name: &str, suffix: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -1972,6 +1998,96 @@ mod tests {
             .await;
         state
             .restore_service(ApiMutationLane::Runtime, volatile_service)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_idle_lanes_rebase_to_latest_resident_sources() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("idle_lane_residency_rebase");
+        let state = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("postgres api state should open");
+
+        let mut state_service = state.take_service(ApiMutationLane::State).await;
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &runtime_service.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &publication_service.read_model_snapshot_arc()
+        ));
+
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
+
+        state_service
+            .register_component(ComponentRegistrationRequest {
+                component_key: "component:payments-api".to_owned(),
+                name: "Payments API".to_owned(),
+            })
+            .await
+            .expect("registration should persist");
+        state_service
+            .bind_artifact(
+                "component:payments-api",
+                BindArtifactRequest {
+                    artifact_kind: "container-image".to_owned(),
+                    artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                },
+            )
+            .await
+            .expect("artifact binding should persist");
+        state_service
+            .record_provider_report(ProviderScanReportRequest {
+                provider_key: "fixture-provider".to_owned(),
+                component_key: "component:payments-api".to_owned(),
+                artifact_kind: "container-image".to_owned(),
+                artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                freshness: "deterministic".to_owned(),
+                knowledge_revision: Some("fixture-db:2026-05-29".to_owned()),
+                findings: vec![ProviderReportFindingRequest {
+                    vulnerability_id: "CVE-2026-0001".to_owned(),
+                    package_name: "openssl".to_owned(),
+                    package_version: "3.0.0".to_owned(),
+                    severity: "high".to_owned(),
+                }],
+            })
+            .await
+            .expect("provider report should persist");
+
+        let rebased_read_model = state_service.read_model_snapshot_arc();
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+
+        assert!(Arc::ptr_eq(
+            &rebased_read_model,
+            &runtime_service.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &rebased_read_model,
+            &publication_service.read_model_snapshot_arc()
+        ));
+
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
     }
 
