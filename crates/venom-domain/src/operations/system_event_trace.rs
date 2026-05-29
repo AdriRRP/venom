@@ -165,6 +165,7 @@ pub struct SystemEventQueryIndex {
     publication_total: usize,
     retained_event_ids: HashSet<Box<str>>,
     retained_events: Vec<Arc<SystemEvent>>,
+    recent_windows: SystemEventRecentWindows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -202,6 +203,7 @@ impl SystemEventQueryIndex {
             publication_total: 0,
             retained_event_ids: HashSet::new(),
             retained_events: Vec::new(),
+            recent_windows: SystemEventRecentWindows::default(),
         }
     }
 
@@ -310,42 +312,7 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn recent_windows(&self) -> SystemEventRecentWindows {
-        SystemEventRecentWindows {
-            recent_events: self
-                .retained_events
-                .iter()
-                .take(MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-            recent_scheduler_events: self
-                .retained_events
-                .iter()
-                .filter(|event| event.category() == SystemEventCategory::Scheduler)
-                .take(MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-            recent_command_events: self
-                .retained_events
-                .iter()
-                .filter(|event| event.category() == SystemEventCategory::Command)
-                .take(MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-            recent_governance_events: self
-                .retained_events
-                .iter()
-                .filter(|event| event.category() == SystemEventCategory::Governance)
-                .take(MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-            recent_publication_events: self
-                .retained_events
-                .iter()
-                .filter(|event| event.category() == SystemEventCategory::Publication)
-                .take(MAX_SYSTEM_EVENTS_LIMIT)
-                .cloned()
-                .collect(),
-        }
+        self.recent_windows.clone()
     }
 
     #[must_use]
@@ -370,19 +337,25 @@ impl SystemEventQueryIndex {
 
         let events = query.category.map_or_else(
             || {
-                self.retained_events
+                self.recent_windows
+                    .recent_events
                     .iter()
                     .take(limit)
                     .cloned()
                     .collect::<Vec<_>>()
             },
             |category| {
-                self.retained_events
-                    .iter()
-                    .filter(|event| event.category() == category)
-                    .take(limit)
-                    .cloned()
-                    .collect::<Vec<_>>()
+                let window = match category {
+                    SystemEventCategory::Scheduler => &self.recent_windows.recent_scheduler_events,
+                    SystemEventCategory::Command => &self.recent_windows.recent_command_events,
+                    SystemEventCategory::Governance => {
+                        &self.recent_windows.recent_governance_events
+                    }
+                    SystemEventCategory::Publication => {
+                        &self.recent_windows.recent_publication_events
+                    }
+                };
+                window.iter().take(limit).cloned().collect::<Vec<_>>()
             },
         );
         SystemEventsPage {
@@ -415,6 +388,7 @@ impl SystemEventQueryIndex {
         let mut governance = 0usize;
         let mut publication = 0usize;
         let mut retained = Vec::new();
+        let mut recent_windows = SystemEventRecentWindows::default();
         for event in &self.retained_events {
             let category_count = match event.category() {
                 SystemEventCategory::Scheduler => &mut scheduler,
@@ -428,6 +402,24 @@ impl SystemEventQueryIndex {
                 retained.push(Arc::clone(event));
                 global += 1;
                 *category_count += 1;
+                if recent_windows.recent_events.len() < MAX_SYSTEM_EVENTS_LIMIT {
+                    recent_windows.recent_events.push(Arc::clone(event));
+                }
+                let category_window = match event.category() {
+                    SystemEventCategory::Scheduler => {
+                        &mut recent_windows.recent_scheduler_events
+                    }
+                    SystemEventCategory::Command => &mut recent_windows.recent_command_events,
+                    SystemEventCategory::Governance => {
+                        &mut recent_windows.recent_governance_events
+                    }
+                    SystemEventCategory::Publication => {
+                        &mut recent_windows.recent_publication_events
+                    }
+                };
+                if category_window.len() < MAX_SYSTEM_EVENTS_LIMIT {
+                    category_window.push(Arc::clone(event));
+                }
             }
         }
         self.retained_events = retained;
@@ -436,6 +428,7 @@ impl SystemEventQueryIndex {
             .iter()
             .map(|event| event.event_id.clone())
             .collect();
+        self.recent_windows = recent_windows;
     }
 }
 
@@ -724,5 +717,45 @@ mod tests {
     fn system_event_query_index_keeps_truthful_recent_category_pages_without_category_slot_topology()
      {
         category_query_uses_category_recent_window_not_only_global_recent_window();
+    }
+
+    #[test]
+    fn system_event_query_index_reuses_cached_recent_windows() {
+        let index = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-001", 1, SystemEventKind::CollectionScanMaterialized),
+                timed_event("event-002", 2, SystemEventKind::FindingSuppressed),
+                timed_event("event-003", 3, SystemEventKind::ScanCommandCompleted),
+                timed_event("event-004", 4, SystemEventKind::IntegrationEventPublished),
+            ]
+            .iter(),
+        );
+
+        let windows = index.recent_windows();
+
+        assert_eq!(
+            windows
+                .recent_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-004", "event-003", "event-002", "event-001"]
+        );
+        assert_eq!(
+            windows
+                .recent_scheduler_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-001"]
+        );
+        assert_eq!(
+            windows
+                .recent_command_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-003"]
+        );
     }
 }

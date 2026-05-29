@@ -49,8 +49,8 @@ pub struct PostgresStore {
     pool: PgPool,
     names: TableNames,
     observed_change_watermark: Arc<AtomicU64>,
-    ingestion: FindingIngestion,
-    governance: FindingGovernance,
+    ingestion: Arc<FindingIngestion>,
+    governance: Arc<FindingGovernance>,
     read_model: Arc<FindingReadModel>,
     inventory_snapshot_cache: Arc<ComponentInventory>,
     read_model_snapshot_cache: Arc<FindingReadModel>,
@@ -146,17 +146,22 @@ const CHANGE_LANE_COMPONENTS: i32 = 1;
 const CHANGE_LANE_CONTEXT_PROFILES: i32 = 1 << 1;
 const CHANGE_LANE_COMPONENT_TAGS: i32 = 1 << 2;
 const CHANGE_LANE_COMPONENT_BINDINGS: i32 = 1 << 3;
-const CHANGE_LANE_COLLECTIONS: i32 = 1 << 4;
-const CHANGE_LANE_READ_MODEL: i32 = 1 << 5;
-const CHANGE_LANE_GOVERNANCE: i32 = 1 << 6;
-const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 7;
-const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 8;
-const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 9;
-const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 10;
-const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 11;
-const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 12;
+const CHANGE_LANE_COLLECTION_DEFINITIONS: i32 = 1 << 4;
+const CHANGE_LANE_COLLECTION_SOURCES: i32 = 1 << 5;
+const CHANGE_LANE_COLLECTION_MEMBERSHIPS: i32 = 1 << 6;
+const CHANGE_LANE_READ_MODEL: i32 = 1 << 7;
+const CHANGE_LANE_GOVERNANCE: i32 = 1 << 8;
+const CHANGE_LANE_COMMAND_STATUSES: i32 = 1 << 9;
+const CHANGE_LANE_SYSTEM_EVENTS: i32 = 1 << 10;
+const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 11;
+const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 12;
+const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 13;
+const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 14;
 const CHANGE_LANE_INVENTORY_CORE: i32 =
     CHANGE_LANE_COMPONENTS | CHANGE_LANE_CONTEXT_PROFILES | CHANGE_LANE_COMPONENT_TAGS;
+const CHANGE_LANE_COLLECTIONS: i32 = CHANGE_LANE_COLLECTION_DEFINITIONS
+    | CHANGE_LANE_COLLECTION_SOURCES
+    | CHANGE_LANE_COLLECTION_MEMBERSHIPS;
 const POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY_CORE
     | CHANGE_LANE_COMPONENT_BINDINGS
@@ -287,8 +292,8 @@ impl PostgresStore {
             pool,
             names,
             observed_change_watermark: Arc::new(AtomicU64::new(0)),
-            ingestion: FindingIngestion::new(),
-            governance: FindingGovernance::new(),
+            ingestion: Arc::new(FindingIngestion::new()),
+            governance: Arc::new(FindingGovernance::new()),
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
@@ -315,8 +320,8 @@ impl PostgresStore {
             pool: base.pool.clone(),
             names: base.names.clone(),
             observed_change_watermark: Arc::new(AtomicU64::new(base.observed_change_watermark())),
-            ingestion: base.ingestion.clone(),
-            governance: base.governance.clone(),
+            ingestion: Arc::clone(&base.ingestion),
+            governance: Arc::clone(&base.governance),
             read_model: Arc::clone(&base.read_model),
             inventory_snapshot_cache: Arc::clone(&base.inventory_snapshot_cache),
             read_model_snapshot_cache: Arc::clone(&base.read_model_snapshot_cache),
@@ -339,8 +344,8 @@ impl PostgresStore {
             pool,
             names,
             observed_change_watermark: Arc::new(AtomicU64::new(0)),
-            ingestion: FindingIngestion::new(),
-            governance: FindingGovernance::new(),
+            ingestion: Arc::new(FindingIngestion::new()),
+            governance: Arc::new(FindingGovernance::new()),
             read_model: Arc::new(FindingReadModel::new()),
             inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
             read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
@@ -379,7 +384,7 @@ impl PostgresStore {
             self.refresh_component_bindings_from_remote().await?;
         }
         if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
-            self.refresh_collections_from_remote().await?;
+            self.refresh_collections_from_remote(lane_mask).await?;
         }
         if lane_mask & CHANGE_LANE_COLLECTION_SCHEDULES != 0 {
             self.refresh_collection_scan_schedules_from_remote().await?;
@@ -446,7 +451,7 @@ impl PostgresStore {
         &mut self,
         registration: ComponentRegistration,
     ) -> Result<RegisterComponentResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.register(registration.clone());
         if result.change == RegisterComponentChange::Registered {
             sqlx::query(&format!(
@@ -458,7 +463,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
@@ -473,7 +478,7 @@ impl PostgresStore {
         &mut self,
         registration: ContextProfileRegistration,
     ) -> Result<RegisterContextProfileResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.register_context_profile(registration.clone());
         if result.change == RegisterContextProfileChange::Registered {
             sqlx::query(&format!(
@@ -493,7 +498,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres context profile insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_inventory_and_release_board_snapshot_caches();
         }
         Ok(result)
@@ -508,7 +513,7 @@ impl PostgresStore {
         &mut self,
         registration: ComponentTagRegistration,
     ) -> Result<RegisterComponentTagResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.register_component_tag(registration.clone());
         if result.change == RegisterComponentTagChange::Registered {
             sqlx::query(&format!(
@@ -520,7 +525,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component tag insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -535,7 +540,7 @@ impl PostgresStore {
         &mut self,
         registration: CollectionRegistration,
     ) -> Result<RegisterCollectionResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.register_collection(registration.clone());
         if result.change == RegisterCollectionChange::Created {
             sqlx::query(&format!(
@@ -547,7 +552,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -563,7 +568,7 @@ impl PostgresStore {
         component_key: &str,
         artifact: ArtifactRef,
     ) -> Result<BindArtifactResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.bind_artifact(component_key, artifact.clone());
         if result.change == BindArtifactChange::Bound {
             sqlx::query(&format!(
@@ -576,7 +581,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres artifact binding insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -592,7 +597,7 @@ impl PostgresStore {
         collection_key: &str,
         component_key: &str,
     ) -> Result<venom_domain::AddCollectionComponentResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.add_component_to_collection(collection_key, component_key);
         if result.change == venom_domain::AddCollectionComponentChange::Added {
             sqlx::query(&format!(
@@ -604,7 +609,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -620,7 +625,7 @@ impl PostgresStore {
         tag_key: &str,
         component_key: &str,
     ) -> Result<AssignComponentTagResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.assign_component_tag(tag_key, component_key);
         if result.change == AssignComponentTagChange::Assigned {
             sqlx::query(&format!(
@@ -632,7 +637,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component tag membership insert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -648,7 +653,7 @@ impl PostgresStore {
         collection_key: &str,
         component_key: &str,
     ) -> Result<venom_domain::RemoveCollectionComponentResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result =
             candidate_inventory.remove_component_from_collection(collection_key, component_key);
         if result.change == venom_domain::RemoveCollectionComponentChange::Removed {
@@ -661,7 +666,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -677,7 +682,7 @@ impl PostgresStore {
         collection_key: &str,
         source: CollectionSource,
     ) -> Result<ConfigureCollectionSourceResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result =
             candidate_inventory.configure_collection_source(collection_key, source.clone());
         if result.change == ConfigureCollectionSourceChange::Configured {
@@ -701,7 +706,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection source upsert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -716,7 +721,7 @@ impl PostgresStore {
         &mut self,
         collection_key: &str,
     ) -> Result<MaterializeCollectionSourceResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.materialize_collection_source(collection_key);
         if result.change == MaterializeCollectionSourceChange::Materialized {
             let mut transaction = self.begin_transaction().await?;
@@ -747,7 +752,7 @@ impl PostgresStore {
                 })?;
             }
             self.commit_transaction(transaction).await?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -765,7 +770,7 @@ impl PostgresStore {
         freshness: EvidenceFreshness,
         next_due_at_unix_ms: u64,
     ) -> Result<ConfigureCollectionScanScheduleResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.configure_collection_scan_schedule(
             collection_key,
             cadence_minutes,
@@ -787,7 +792,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres collection scan schedule upsert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -803,7 +808,7 @@ impl PostgresStore {
         component_key: &str,
         provider_key: &str,
     ) -> Result<ConfigureProviderResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.configure_provider(component_key, provider_key);
         if result.change == ConfigureProviderChange::Configured {
             sqlx::query(&format!(
@@ -818,7 +823,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres provider config upsert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -834,7 +839,7 @@ impl PostgresStore {
         component_key: &str,
         profile_key: &str,
     ) -> Result<AssignContextProfileResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.assign_context_profile(component_key, profile_key);
         if result.change == AssignContextProfileChange::Assigned {
             sqlx::query(&format!(
@@ -849,7 +854,7 @@ impl PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres component context profile upsert failed: {error}"))?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -865,7 +870,7 @@ impl PostgresStore {
         collection_key: &str,
         profile_key: &str,
     ) -> Result<AssignCollectionContextProfileResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result =
             candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
         if result.change == AssignCollectionContextProfileChange::Assigned {
@@ -883,7 +888,7 @@ impl PostgresStore {
             .map_err(|error| {
                 format!("postgres collection context profile update failed: {error}")
             })?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -899,7 +904,7 @@ impl PostgresStore {
         tag_key: &str,
         profile_key: &str,
     ) -> Result<AssignTagContextProfileResult, String> {
-        let mut candidate_inventory = self.ingestion.inventory().clone();
+        let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.assign_context_profile_for_tag(tag_key, profile_key);
         if result.change == AssignTagContextProfileChange::Assigned {
             sqlx::query(&format!(
@@ -916,7 +921,7 @@ impl PostgresStore {
             .map_err(|error| {
                 format!("postgres component tag context profile update failed: {error}")
             })?;
-            *self.ingestion.inventory_mut() = candidate_inventory;
+            *self.ingestion_mut().inventory_mut() = candidate_inventory;
         }
         Ok(result)
     }
@@ -961,9 +966,9 @@ impl PostgresStore {
         &mut self,
         report: &ProviderScanReport,
     ) -> Result<FindingChangeSet, String> {
-        let mut candidate_ingestion = self.ingestion.clone();
+        let mut candidate_ingestion = Arc::clone(&self.ingestion);
         let mut candidate_read_model = self.read_model_arc();
-        let change_set = candidate_ingestion
+        let change_set = Arc::make_mut(&mut candidate_ingestion)
             .record_scan_report(report)
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
         Arc::make_mut(&mut candidate_read_model).record_scan_report(report);
@@ -1048,9 +1053,10 @@ impl PostgresStore {
             return Err("cannot accept risk for an inactive finding".to_owned());
         }
 
-        let mut candidate_governance = self.governance.clone();
+        let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
-        let result = candidate_governance.accept_risk(finding.clone(), acceptance.clone());
+        let result =
+            Arc::make_mut(&mut candidate_governance).accept_risk(finding.clone(), acceptance.clone());
         if result.change == AcceptRiskChange::Accepted {
             let component_key = finding.component_key.clone();
             let reason = acceptance.reason.clone();
@@ -1114,7 +1120,7 @@ impl PostgresStore {
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
         let scope = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
@@ -1124,7 +1130,7 @@ impl PostgresStore {
             query,
             |finding| {
                 !matches!(
-                    self.governance.decision(finding),
+                    self.governance_ref().decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
             },
@@ -1169,7 +1175,7 @@ impl PostgresStore {
             })?;
 
             for finding in &changed {
-                self.governance
+                self.governance_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
@@ -1202,7 +1208,7 @@ impl PostgresStore {
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
         let scope = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
@@ -1212,7 +1218,7 @@ impl PostgresStore {
             query,
             |finding| {
                 !matches!(
-                    self.governance.decision(finding),
+                    self.governance_ref().decision(finding),
                     Some(FindingDecision::RiskAccepted(existing)) if existing == &acceptance
                 )
             },
@@ -1256,7 +1262,7 @@ impl PostgresStore {
             })?;
 
             for finding in &changed {
-                self.governance
+                self.governance_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
                 self.read_model_mut()
                     .accept_risk(finding.clone(), acceptance.clone());
@@ -1291,9 +1297,9 @@ impl PostgresStore {
             return Err("cannot reopen an inactive finding".to_owned());
         }
 
-        let mut candidate_governance = self.governance.clone();
+        let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
-        let result = candidate_governance.reopen(&finding);
+        let result = Arc::make_mut(&mut candidate_governance).reopen(&finding);
         if result.change == ReopenFindingChange::Reopened {
             let component_key = finding.component_key.clone();
             let occurred_at_unix_ms = current_unix_millis()?;
@@ -1356,9 +1362,10 @@ impl PostgresStore {
             return Err("cannot suppress an inactive finding".to_owned());
         }
 
-        let mut candidate_governance = self.governance.clone();
+        let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
-        let result = candidate_governance.suppress(finding.clone(), suppression.clone());
+        let result =
+            Arc::make_mut(&mut candidate_governance).suppress(finding.clone(), suppression.clone());
         if result.change == SuppressFindingChange::Suppressed {
             let component_key = finding.component_key.clone();
             let reason = suppression.reason.clone();
@@ -1423,7 +1430,7 @@ impl PostgresStore {
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
         let scope = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
@@ -1433,7 +1440,7 @@ impl PostgresStore {
             query,
             |finding| {
                 !matches!(
-                    self.governance.decision(finding),
+                    self.governance_ref().decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
             },
@@ -1479,7 +1486,7 @@ impl PostgresStore {
                 .map_err(|error| format!("postgres suppression batch commit failed: {error}"))?;
 
             for finding in &changed_findings {
-                self.governance
+                self.governance_mut()
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
@@ -1512,7 +1519,7 @@ impl PostgresStore {
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
         let scope = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .tag_scoped_artifacts(tag_key)
             .ok_or_else(|| format!("unknown tag: {tag_key}"))?;
@@ -1522,7 +1529,7 @@ impl PostgresStore {
             query,
             |finding| {
                 !matches!(
-                    self.governance.decision(finding),
+                    self.governance_ref().decision(finding),
                     Some(FindingDecision::Suppressed(existing)) if existing == &suppression
                 )
             },
@@ -1567,7 +1574,7 @@ impl PostgresStore {
             })?;
 
             for finding in &changed {
-                self.governance
+                self.governance_mut()
                     .suppress(finding.clone(), suppression.clone());
                 self.read_model_mut()
                     .suppress(finding.clone(), suppression.clone());
@@ -1600,7 +1607,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, String> {
         let scope = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .collection_scoped_artifacts(collection_key)
             .ok_or_else(|| format!("unknown collection: {collection_key}"))?;
@@ -1608,7 +1615,7 @@ impl PostgresStore {
         let targeted = self.read_model.visit_bulk_governance_finding_refs_matching(
             &scope,
             query,
-            |finding| self.governance.decision(finding).is_some(),
+            |finding| self.governance_ref().decision(finding).is_some(),
             |finding| reopened_findings.push(finding),
         );
 
@@ -1653,7 +1660,7 @@ impl PostgresStore {
                 .map_err(|error| format!("postgres reopen batch commit failed: {error}"))?;
 
             for finding in &reopened_findings {
-                self.governance.reopen(finding);
+                self.governance_mut().reopen(finding);
                 self.read_model_mut().reopen(finding);
             }
             self.governance_journal_high_watermark =
@@ -1692,18 +1699,34 @@ impl PostgresStore {
     }
 
     #[cfg(test)]
-    pub const fn governance(&self) -> &FindingGovernance {
-        &self.governance
+    pub fn governance(&self) -> &FindingGovernance {
+        self.governance.as_ref()
     }
 
     fn read_model_mut(&mut self) -> &mut FindingReadModel {
         Arc::make_mut(&mut self.read_model)
     }
 
+    fn ingestion_ref(&self) -> &FindingIngestion {
+        self.ingestion.as_ref()
+    }
+
+    fn ingestion_mut(&mut self) -> &mut FindingIngestion {
+        Arc::make_mut(&mut self.ingestion)
+    }
+
+    fn governance_ref(&self) -> &FindingGovernance {
+        self.governance.as_ref()
+    }
+
+    fn governance_mut(&mut self) -> &mut FindingGovernance {
+        Arc::make_mut(&mut self.governance)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn inventory_snapshot(&self) -> ComponentInventory {
-        self.ingestion.inventory().clone()
+        self.ingestion_ref().inventory().clone()
     }
 
     #[must_use]
@@ -1756,9 +1779,7 @@ impl PostgresStore {
 
     #[must_use]
     pub fn configured_provider(&self, component_key: &str) -> Option<&str> {
-        self.ingestion
-            .inventory()
-            .configured_provider(component_key)
+        self.ingestion_ref().inventory().configured_provider(component_key)
     }
 
     #[must_use]
@@ -1777,7 +1798,7 @@ impl PostgresStore {
         artifact: ArtifactRef,
         freshness: EvidenceFreshness,
     ) -> Result<Box<str>, String> {
-        let request = ScanPlanner::new(self.ingestion.inventory())
+        let request = ScanPlanner::new(self.ingestion_ref().inventory())
             .plan(component_key, artifact, freshness)
             .map_err(|error| error.as_str().to_owned())?;
         let command_id = next_command_id();
@@ -1836,7 +1857,7 @@ impl PostgresStore {
         collection_key: &str,
         freshness: EvidenceFreshness,
     ) -> Result<Vec<Box<str>>, String> {
-        let batch = ScanPlanner::new(self.ingestion.inventory())
+        let batch = ScanPlanner::new(self.ingestion_ref().inventory())
             .plan_collection(collection_key, freshness)
             .map_err(|error| error.as_str().to_owned())?;
 
@@ -2229,9 +2250,9 @@ impl PostgresStore {
                 .await;
         }
 
-        let mut candidate_ingestion = self.ingestion.clone();
+        let mut candidate_ingestion = Arc::clone(&self.ingestion);
         let mut candidate_read_model = self.read_model_arc();
-        let change_set = candidate_ingestion
+        let change_set = Arc::make_mut(&mut candidate_ingestion)
             .record_scan_report(&report)
             .map_err(|error| format!("provider report cannot be applied: {}", error.as_str()))?;
         Arc::make_mut(&mut candidate_read_model).record_scan_report(&report);
@@ -2314,11 +2335,11 @@ impl PostgresStore {
         now_unix_ms: u64,
         max_collections: usize,
     ) -> (Vec<DueCollectionScan>, DueCollectionScanRows, usize) {
-        let due_scans = CollectionScanScheduler::new(self.ingestion.inventory())
+        let due_scans = CollectionScanScheduler::new(self.ingestion_ref().inventory())
             .collect_due(now_unix_ms, max_collections);
-        let schedule_rows = Self::build_due_schedule_rows(self.ingestion.inventory(), &due_scans);
+        let schedule_rows = Self::build_due_schedule_rows(self.ingestion_ref().inventory(), &due_scans);
         let pending_due_remaining = self
-            .ingestion
+            .ingestion_ref()
             .inventory()
             .due_collection_keys(now_unix_ms, usize::MAX)
             .len();
@@ -2381,7 +2402,7 @@ impl PostgresStore {
     ) {
         for due_scan in due_scans {
             let _ = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .record_collection_scan_materialization(
                     due_scan.collection_key.as_ref(),
@@ -2983,9 +3004,9 @@ impl PostgresStore {
             CHANGE_LANE_COMPONENT_BINDINGS,
             CHANGE_LANE_COMPONENT_TAGS,
             CHANGE_LANE_COMPONENT_BINDINGS,
-            CHANGE_LANE_COLLECTIONS,
-            CHANGE_LANE_COLLECTIONS,
-            CHANGE_LANE_COLLECTIONS,
+            CHANGE_LANE_COLLECTION_DEFINITIONS,
+            CHANGE_LANE_COLLECTION_SOURCES,
+            CHANGE_LANE_COLLECTION_MEMBERSHIPS,
             CHANGE_LANE_COLLECTION_SCHEDULES,
             CHANGE_LANE_COMPONENT_BINDINGS,
             CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS,
@@ -3523,8 +3544,8 @@ impl PostgresStore {
     }
 
     async fn rebuild(&mut self) -> Result<(), String> {
-        self.ingestion = FindingIngestion::new();
-        self.governance = FindingGovernance::new();
+        self.ingestion = Arc::new(FindingIngestion::new());
+        self.governance = Arc::new(FindingGovernance::new());
         self.read_model = Arc::new(FindingReadModel::new());
         self.integration_runtime_config = None;
         self.provider_report_row_high_watermark = 0;
@@ -3551,9 +3572,10 @@ impl PostgresStore {
         self.load_provider_runtime_configs().await?;
         self.load_integration_runtime_config().await?;
         self.load_provider_reports().await?;
-        self.load_finding_risk_acceptances().await?;
-        self.load_finding_suppressions().await?;
-        self.governance_journal_high_watermark = self.load_governance_source_watermark().await?;
+        self.load_governance_journal_snapshot(true).await?;
+        self.governance_journal_high_watermark = self
+            .governance_journal_high_watermark
+            .max(self.load_governance_source_watermark().await?);
         self.load_scan_commands().await?;
         self.load_pending_integration_events().await?;
         self.load_system_events().await?;
@@ -3634,7 +3656,9 @@ impl PostgresStore {
 
     async fn refresh_inventory_core_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(self.ingestion.inventory_arc());
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(
+            self.ingestion_ref().inventory_arc(),
+        ));
         if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
             backend.load_components().await?;
         }
@@ -3651,9 +3675,9 @@ impl PostgresStore {
 
     async fn refresh_component_bindings_from_remote(&mut self) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        let mut inventory = Arc::unwrap_or_clone(self.ingestion.inventory_arc());
+        let mut inventory = Arc::unwrap_or_clone(self.ingestion_ref().inventory_arc());
         inventory.reset_component_bindings_for_rebuild();
-        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
         backend.load_component_context_profiles().await?;
         backend.load_component_tag_memberships().await?;
         backend.load_artifact_bindings().await?;
@@ -3662,15 +3686,31 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn refresh_collections_from_remote(&mut self) -> Result<(), String> {
+    async fn refresh_collections_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        let mut inventory = Arc::unwrap_or_clone(self.ingestion.inventory_arc());
-        inventory.reset_collections_for_rebuild();
-        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
-        backend.load_collections().await?;
-        backend.load_collection_sources().await?;
-        backend.load_collection_memberships().await?;
-        backend.load_collection_scan_schedules().await?;
+        let mut inventory = Arc::unwrap_or_clone(self.ingestion_ref().inventory_arc());
+        if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
+            inventory.reset_collections_for_rebuild();
+            backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
+            backend.load_collections().await?;
+            backend.load_collection_sources().await?;
+            backend.load_collection_memberships().await?;
+            backend.load_collection_scan_schedules().await?;
+        } else {
+            if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
+                inventory.reset_collection_sources_for_rebuild();
+            }
+            if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
+                inventory.reset_collection_memberships_for_rebuild();
+            }
+            backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
+            if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
+                backend.load_collection_sources().await?;
+            }
+            if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
+                backend.load_collection_memberships().await?;
+            }
+        }
         self.ingestion = backend.ingestion;
         self.refresh_inventory_snapshot_cache();
         Ok(())
@@ -3690,8 +3730,8 @@ impl PostgresStore {
 
     async fn refresh_read_model_from_remote(&mut self, lane_mask: i32) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = self.ingestion.clone();
-        backend.governance = self.governance.clone();
+        backend.ingestion = Arc::clone(&self.ingestion);
+        backend.governance = Arc::clone(&self.governance);
         backend.provider_report_row_high_watermark = self.provider_report_row_high_watermark;
         backend.governance_journal_high_watermark = self.governance_journal_high_watermark;
         backend.read_model = Arc::clone(&self.read_model);
@@ -3756,7 +3796,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres components load failed: {error}"))?;
         for (component_key, name) in components {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .register(ComponentRegistration::new(component_key, name));
             if result.change == RegisterComponentChange::Rejected {
@@ -3778,7 +3818,7 @@ impl PostgresStore {
         for (collection_key, name, context_profile_key) in collections {
             let collection_key_boxed = collection_key.clone();
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .register_collection(CollectionRegistration::new(collection_key, name));
             if result.change == RegisterCollectionChange::Rejected {
@@ -3786,7 +3826,7 @@ impl PostgresStore {
             }
             if let Some(profile_key) = context_profile_key {
                 let result = self
-                    .ingestion
+                    .ingestion_mut()
                     .inventory_mut()
                     .assign_context_profile_for_collection(&collection_key_boxed, &profile_key);
                 if result.change == AssignCollectionContextProfileChange::Rejected {
@@ -3820,7 +3860,7 @@ impl PostgresStore {
                     .collect::<Vec<_>>(),
             )?;
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .configure_collection_source(&collection_key, source);
             if result.change == ConfigureCollectionSourceChange::Rejected {
@@ -3879,7 +3919,7 @@ impl PostgresStore {
                 registration = registration.with_non_privileged_user(value);
             }
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .register_context_profile(registration);
             if result.change == RegisterContextProfileChange::Rejected {
@@ -3899,7 +3939,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres component context profiles load failed: {error}"))?;
         for (component_key, profile_key) in assignments {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .assign_context_profile(&component_key, &profile_key);
             if result.change == AssignContextProfileChange::Rejected {
@@ -3922,7 +3962,7 @@ impl PostgresStore {
         for (tag_key, name, context_profile_key) in tags {
             let tag_key_boxed = tag_key.clone();
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .register_component_tag(ComponentTagRegistration::new(tag_key, name));
             if result.change == RegisterComponentTagChange::Rejected {
@@ -3930,7 +3970,7 @@ impl PostgresStore {
             }
             if let Some(profile_key) = context_profile_key {
                 let result = self
-                    .ingestion
+                    .ingestion_mut()
                     .inventory_mut()
                     .assign_context_profile_for_tag(&tag_key_boxed, &profile_key);
                 if result.change == AssignTagContextProfileChange::Rejected {
@@ -3956,7 +3996,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres component tag memberships load failed: {error}"))?;
         for (tag_key, component_key) in memberships {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .assign_component_tag(&tag_key, &component_key);
             if result.change == AssignComponentTagChange::Rejected {
@@ -3981,7 +4021,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres collection memberships load failed: {error}"))?;
         for (collection_key, component_key) in memberships {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .add_component_to_collection(&collection_key, &component_key);
             if result.change == venom_domain::AddCollectionComponentChange::Rejected {
@@ -4012,7 +4052,7 @@ impl PostgresStore {
         ) in schedules
         {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .configure_collection_scan_schedule(
                     &collection_key,
@@ -4029,7 +4069,7 @@ impl PostgresStore {
             }
             if let Some(materialized_at) = last_materialized_at_unix_ms {
                 let materialized_result = self
-                    .ingestion
+                    .ingestion_mut()
                     .inventory_mut()
                     .record_collection_scan_materialization(
                         &collection_key,
@@ -4066,7 +4106,7 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres artifact bindings load failed: {error}"))?;
         for (component_key, artifact_kind, artifact_identity) in bindings {
-            let result = self.ingestion.inventory_mut().bind_artifact(
+            let result = self.ingestion_mut().inventory_mut().bind_artifact(
                 component_key.as_ref(),
                 ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
             );
@@ -4198,7 +4238,7 @@ impl PostgresStore {
         id: i64,
         report: &ProviderScanReport,
     ) -> Result<(), String> {
-        self.ingestion.replay_scan_report(report).map_err(|error| {
+        self.ingestion_mut().replay_scan_report(report).map_err(|error| {
             format!("postgres provider report replay failed: {}", error.as_str())
         })?;
         self.read_model_mut().record_scan_report(report);
@@ -4208,124 +4248,33 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_finding_risk_acceptances(&mut self) -> Result<(), String> {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<i64>,
-            ),
-        >(&format!(
+    async fn load_governance_journal_snapshot(
+        &mut self,
+        apply_to_governance: bool,
+    ) -> Result<(), String> {
+        let rows = sqlx::query_as::<_, GovernanceJournalRow>(&format!(
             concat!(
-                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, reason, until_unix_ms ",
-                "FROM {} ORDER BY created_at"
+                "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
+                "FROM (",
+                "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms, ",
+                "ROW_NUMBER() OVER (",
+                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
+                "ORDER BY id DESC",
+                ") AS row_rank ",
+                "FROM {}",
+                ") latest WHERE row_rank = 1 ORDER BY id"
             ),
-            self.names.finding_risk_acceptances
+            self.names.finding_governance_journal
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres finding risk acceptances load failed: {error}"))?;
+        .map_err(|error| format!("postgres governance journal snapshot load failed: {error}"))?;
 
-        for (
-            component_key,
-            artifact_kind,
-            artifact_identity,
-            vulnerability_id,
-            package_name,
-            package_version,
-            package_purl,
-            reason,
-            until_unix_ms,
-        ) in rows
-        {
-            let finding = FindingRef::new(
-                component_key,
-                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
-                vulnerability_id,
-                venom_domain::PackageCoordinate {
-                    name: package_name.into_boxed_str(),
-                    version: package_version.into_boxed_str(),
-                    purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
-                },
-            );
-            let acceptance = match until_unix_ms {
-                Some(until_unix_ms) => RiskAcceptance::new(reason).until_unix_ms(
-                    u64::try_from(until_unix_ms).map_err(|_| {
-                        "postgres finding risk acceptance until must be positive".to_owned()
-                    })?,
-                ),
-                None => RiskAcceptance::new(reason),
-            };
-            self.governance
-                .replay_risk_acceptance(finding.clone(), acceptance.clone());
-            self.read_model_mut()
-                .replay_risk_acceptance(finding, acceptance);
+        for row in rows {
+            self.apply_governance_journal_row(row, apply_to_governance)?;
         }
-
-        Ok(())
-    }
-
-    async fn load_finding_suppressions(&mut self) -> Result<(), String> {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-                String,
-            ),
-        >(&format!(
-            concat!(
-                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, reason ",
-                "FROM {} ORDER BY created_at"
-            ),
-            self.names.finding_suppressions
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres finding suppressions load failed: {error}"))?;
-
-        for (
-            component_key,
-            artifact_kind,
-            artifact_identity,
-            vulnerability_id,
-            package_name,
-            package_version,
-            package_purl,
-            reason,
-        ) in rows
-        {
-            let finding = FindingRef::new(
-                component_key,
-                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
-                vulnerability_id,
-                venom_domain::PackageCoordinate {
-                    name: package_name.into_boxed_str(),
-                    version: package_version.into_boxed_str(),
-                    purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
-                },
-            );
-            let suppression = Suppression::new(reason);
-            self.governance
-                .replay_suppression(finding.clone(), suppression.clone());
-            self.read_model_mut()
-                .replay_suppression(finding, suppression);
-        }
-
         Ok(())
     }
 
@@ -4338,7 +4287,15 @@ impl PostgresStore {
             concat!(
                 "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
                 "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
-                "FROM {} WHERE id > $1 ORDER BY id"
+                "FROM (",
+                "SELECT id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms, ",
+                "ROW_NUMBER() OVER (",
+                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
+                "ORDER BY id DESC",
+                ") AS row_rank ",
+                "FROM {} WHERE id > $1",
+                ") latest WHERE row_rank = 1 ORDER BY id"
             ),
             self.names.finding_governance_journal
         ))
@@ -4500,7 +4457,7 @@ impl PostgresStore {
                     })?),
                 };
                 if apply_to_governance {
-                    self.governance
+                    self.governance_mut()
                         .replay_risk_acceptance(finding.clone(), acceptance.clone());
                 }
                 self.read_model_mut()
@@ -4511,7 +4468,7 @@ impl PostgresStore {
                     "postgres governance journal suppression missing reason".to_owned()
                 })?);
                 if apply_to_governance {
-                    self.governance
+                    self.governance_mut()
                         .replay_suppression(finding.clone(), suppression.clone());
                 }
                 self.read_model_mut()
@@ -4519,7 +4476,7 @@ impl PostgresStore {
             }
             "reopened" => {
                 if apply_to_governance {
-                    self.governance.replay_reopen(&finding);
+                    self.governance_mut().replay_reopen(&finding);
                 }
                 self.read_model_mut().replay_reopen(&finding);
             }
@@ -4547,7 +4504,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres provider runtime configs load failed: {error}"))?;
         for (component_key, provider_key) in configs {
             let result = self
-                .ingestion
+                .ingestion_mut()
                 .inventory_mut()
                 .configure_provider(&component_key, provider_key);
             if result.change == ConfigureProviderChange::Rejected {
@@ -4980,7 +4937,7 @@ impl PostgresStore {
     }
 
     fn refresh_inventory_snapshot_cache(&mut self) {
-        self.inventory_snapshot_cache = self.ingestion.inventory_arc();
+        self.inventory_snapshot_cache = self.ingestion_ref().inventory_arc();
     }
 
     fn refresh_read_model_snapshot_cache(&mut self) {
@@ -5375,7 +5332,8 @@ impl PostgresReadSnapshotLoader {
             inventory
         };
         let inventory = if lane_mask & CHANGE_LANE_COLLECTIONS != 0 {
-            self.load_collection_inventory_snapshot(inventory).await?
+            self.load_collection_inventory_snapshot(inventory, lane_mask)
+                .await?
         } else {
             inventory
         };
@@ -5500,7 +5458,7 @@ impl PostgresReadSnapshotLoader {
         lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(base_inventory);
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(base_inventory));
         if lane_mask & CHANGE_LANE_COMPONENTS != 0 {
             backend.load_components().await?;
         }
@@ -5568,7 +5526,7 @@ impl PostgresReadSnapshotLoader {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         let mut inventory = Arc::unwrap_or_clone(inventory);
         inventory.reset_component_bindings_for_rebuild();
-        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
         backend.load_component_context_profiles().await?;
         backend.load_component_tag_memberships().await?;
         backend.load_artifact_bindings().await?;
@@ -5579,15 +5537,32 @@ impl PostgresReadSnapshotLoader {
     async fn load_collection_inventory_snapshot(
         &self,
         inventory: Arc<ComponentInventory>,
+        lane_mask: i32,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
         let mut inventory = Arc::unwrap_or_clone(inventory);
-        inventory.reset_collections_for_rebuild();
-        backend.ingestion = FindingIngestion::from_inventory_arc(Arc::new(inventory));
-        backend.load_collections().await?;
-        backend.load_collection_sources().await?;
-        backend.load_collection_memberships().await?;
-        backend.load_collection_scan_schedules().await?;
+        if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
+            inventory.reset_collections_for_rebuild();
+            backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
+            backend.load_collections().await?;
+            backend.load_collection_sources().await?;
+            backend.load_collection_memberships().await?;
+            backend.load_collection_scan_schedules().await?;
+        } else {
+            if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
+                inventory.reset_collection_sources_for_rebuild();
+            }
+            if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
+                inventory.reset_collection_memberships_for_rebuild();
+            }
+            backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
+            if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
+                backend.load_collection_sources().await?;
+            }
+            if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
+                backend.load_collection_memberships().await?;
+            }
+        }
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
     }
@@ -5597,7 +5572,7 @@ impl PostgresReadSnapshotLoader {
         inventory: Arc<ComponentInventory>,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(inventory));
         backend.load_collection_scan_schedules().await?;
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
@@ -5608,7 +5583,7 @@ impl PostgresReadSnapshotLoader {
         inventory: Arc<ComponentInventory>,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(inventory));
         backend.load_provider_runtime_configs().await?;
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
@@ -5623,7 +5598,7 @@ impl PostgresReadSnapshotLoader {
         lane_mask: i32,
     ) -> Result<Arc<FindingReadModel>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        backend.ingestion = FindingIngestion::from_inventory_arc(inventory);
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(inventory));
         backend.provider_report_row_high_watermark = base_read_model_source_watermark;
         backend.governance_journal_high_watermark = base_governance_source_watermark;
         backend.read_model = base_read_model;
@@ -6173,6 +6148,8 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 #[cfg(test)]
 mod tests {
     use super::CHANGE_LANE_CONTEXT_PROFILES;
+    use super::CHANGE_LANE_COLLECTION_MEMBERSHIPS;
+    use super::CHANGE_LANE_COLLECTION_SOURCES;
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
     use super::PostgresStore;
@@ -6186,7 +6163,7 @@ mod tests {
         ComponentTagRegistration, ContextProfileRegistration, EvidenceFreshness,
         FindingGovernanceState, FindingProvider, FindingProviderError, IntegrationEvent,
         IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
-        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance,
+        PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance, Suppression,
         RunNextScanResult, ScanCommandStatus, SystemEventKind,
     };
 
@@ -6209,6 +6186,16 @@ mod tests {
             .register_component(ComponentRegistration::new(
                 "component:payments-api",
                 "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+    }
+
+    async fn register_portal_component(backend: &mut PostgresStore) {
+        let _ = backend
+            .register_component(ComponentRegistration::new(
+                "component:customer-portal",
+                "Customer Portal",
             ))
             .await
             .expect("registration should persist");
@@ -6304,7 +6291,7 @@ mod tests {
             .expect("registration should persist");
 
         let snapshot_before = backend.inventory_snapshot_arc();
-        let live_before = backend.ingestion.inventory_arc();
+        let live_before = backend.ingestion_ref().inventory_arc();
         assert!(Arc::ptr_eq(&snapshot_before, &live_before));
 
         let _ = backend
@@ -6313,7 +6300,7 @@ mod tests {
             .expect("artifact binding should persist");
 
         let snapshot_after = backend.inventory_snapshot_arc();
-        let live_after = backend.ingestion.inventory_arc();
+        let live_after = backend.ingestion_ref().inventory_arc();
         assert!(Arc::ptr_eq(&snapshot_after, &live_after));
         assert!(!Arc::ptr_eq(&snapshot_before, &snapshot_after));
         assert!(!snapshot_before.component_owns_artifact("component:payments-api", &artifact()));
@@ -6440,6 +6427,57 @@ mod tests {
         ));
         assert_eq!(backend.pending_integration_events().len(), 0);
         assert_eq!(fork.pending_integration_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn postgres_live_lanes_share_forked_state_residency() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("forked_state_residency");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-29");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let finding = venom_domain::FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+
+        let mut fork = PostgresStore::fork_from(&backend);
+        assert!(Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
+        assert!(Arc::ptr_eq(&backend.governance, &fork.governance));
+
+        let _ = fork
+            .accept_risk(finding, RiskAcceptance::new("approved for now"))
+            .await
+            .expect("forked risk acceptance should persist");
+
+        assert!(!Arc::ptr_eq(&backend.governance, &fork.governance));
+        assert!(Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
     }
 
     #[tokio::test]
@@ -6649,6 +6687,284 @@ mod tests {
                 .map(|tag| tag.tag_key)
                 .collect::<Vec<_>>(),
             vec![Box::<str>::from("tag:corp-api")]
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_rebuild_restores_governance_from_journal_snapshot() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("governance_journal_snapshot");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-29");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        let finding = venom_domain::FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+        let _ = backend
+            .accept_risk(finding.clone(), RiskAcceptance::new("approved for now"))
+            .await
+            .expect("risk acceptance should persist");
+
+        sqlx::query(&format!("DELETE FROM {}", backend.names.finding_risk_acceptances))
+            .execute(&backend.pool)
+            .await
+            .expect("legacy acceptances table should be clearable");
+        sqlx::query(&format!("DELETE FROM {}", backend.names.finding_suppressions))
+            .execute(&backend.pool)
+            .await
+            .expect("legacy suppressions table should be clearable");
+
+        let reopened = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+
+        assert!(reopened.governance().decision(&finding).is_some());
+        assert_eq!(
+            reopened
+                .read_model_arc()
+                .query_active_findings(
+                    &venom_domain::ActiveFindingsQuery::new("component:payments-api", artifact())
+                        .with_governance_state(venom_domain::FindingGovernanceState::RiskAccepted)
+                )
+                .total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_governance_delta_refresh_replays_only_latest_effective_rows() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("governance_delta_latest");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-29");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+        let finding = venom_domain::FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        );
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable");
+        let snapshot_base = snapshot_base(&backend);
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let _ = writer
+            .accept_risk(finding.clone(), RiskAcceptance::new("approved for now"))
+            .await
+            .expect("risk acceptance should persist");
+        let _ = writer
+            .suppress_finding(finding.clone(), Suppression::new("duplicate downstream finding"))
+            .await
+            .expect("suppression should persist");
+
+        let refreshed = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load governance delta");
+
+        assert!(
+            refreshed.governance_source_watermark > 0,
+            "governance watermark should advance after delta replay"
+        );
+        assert_eq!(
+            refreshed
+                .read_model
+                .query_active_findings(
+                    &venom_domain::ActiveFindingsQuery::new(
+                        "component:payments-api",
+                        artifact(),
+                    )
+                    .with_governance_state(venom_domain::FindingGovernanceState::Suppressed),
+                )
+                .total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_read_snapshot_reloads_collection_sub_lanes_incrementally() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_collection_sub_lanes");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        register_portal_component(&mut backend).await;
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.06",
+                "Release 2026.06",
+            ))
+            .await
+            .expect("collection registration should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.06", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after collection registration");
+        let snapshot_base = snapshot_base(&backend);
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let _ = writer
+            .configure_collection_source(
+                "release:2026.06",
+                CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                    CollectionSourceMode::Replace,
+                    vec![Box::<str>::from("component:payments-api")],
+                )),
+            )
+            .await
+            .expect("collection source should persist");
+
+        let source_watermark = loader
+            .current_change_watermark()
+            .await
+            .expect("current watermark should advance after collection source update");
+        let source_lane_mask = loader
+            .changed_lane_mask(since_change_watermark, source_watermark)
+            .await
+            .expect("collection source lane mask should be readable");
+        assert_ne!(source_lane_mask & CHANGE_LANE_COLLECTION_SOURCES, 0);
+        assert_eq!(source_lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS, 0);
+
+        let refreshed_after_source = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load collection source delta");
+        assert!(
+            refreshed_after_source
+                .inventory
+                .collection_source("release:2026.06")
+                .is_some()
+        );
+        assert_eq!(
+            refreshed_after_source
+                .inventory
+                .collection_members("release:2026.06")
+                .expect("members should remain visible"),
+            vec![Box::<str>::from("component:payments-api")]
+        );
+
+        let next_base = PostgresReadSnapshotBase::new(
+            Arc::clone(&refreshed_after_source.inventory),
+            Arc::clone(&refreshed_after_source.read_model),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: refreshed_after_source.read_model_source_watermark,
+                governance_source_watermark: refreshed_after_source.governance_source_watermark,
+                system_event_index: Arc::clone(&refreshed_after_source.system_event_index),
+                system_event_source_cursor: refreshed_after_source
+                    .system_event_source_cursor
+                    .clone(),
+                command_statuses: Arc::clone(&refreshed_after_source.command_statuses),
+                command_status_source_cursor: refreshed_after_source
+                    .command_status_source_cursor
+                    .clone(),
+            },
+        );
+
+        let _ = writer
+            .add_component_to_collection("release:2026.06", "component:customer-portal")
+            .await
+            .expect("second collection membership should persist");
+        let membership_watermark = loader
+            .current_change_watermark()
+            .await
+            .expect("current watermark should advance after collection membership update");
+        let membership_lane_mask = loader
+            .changed_lane_mask(refreshed_after_source.change_watermark, membership_watermark)
+            .await
+            .expect("collection membership lane mask should be readable");
+        assert_ne!(
+            membership_lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS,
+            0
+        );
+        assert_eq!(membership_lane_mask & CHANGE_LANE_COLLECTION_SOURCES, 0);
+
+        let refreshed_after_membership = loader
+            .load(refreshed_after_source.change_watermark, next_base)
+            .await
+            .expect("detached fresh read should load collection membership delta");
+        assert_eq!(
+            refreshed_after_membership
+                .inventory
+                .collection_members("release:2026.06")
+                .expect("members should reload"),
+            vec![
+                Box::<str>::from("component:customer-portal"),
+                Box::<str>::from("component:payments-api")
+            ]
+        );
+        assert!(
+            refreshed_after_membership
+                .inventory
+                .collection_source("release:2026.06")
+                .is_some()
         );
     }
 

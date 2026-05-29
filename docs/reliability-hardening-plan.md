@@ -218,6 +218,22 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W203-postgres-live-state-fork-compaction`
+    Share forked Postgres live lane state for ingestion and governance through
+    copy-on-write `Arc` ownership so state and volatile lanes do not duplicate
+    those hot resident maps eagerly.
+75. `W204-governance-journal-bootstrap-unification`
+    Rebuild Postgres governance state from the governance journal snapshot
+    instead of depending on legacy acceptance and suppression tables at open.
+76. `W205-read-model-governance-delta-narrowing`
+    Refresh detached and live Postgres read-model governance state from the
+    latest effective journal row per finding since the current watermark.
+77. `W206-collection-sub-lane-refresh`
+    Split collection refresh into narrower durable sub-lanes so collection
+    source and membership changes do not always reload the whole subgraph.
+78. `W207-system-event-window-cache-shaping`
+    Cache recent operator-event windows inside the truthful query index so
+    category pages and local merges stop re-filtering retained events.
 74. `W180-system-event-category-window-truth`
     Keep one retained operator event store while restoring truthful recent
     category pages instead of filtering only the global recent window.
