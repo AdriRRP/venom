@@ -6155,6 +6155,7 @@ mod tests {
     use super::CHANGE_LANE_COLLECTION_MEMBERSHIPS;
     use super::CHANGE_LANE_COLLECTION_SOURCES;
     use super::CHANGE_LANE_CONTEXT_PROFILES;
+    use super::LoadedPostgresReadSnapshot;
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
     use super::PostgresStore;
@@ -6219,6 +6220,37 @@ mod tests {
                 command_status_source_cursor: backend.command_status_source_cursor(),
             },
         )
+    }
+
+    fn loaded_snapshot_base(snapshot: &LoadedPostgresReadSnapshot) -> PostgresReadSnapshotBase {
+        PostgresReadSnapshotBase::new(
+            Arc::clone(&snapshot.inventory),
+            Arc::clone(&snapshot.read_model),
+            PostgresReadSnapshotSources {
+                read_model_source_watermark: snapshot.read_model_source_watermark,
+                governance_source_watermark: snapshot.governance_source_watermark,
+                system_event_index: Arc::clone(&snapshot.system_event_index),
+                system_event_source_cursor: snapshot.system_event_source_cursor.clone(),
+                command_statuses: Arc::clone(&snapshot.command_statuses),
+                command_status_source_cursor: snapshot.command_status_source_cursor.clone(),
+            },
+        )
+    }
+
+    async fn register_release_collection_fixture(backend: &mut PostgresStore) {
+        register_payments_component(backend).await;
+        register_portal_component(backend).await;
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.06",
+                "Release 2026.06",
+            ))
+            .await
+            .expect("collection registration should persist");
+        let _ = backend
+            .add_component_to_collection("release:2026.06", "component:payments-api")
+            .await
+            .expect("collection membership should persist");
     }
 
     #[test]
@@ -6858,19 +6890,7 @@ mod tests {
         let mut backend = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should open");
-        register_payments_component(&mut backend).await;
-        register_portal_component(&mut backend).await;
-        let _ = backend
-            .register_collection(CollectionRegistration::new(
-                "release:2026.06",
-                "Release 2026.06",
-            ))
-            .await
-            .expect("collection registration should persist");
-        let _ = backend
-            .add_component_to_collection("release:2026.06", "component:payments-api")
-            .await
-            .expect("collection membership should persist");
+        register_release_collection_fixture(&mut backend).await;
 
         let loader = backend.read_snapshot_loader();
         let since_change_watermark = backend
@@ -6922,22 +6942,7 @@ mod tests {
             vec![Box::<str>::from("component:payments-api")]
         );
 
-        let next_base = PostgresReadSnapshotBase::new(
-            Arc::clone(&refreshed_after_source.inventory),
-            Arc::clone(&refreshed_after_source.read_model),
-            PostgresReadSnapshotSources {
-                read_model_source_watermark: refreshed_after_source.read_model_source_watermark,
-                governance_source_watermark: refreshed_after_source.governance_source_watermark,
-                system_event_index: Arc::clone(&refreshed_after_source.system_event_index),
-                system_event_source_cursor: refreshed_after_source
-                    .system_event_source_cursor
-                    .clone(),
-                command_statuses: Arc::clone(&refreshed_after_source.command_statuses),
-                command_status_source_cursor: refreshed_after_source
-                    .command_status_source_cursor
-                    .clone(),
-            },
-        );
+        let next_base = loaded_snapshot_base(&refreshed_after_source);
 
         let _ = writer
             .add_component_to_collection("release:2026.06", "component:customer-portal")
