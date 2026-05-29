@@ -209,16 +209,18 @@ impl SystemEventQueryIndex {
     pub fn from_newest_first<'a>(events: impl IntoIterator<Item = &'a SystemEvent>) -> Self {
         let mut index = Self::new();
         for event in events {
-            index.push_newest_shared(Arc::new(event.clone()));
+            let shared = Arc::new(event.clone());
+            index.push_newest_shared(&shared);
         }
         index
     }
 
     pub fn push_newest(&mut self, event: SystemEvent) {
-        self.push_newest_shared(Arc::new(event));
+        let shared = Arc::new(event);
+        self.push_newest_shared(&shared);
     }
 
-    fn push_newest_shared(&mut self, event: Arc<SystemEvent>) {
+    fn push_newest_shared(&mut self, event: &Arc<SystemEvent>) {
         if self
             .retained_event_refs
             .contains_key(event.event_id.as_ref())
