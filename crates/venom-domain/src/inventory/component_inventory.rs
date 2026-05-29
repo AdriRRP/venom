@@ -1081,6 +1081,20 @@ impl ComponentInventory {
         self.collections.clear();
     }
 
+    /// Clear only collection source state before one source-table rebuild.
+    pub fn reset_collection_sources_for_rebuild(&mut self) {
+        for collection in self.collections.values_mut() {
+            collection.source = None;
+        }
+    }
+
+    /// Clear only collection membership state before one membership-table rebuild.
+    pub fn reset_collection_memberships_for_rebuild(&mut self) {
+        for collection in self.collections.values_mut() {
+            collection.component_keys.clear();
+        }
+    }
+
     /// Register one component under management.
     #[must_use]
     pub fn register(&mut self, registration: ComponentRegistration) -> RegisterComponentResult {
