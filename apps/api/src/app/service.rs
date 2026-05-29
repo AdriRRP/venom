@@ -739,11 +739,10 @@ impl ApiApplication {
     }
 
     pub fn rebase_postgres_live_sources_from(&mut self, source: &Self) {
-        match (&mut self.backend, &source.backend) {
-            (ApiStore::Postgres(target), ApiStore::Postgres(source)) => {
-                target.rebase_live_sources_from(source);
-            }
-            _ => {}
+        if let (ApiStore::Postgres(target), ApiStore::Postgres(source)) =
+            (&mut self.backend, &source.backend)
+        {
+            target.rebase_live_sources_from(source);
         }
     }
 

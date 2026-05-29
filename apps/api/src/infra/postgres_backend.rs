@@ -367,7 +367,8 @@ impl PostgresStore {
         self.inventory_snapshot_cache = Arc::clone(&source.inventory_snapshot_cache);
         self.read_model_snapshot_cache = Arc::clone(&source.read_model_snapshot_cache);
         self.inventory_definition_source_watermarks = source.inventory_definition_source_watermarks;
-        self.integration_runtime_config = source.integration_runtime_config.clone();
+        self.integration_runtime_config
+            .clone_from(&source.integration_runtime_config);
         self.provider_report_row_high_watermark = source.provider_report_row_high_watermark;
         self.governance_journal_high_watermark = source.governance_journal_high_watermark;
         self.commands = Arc::clone(&source.commands);
