@@ -2131,6 +2131,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
     async fn postgres_publication_lane_is_ephemeral_until_taken() {
         let Some(database_url) = postgres_test_url() else {
             return;
