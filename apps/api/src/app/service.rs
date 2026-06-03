@@ -517,6 +517,7 @@ struct MergedSystemEventSnapshot {
     runtime: Arc<SystemEventQueryIndex>,
     state_windows: venom_domain::SystemEventRecentWindows,
     runtime_windows: venom_domain::SystemEventRecentWindows,
+    merged_windows: venom_domain::SystemEventRecentWindows,
     merged: Arc<SystemEventQueryIndex>,
 }
 
@@ -542,6 +543,10 @@ impl LocalStore {
                         &snapshot.runtime_windows,
                         &runtime_delta.recent_windows(),
                     );
+                    let merged_windows = merge_system_event_recent_windows(
+                        &snapshot.merged_windows,
+                        &runtime_delta.recent_windows(),
+                    );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
                         &runtime_delta,
@@ -551,16 +556,43 @@ impl LocalStore {
                         runtime,
                         state_windows: snapshot.state_windows.clone(),
                         runtime_windows,
+                        merged_windows,
                         merged: Arc::clone(&merged),
                     });
                     return merged;
                 }
-                (snapshot.state_windows.clone(), runtime.recent_windows())
+                let runtime_windows = runtime.recent_windows();
+                let merged_windows = extend_or_merge_system_event_recent_windows(
+                    &snapshot.merged_windows,
+                    &snapshot.state_windows,
+                    &snapshot.runtime_windows,
+                    &runtime_windows,
+                );
+                let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
+                    merge_system_event_window_totals(
+                        &state.window_totals(),
+                        &runtime.window_totals(),
+                    ),
+                    merged_windows.clone(),
+                ));
+                *cache = Some(MergedSystemEventSnapshot {
+                    state,
+                    runtime,
+                    state_windows: snapshot.state_windows.clone(),
+                    runtime_windows,
+                    merged_windows,
+                    merged: Arc::clone(&merged),
+                });
+                return merged;
             }
             Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
                 if let Some(state_delta) = state.delta_since(snapshot.state.as_ref()) {
                     let state_windows = merge_system_event_recent_windows(
                         &snapshot.state_windows,
+                        &state_delta.recent_windows(),
+                    );
+                    let merged_windows = merge_system_event_recent_windows(
+                        &snapshot.merged_windows,
                         &state_delta.recent_windows(),
                     );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
@@ -572,23 +604,48 @@ impl LocalStore {
                         runtime,
                         state_windows,
                         runtime_windows: snapshot.runtime_windows.clone(),
+                        merged_windows,
                         merged: Arc::clone(&merged),
                     });
                     return merged;
                 }
-                (state.recent_windows(), snapshot.runtime_windows.clone())
+                let state_windows = state.recent_windows();
+                let merged_windows = extend_or_merge_system_event_recent_windows(
+                    &snapshot.merged_windows,
+                    &snapshot.runtime_windows,
+                    &snapshot.state_windows,
+                    &state_windows,
+                );
+                let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
+                    merge_system_event_window_totals(
+                        &state.window_totals(),
+                        &runtime.window_totals(),
+                    ),
+                    merged_windows.clone(),
+                ));
+                *cache = Some(MergedSystemEventSnapshot {
+                    state,
+                    runtime,
+                    state_windows,
+                    runtime_windows: snapshot.runtime_windows.clone(),
+                    merged_windows,
+                    merged: Arc::clone(&merged),
+                });
+                return merged;
             }
             _ => (state.recent_windows(), runtime.recent_windows()),
         };
+        let merged_windows = merge_system_event_recent_windows(&state_windows, &runtime_windows);
         let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
             merge_system_event_window_totals(&state.window_totals(), &runtime.window_totals()),
-            merge_system_event_recent_windows(&state_windows, &runtime_windows),
+            merged_windows.clone(),
         ));
         *cache = Some(MergedSystemEventSnapshot {
             state,
             runtime,
             state_windows,
             runtime_windows,
+            merged_windows,
             merged: Arc::clone(&merged),
         });
         merged
@@ -633,6 +690,58 @@ fn merge_system_event_recent_windows(
     }
 }
 
+fn extend_or_merge_system_event_recent_windows(
+    cached_merged: &venom_domain::SystemEventRecentWindows,
+    unchanged_peer: &venom_domain::SystemEventRecentWindows,
+    changed_previous: &venom_domain::SystemEventRecentWindows,
+    changed_current: &venom_domain::SystemEventRecentWindows,
+) -> venom_domain::SystemEventRecentWindows {
+    venom_domain::SystemEventRecentWindows {
+        recent_events: extend_or_merge_recent_arc_events(
+            &cached_merged.recent_events,
+            &unchanged_peer.recent_events,
+            &changed_previous.recent_events,
+            &changed_current.recent_events,
+        ),
+        recent_scheduler_events: extend_or_merge_recent_arc_events(
+            &cached_merged.recent_scheduler_events,
+            &unchanged_peer.recent_scheduler_events,
+            &changed_previous.recent_scheduler_events,
+            &changed_current.recent_scheduler_events,
+        ),
+        recent_command_events: extend_or_merge_recent_arc_events(
+            &cached_merged.recent_command_events,
+            &unchanged_peer.recent_command_events,
+            &changed_previous.recent_command_events,
+            &changed_current.recent_command_events,
+        ),
+        recent_governance_events: extend_or_merge_recent_arc_events(
+            &cached_merged.recent_governance_events,
+            &unchanged_peer.recent_governance_events,
+            &changed_previous.recent_governance_events,
+            &changed_current.recent_governance_events,
+        ),
+        recent_publication_events: extend_or_merge_recent_arc_events(
+            &cached_merged.recent_publication_events,
+            &unchanged_peer.recent_publication_events,
+            &changed_previous.recent_publication_events,
+            &changed_current.recent_publication_events,
+        ),
+    }
+}
+
+fn extend_or_merge_recent_arc_events(
+    cached_merged: &[Arc<SystemEvent>],
+    unchanged_peer: &[Arc<SystemEvent>],
+    changed_previous: &[Arc<SystemEvent>],
+    changed_current: &[Arc<SystemEvent>],
+) -> Vec<Arc<SystemEvent>> {
+    if let Some(delta) = newer_recent_arc_prefix_since(changed_current, changed_previous) {
+        return merge_recent_arc_events(cached_merged, &delta);
+    }
+    merge_recent_arc_events(unchanged_peer, changed_current)
+}
+
 fn merge_recent_arc_events(
     left: &[Arc<SystemEvent>],
     right: &[Arc<SystemEvent>],
@@ -671,6 +780,28 @@ fn merge_recent_arc_events(
     }
 
     merged
+}
+
+fn newer_recent_arc_prefix_since(
+    current: &[Arc<SystemEvent>],
+    base: &[Arc<SystemEvent>],
+) -> Option<Vec<Arc<SystemEvent>>> {
+    if base.is_empty() {
+        return Some(current.to_vec());
+    }
+    if current.len() < base.len() {
+        return None;
+    }
+    let tail_start = current.len().checked_sub(base.len())?;
+    let current_tail = current.get(tail_start..)?;
+    if current_tail
+        .iter()
+        .zip(base.iter())
+        .all(|(left, right)| left.event_id == right.event_id)
+    {
+        return Some(current[..tail_start].to_vec());
+    }
+    None
 }
 
 fn compare_recent_system_event_order(
@@ -730,6 +861,16 @@ impl ApiApplication {
     pub const fn from_postgres_store(backend: PostgresStore) -> Self {
         Self {
             backend: ApiStore::Postgres(backend),
+        }
+    }
+
+    #[must_use]
+    pub fn fork_from(source: &Self) -> Option<Self> {
+        match &source.backend {
+            ApiStore::Local(_) => Self::fork_local_from(source),
+            ApiStore::Postgres(postgres) => Some(Self::from_postgres_store(
+                PostgresStore::fork_from(postgres),
+            )),
         }
     }
 
@@ -4184,5 +4325,10 @@ mod tests {
     #[test]
     fn local_merged_system_event_snapshot_reuses_cached_peer_window_for_longer_append_tails() {
         local_merged_system_event_snapshot_preserves_cached_windows_across_bounded_peer_deltas();
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_reuses_cached_windows_across_bounded_single_side_churn() {
+        local_merged_system_event_snapshot_reuses_cached_peer_window_for_longer_append_tails();
     }
 }

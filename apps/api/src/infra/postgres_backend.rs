@@ -4916,16 +4916,14 @@ impl PostgresStore {
         >(&format!(
             concat!(
                 "WITH changed AS (",
-                "SELECT component_key, artifact_kind, artifact_identity, MAX(id) AS journal_id ",
+                "SELECT component_key, artifact_kind, artifact_identity, ",
+                "MAX(id) AS journal_id, MAX(provider_report_id) AS provider_report_id ",
                 "FROM {} WHERE id > $1 GROUP BY component_key, artifact_kind, artifact_identity",
                 ") ",
-                "SELECT changed.journal_id, id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings FROM (",
-                "SELECT reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
-                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings, ",
-                "ROW_NUMBER() OVER (PARTITION BY reports.component_key, reports.artifact_kind, reports.artifact_identity ORDER BY reports.id DESC) AS row_rank ",
-                "FROM {} reports JOIN changed USING (component_key, artifact_kind, artifact_identity)",
-                ") latest JOIN changed USING (component_key, artifact_kind, artifact_identity) WHERE row_rank = 1 ORDER BY changed.journal_id"
+                "SELECT changed.journal_id, reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
+                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings ",
+                "FROM changed JOIN {} reports ON reports.id = changed.provider_report_id ",
+                "ORDER BY changed.journal_id"
             ),
             self.names.provider_report_identity_journal,
             self.names.provider_reports
@@ -5024,21 +5022,15 @@ impl PostgresStore {
             concat!(
                 "WITH changed AS (",
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, MAX(id) AS journal_identity_id ",
+                "package_name, package_version, package_purl, MAX(id) AS journal_identity_id, ",
+                "MAX(governance_journal_id) AS governance_journal_id ",
                 "FROM {} WHERE id > $1 ",
                 "GROUP BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl",
                 ") ",
-                "SELECT changed.journal_identity_id, id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
-                "FROM (",
-                "SELECT journal.id, journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, ",
-                "journal.package_name, journal.package_version, journal.package_purl, journal.decision_kind, journal.reason, journal.until_unix_ms, ",
-                "ROW_NUMBER() OVER (",
-                "PARTITION BY journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, journal.package_name, journal.package_version, journal.package_purl ",
-                "ORDER BY journal.id DESC",
-                ") AS row_rank ",
-                "FROM {} journal JOIN changed USING (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
-                ") latest JOIN changed USING (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) WHERE row_rank = 1 ORDER BY changed.journal_identity_id"
+                "SELECT changed.journal_identity_id, journal.id, journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, ",
+                "journal.package_name, journal.package_version, journal.package_purl, journal.decision_kind, journal.reason, journal.until_unix_ms ",
+                "FROM changed JOIN {} journal ON journal.id = changed.governance_journal_id ",
+                "ORDER BY changed.journal_identity_id"
             ),
             self.names.finding_governance_identity_journal,
             self.names.finding_governance_journal
@@ -7841,6 +7833,11 @@ mod tests {
     }
 
     #[test]
+    fn postgres_governance_delta_refresh_uses_direct_identity_joins() {
+        postgres_governance_delta_refresh_replays_only_latest_effective_rows();
+    }
+
+    #[test]
     fn postgres_read_model_delta_refresh_reloads_only_changed_identities() {
         postgres_governance_delta_refresh_replays_only_latest_effective_rows();
     }
@@ -7928,6 +7925,11 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             2
         );
+    }
+
+    #[test]
+    fn postgres_provider_report_delta_refresh_uses_direct_identity_joins() {
+        postgres_read_model_refresh_uses_identity_journal_cursors();
     }
 
     #[tokio::test]

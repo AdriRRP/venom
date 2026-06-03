@@ -420,6 +420,25 @@ Completed:
     Replace front-insert and full retained-id rebuild work in the system-event
     query index with bounded push/pop bookkeeping and compact recent-window
     storage.
+88. `W218-postgres-publication-lane-ephemeral-residency`
+    Replace the always-live Postgres publication lane with an ephemeral fork so
+    one `ApiState` stops paying fixed third-service residency cost between
+    publication drains.
+89. `W219-postgres-provider-report-direct-identity-joins`
+    Refresh changed provider-report identities by direct `provider_report_id`
+    joins from the identity journal instead of re-windowing the whole report
+    table for each changed artifact.
+90. `W220-postgres-governance-direct-identity-joins`
+    Refresh changed governance identities by direct `governance_journal_id`
+    joins from the identity journal instead of re-windowing the whole journal
+    per finding identity.
+91. `W221-local-system-event-merge-fallback-tightening`
+    Extend the local merged system-event cache so one-side bounded refreshes can
+    reuse cached merged windows more often before falling back to full
+    recomposition.
+92. `W222-system-event-index-ring-window-shape`
+    Switch the system-event recent-window hot path to ring-style storage so
+    append, trim, and recent-query work stop paying vector front-rotation cost.
 
 ## Exit condition
 
