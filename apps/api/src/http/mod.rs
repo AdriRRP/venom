@@ -2140,15 +2140,14 @@ mod tests {
             .await
             .expect("postgres api state should open");
 
-        let slots = match &state.inner.services {
-            ApiServiceSet::Partitioned(slots) => slots,
-        };
-        let publication_guard = slots.publication.service.lock().await;
-        assert!(
-            publication_guard.is_none(),
-            "publication lane should not keep a resident service before first use"
-        );
-        drop(publication_guard);
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "publication lane should not keep a resident service before first use"
+            );
+        }
 
         let publication_service = state.take_service(ApiMutationLane::Publication).await;
         let state_service = state.take_service(ApiMutationLane::State).await;
@@ -2163,11 +2162,13 @@ mod tests {
             .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
 
-        let publication_guard = slots.publication.service.lock().await;
-        assert!(
-            publication_guard.is_none(),
-            "publication lane should release its resident service after restore"
-        );
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "publication lane should release its resident service after restore"
+            );
+        }
     }
 
     #[tokio::test]
