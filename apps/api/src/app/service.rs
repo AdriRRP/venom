@@ -522,6 +522,7 @@ struct MergedSystemEventSnapshot {
 }
 
 impl LocalStore {
+    #[allow(clippy::too_many_lines)]
     fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         let state = self.state.system_event_index_snapshot_arc();
         let runtime = self.runtime.system_event_index_snapshot_arc();
