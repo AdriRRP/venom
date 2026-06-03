@@ -187,21 +187,21 @@ pub struct SystemEventRecentWindows {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct RecentEventDequeWindows {
-    recent_events: VecDeque<Arc<SystemEvent>>,
-    recent_scheduler_events: VecDeque<Arc<SystemEvent>>,
-    recent_command_events: VecDeque<Arc<SystemEvent>>,
-    recent_governance_events: VecDeque<Arc<SystemEvent>>,
-    recent_publication_events: VecDeque<Arc<SystemEvent>>,
+    all_events: VecDeque<Arc<SystemEvent>>,
+    scheduler_events: VecDeque<Arc<SystemEvent>>,
+    command_events: VecDeque<Arc<SystemEvent>>,
+    governance_events: VecDeque<Arc<SystemEvent>>,
+    publication_events: VecDeque<Arc<SystemEvent>>,
 }
 
 impl RecentEventDequeWindows {
     fn to_public(&self) -> SystemEventRecentWindows {
         SystemEventRecentWindows {
-            recent_events: self.recent_events.iter().cloned().collect(),
-            recent_scheduler_events: self.recent_scheduler_events.iter().cloned().collect(),
-            recent_command_events: self.recent_command_events.iter().cloned().collect(),
-            recent_governance_events: self.recent_governance_events.iter().cloned().collect(),
-            recent_publication_events: self.recent_publication_events.iter().cloned().collect(),
+            recent_events: self.all_events.iter().cloned().collect(),
+            recent_scheduler_events: self.scheduler_events.iter().cloned().collect(),
+            recent_command_events: self.command_events.iter().cloned().collect(),
+            recent_governance_events: self.governance_events.iter().cloned().collect(),
+            recent_publication_events: self.publication_events.iter().cloned().collect(),
         }
     }
 }
@@ -209,11 +209,11 @@ impl RecentEventDequeWindows {
 impl From<SystemEventRecentWindows> for RecentEventDequeWindows {
     fn from(value: SystemEventRecentWindows) -> Self {
         Self {
-            recent_events: value.recent_events.into(),
-            recent_scheduler_events: value.recent_scheduler_events.into(),
-            recent_command_events: value.recent_command_events.into(),
-            recent_governance_events: value.recent_governance_events.into(),
-            recent_publication_events: value.recent_publication_events.into(),
+            all_events: value.recent_events.into(),
+            scheduler_events: value.recent_scheduler_events.into(),
+            command_events: value.recent_command_events.into(),
+            governance_events: value.recent_governance_events.into(),
+            publication_events: value.recent_publication_events.into(),
         }
     }
 }
@@ -276,15 +276,15 @@ impl SystemEventQueryIndex {
             }
         }
         push_recent_window_event(
-            &mut self.recent_windows.recent_events,
+            &mut self.recent_windows.all_events,
             event,
             &mut self.retained_event_refs,
         );
         let category_window = match event.category() {
-            SystemEventCategory::Scheduler => &mut self.recent_windows.recent_scheduler_events,
-            SystemEventCategory::Command => &mut self.recent_windows.recent_command_events,
-            SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
-            SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
+            SystemEventCategory::Scheduler => &mut self.recent_windows.scheduler_events,
+            SystemEventCategory::Command => &mut self.recent_windows.command_events,
+            SystemEventCategory::Governance => &mut self.recent_windows.governance_events,
+            SystemEventCategory::Publication => &mut self.recent_windows.publication_events,
         };
         push_recent_window_event(category_window, event, &mut self.retained_event_refs);
     }
@@ -391,7 +391,7 @@ impl SystemEventQueryIndex {
         let events = query.category.map_or_else(
             || {
                 self.recent_windows
-                    .recent_events
+                    .all_events
                     .iter()
                     .take(limit)
                     .cloned()
@@ -399,14 +399,10 @@ impl SystemEventQueryIndex {
             },
             |category| {
                 let window = match category {
-                    SystemEventCategory::Scheduler => &self.recent_windows.recent_scheduler_events,
-                    SystemEventCategory::Command => &self.recent_windows.recent_command_events,
-                    SystemEventCategory::Governance => {
-                        &self.recent_windows.recent_governance_events
-                    }
-                    SystemEventCategory::Publication => {
-                        &self.recent_windows.recent_publication_events
-                    }
+                    SystemEventCategory::Scheduler => &self.recent_windows.scheduler_events,
+                    SystemEventCategory::Command => &self.recent_windows.command_events,
+                    SystemEventCategory::Governance => &self.recent_windows.governance_events,
+                    SystemEventCategory::Publication => &self.recent_windows.publication_events,
                 };
                 window.iter().take(limit).cloned().collect::<Vec<_>>()
             },
@@ -422,12 +418,12 @@ impl SystemEventQueryIndex {
     fn rebuild_retained_event_refs(&mut self) {
         self.retained_event_refs = self
             .recent_windows
-            .recent_events
+            .all_events
             .iter()
-            .chain(self.recent_windows.recent_scheduler_events.iter())
-            .chain(self.recent_windows.recent_command_events.iter())
-            .chain(self.recent_windows.recent_governance_events.iter())
-            .chain(self.recent_windows.recent_publication_events.iter())
+            .chain(self.recent_windows.scheduler_events.iter())
+            .chain(self.recent_windows.command_events.iter())
+            .chain(self.recent_windows.governance_events.iter())
+            .chain(self.recent_windows.publication_events.iter())
             .fold(HashMap::new(), |mut refs, event| {
                 *refs.entry(event.event_id.clone()).or_insert(0) += 1;
                 refs
