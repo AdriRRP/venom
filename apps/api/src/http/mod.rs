@@ -252,7 +252,14 @@ impl ApiState {
             .map_err(|error| error.to_string())?;
         let runtime_service = ApiApplication::fork_local_from(&state_service)
             .ok_or_else(|| "local api service fork unavailable".to_owned())?;
-        Ok(Self::new_partitioned(state_service, runtime_service))
+        let publication_service = ApiApplication::fork_local_from(&state_service)
+            .ok_or_else(|| "local api service fork unavailable".to_owned())?;
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            Some(publication_service),
+            ServiceResidency::Resident,
+        ))
     }
 
     /// Open the API state over a Postgres durable backend.
@@ -269,10 +276,20 @@ impl ApiState {
             crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
         let state_service = ApiApplication::from_postgres_store(state_backend);
         let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
-        Ok(Self::new_partitioned(state_service, runtime_service))
+        Ok(Self::new_partitioned(
+            state_service,
+            runtime_service,
+            None,
+            ServiceResidency::EphemeralForkFromState,
+        ))
     }
 
-    fn new_partitioned(state_service: ApiApplication, runtime_service: ApiApplication) -> Self {
+    fn new_partitioned(
+        state_service: ApiApplication,
+        runtime_service: ApiApplication,
+        publication_service: Option<ApiApplication>,
+        publication_residency: ServiceResidency,
+    ) -> Self {
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
             .unwrap_or(0);
@@ -296,10 +313,10 @@ impl ApiState {
                         residency: ServiceResidency::Resident,
                     },
                     publication: ServiceSlot {
-                        service: Mutex::new(None),
+                        service: Mutex::new(publication_service),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
-                        residency: ServiceResidency::EphemeralForkFromState,
+                        residency: publication_residency,
                     },
                 })),
                 local_change_epoch: AtomicU64::new(0),
