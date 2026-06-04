@@ -195,6 +195,15 @@ struct RecentEventDequeWindows {
     publication_events: VecDeque<Arc<SystemEvent>>,
 }
 
+#[derive(Clone, Copy)]
+struct RecentEventDequeWindowRefs<'a> {
+    all_events: &'a VecDeque<Arc<SystemEvent>>,
+    scheduler_events: &'a VecDeque<Arc<SystemEvent>>,
+    command_events: &'a VecDeque<Arc<SystemEvent>>,
+    governance_events: &'a VecDeque<Arc<SystemEvent>>,
+    publication_events: &'a VecDeque<Arc<SystemEvent>>,
+}
+
 impl RecentEventDequeWindows {
     fn to_public(&self) -> SystemEventRecentWindows {
         SystemEventRecentWindows {
@@ -203,6 +212,16 @@ impl RecentEventDequeWindows {
             recent_command_events: self.command_events.iter().cloned().collect(),
             recent_governance_events: self.governance_events.iter().cloned().collect(),
             recent_publication_events: self.publication_events.iter().cloned().collect(),
+        }
+    }
+
+    const fn refs(&self) -> RecentEventDequeWindowRefs<'_> {
+        RecentEventDequeWindowRefs {
+            all_events: &self.all_events,
+            scheduler_events: &self.scheduler_events,
+            command_events: &self.command_events,
+            governance_events: &self.governance_events,
+            publication_events: &self.publication_events,
         }
     }
 }
@@ -294,7 +313,7 @@ impl SystemEventQueryIndex {
     pub fn merged(left: &Self, right: &Self) -> Self {
         Self::from_recent_windows(
             merge_window_totals(&left.window_totals(), &right.window_totals()),
-            merge_recent_windows(&left.recent_windows(), &right.recent_windows()),
+            merge_recent_window_refs(&left.recent_windows.refs(), &right.recent_windows.refs()),
         )
     }
 
@@ -311,8 +330,8 @@ impl SystemEventQueryIndex {
             return None;
         }
 
-        let windows = self.recent_windows();
-        let base_windows = base.recent_windows();
+        let windows = self.recent_windows.refs();
+        let base_windows = base.recent_windows.refs();
         Some(Self::from_recent_windows(
             SystemEventWindowTotals {
                 total: totals.total - base_totals.total,
@@ -322,25 +341,22 @@ impl SystemEventQueryIndex {
                 publication_total: totals.publication_total - base_totals.publication_total,
             },
             SystemEventRecentWindows {
-                recent_events: newer_prefix_since(
-                    &windows.recent_events,
-                    &base_windows.recent_events,
+                recent_events: newer_prefix_since_deque(windows.all_events, base_windows.all_events)?,
+                recent_scheduler_events: newer_prefix_since_deque(
+                    windows.scheduler_events,
+                    base_windows.scheduler_events,
                 )?,
-                recent_scheduler_events: newer_prefix_since(
-                    &windows.recent_scheduler_events,
-                    &base_windows.recent_scheduler_events,
+                recent_command_events: newer_prefix_since_deque(
+                    windows.command_events,
+                    base_windows.command_events,
                 )?,
-                recent_command_events: newer_prefix_since(
-                    &windows.recent_command_events,
-                    &base_windows.recent_command_events,
+                recent_governance_events: newer_prefix_since_deque(
+                    windows.governance_events,
+                    base_windows.governance_events,
                 )?,
-                recent_governance_events: newer_prefix_since(
-                    &windows.recent_governance_events,
-                    &base_windows.recent_governance_events,
-                )?,
-                recent_publication_events: newer_prefix_since(
-                    &windows.recent_publication_events,
-                    &base_windows.recent_publication_events,
+                recent_publication_events: newer_prefix_since_deque(
+                    windows.publication_events,
+                    base_windows.publication_events,
                 )?,
             },
         ))
@@ -465,21 +481,23 @@ fn decrement_retained_event_ref(
     }
 }
 
-fn newer_prefix_since(
-    current: &[Arc<SystemEvent>],
-    base: &[Arc<SystemEvent>],
+fn newer_prefix_since_deque(
+    current: &VecDeque<Arc<SystemEvent>>,
+    base: &VecDeque<Arc<SystemEvent>>,
 ) -> Option<Vec<Arc<SystemEvent>>> {
     if base.len() > current.len() {
         return None;
     }
     let suffix_start = current.len() - base.len();
-    let suffix = &current[suffix_start..];
-    if !suffix.iter().zip(base.iter()).all(|(left, right)| {
-        left.event_id == right.event_id && left.occurred_at_unix_ms == right.occurred_at_unix_ms
-    }) {
-        return None;
+    for index in 0..base.len() {
+        let left = current.get(suffix_start + index)?;
+        let right = base.get(index)?;
+        if left.event_id != right.event_id || left.occurred_at_unix_ms != right.occurred_at_unix_ms
+        {
+            return None;
+        }
     }
-    Some(current[..suffix_start].to_vec())
+    Some(current.iter().take(suffix_start).cloned().collect())
 }
 
 const fn merge_window_totals(
@@ -495,15 +513,51 @@ const fn merge_window_totals(
     }
 }
 
-fn merge_recent_arc_events(
-    left: &[Arc<SystemEvent>],
-    right: &[Arc<SystemEvent>],
+fn stitch_recent_append_deque(
+    prefix: Vec<Arc<SystemEvent>>,
+    base: &VecDeque<Arc<SystemEvent>>,
 ) -> Vec<Arc<SystemEvent>> {
-    if let Some(prefix) = newer_prefix_since(left, right) {
-        return stitch_recent_append(prefix, right);
+    prefix
+        .into_iter()
+        .chain(base.iter().cloned())
+        .take(MAX_SYSTEM_EVENTS_LIMIT)
+        .collect()
+}
+
+fn merge_recent_window_refs(
+    left: &RecentEventDequeWindowRefs<'_>,
+    right: &RecentEventDequeWindowRefs<'_>,
+) -> SystemEventRecentWindows {
+    SystemEventRecentWindows {
+        recent_events: merge_recent_arc_event_deques(left.all_events, right.all_events),
+        recent_scheduler_events: merge_recent_arc_event_deques(
+            left.scheduler_events,
+            right.scheduler_events,
+        ),
+        recent_command_events: merge_recent_arc_event_deques(
+            left.command_events,
+            right.command_events,
+        ),
+        recent_governance_events: merge_recent_arc_event_deques(
+            left.governance_events,
+            right.governance_events,
+        ),
+        recent_publication_events: merge_recent_arc_event_deques(
+            left.publication_events,
+            right.publication_events,
+        ),
     }
-    if let Some(prefix) = newer_prefix_since(right, left) {
-        return stitch_recent_append(prefix, left);
+}
+
+fn merge_recent_arc_event_deques(
+    left: &VecDeque<Arc<SystemEvent>>,
+    right: &VecDeque<Arc<SystemEvent>>,
+) -> Vec<Arc<SystemEvent>> {
+    if let Some(prefix) = newer_prefix_since_deque(left, right) {
+        return stitch_recent_append_deque(prefix, right);
+    }
+    if let Some(prefix) = newer_prefix_since_deque(right, left) {
+        return stitch_recent_append_deque(prefix, left);
     }
 
     let mut merged = Vec::with_capacity((left.len() + right.len()).min(MAX_SYSTEM_EVENTS_LIMIT));
@@ -538,42 +592,6 @@ fn merge_recent_arc_events(
     }
 
     merged
-}
-
-fn stitch_recent_append(
-    prefix: Vec<Arc<SystemEvent>>,
-    base: &[Arc<SystemEvent>],
-) -> Vec<Arc<SystemEvent>> {
-    prefix
-        .into_iter()
-        .chain(base.iter().cloned())
-        .take(MAX_SYSTEM_EVENTS_LIMIT)
-        .collect()
-}
-
-fn merge_recent_windows(
-    left: &SystemEventRecentWindows,
-    right: &SystemEventRecentWindows,
-) -> SystemEventRecentWindows {
-    SystemEventRecentWindows {
-        recent_events: merge_recent_arc_events(&left.recent_events, &right.recent_events),
-        recent_scheduler_events: merge_recent_arc_events(
-            &left.recent_scheduler_events,
-            &right.recent_scheduler_events,
-        ),
-        recent_command_events: merge_recent_arc_events(
-            &left.recent_command_events,
-            &right.recent_command_events,
-        ),
-        recent_governance_events: merge_recent_arc_events(
-            &left.recent_governance_events,
-            &right.recent_governance_events,
-        ),
-        recent_publication_events: merge_recent_arc_events(
-            &left.recent_publication_events,
-            &right.recent_publication_events,
-        ),
-    }
 }
 
 fn compare_recent_event_order(left: &SystemEvent, right: &SystemEvent) -> std::cmp::Ordering {
@@ -889,5 +907,45 @@ mod tests {
     #[test]
     fn system_event_query_index_push_uses_ring_windows_without_semantic_regression() {
         system_event_query_index_push_keeps_recent_windows_without_full_id_rebuilds();
+    }
+
+    #[test]
+    fn system_event_query_index_delta_since_uses_borrowed_recent_windows() {
+        let mut base = SystemEventQueryIndex::new();
+        base.push_newest(timed_event(
+            "event-001",
+            1,
+            SystemEventKind::CollectionScanMaterialized,
+        ));
+        base.push_newest(timed_event(
+            "event-002",
+            2,
+            SystemEventKind::FindingSuppressed,
+        ));
+        let mut current = base.clone();
+        current.push_newest(timed_event(
+            "event-003",
+            3,
+            SystemEventKind::ScanCommandCompleted,
+        ));
+        current.push_newest(timed_event(
+            "event-004",
+            4,
+            SystemEventKind::IntegrationEventPublished,
+        ));
+
+        let delta = current
+            .delta_since(&base)
+            .expect("delta should exist for appended recent windows");
+        let page = delta.query(&SystemEventsQuery::new().with_limit(10));
+
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-004", "event-003"]
+        );
     }
 }

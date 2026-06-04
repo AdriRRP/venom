@@ -256,7 +256,8 @@ impl ApiState {
             .ok_or_else(|| "local api service fork unavailable".to_owned())?;
         Ok(Self::new_partitioned(
             state_service,
-            runtime_service,
+            Some(runtime_service),
+            ServiceResidency::Resident,
             Some(publication_service),
             ServiceResidency::Resident,
         ))
@@ -272,13 +273,11 @@ impl ApiState {
             crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
         let state_backend =
             crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
-        let runtime_backend =
-            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
         let state_service = ApiApplication::from_postgres_store(state_backend);
-        let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
         Ok(Self::new_partitioned(
             state_service,
-            runtime_service,
+            None,
+            ServiceResidency::EphemeralForkFromState,
             None,
             ServiceResidency::EphemeralForkFromState,
         ))
@@ -286,7 +285,8 @@ impl ApiState {
 
     fn new_partitioned(
         state_service: ApiApplication,
-        runtime_service: ApiApplication,
+        runtime_service: Option<ApiApplication>,
+        runtime_residency: ServiceResidency,
         publication_service: Option<ApiApplication>,
         publication_residency: ServiceResidency,
     ) -> Self {
@@ -307,10 +307,10 @@ impl ApiState {
                         residency: ServiceResidency::Resident,
                     },
                     runtime: ServiceSlot {
-                        service: Mutex::new(Some(runtime_service)),
+                        service: Mutex::new(runtime_service),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
-                        residency: ServiceResidency::Resident,
+                        residency: runtime_residency,
                     },
                     publication: ServiceSlot {
                         service: Mutex::new(publication_service),
@@ -2017,6 +2017,15 @@ mod tests {
             .await
             .expect("postgres api state should open");
 
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "runtime lane should not keep a resident service before first use"
+            );
+        }
+
         let state_service = state.take_service(ApiMutationLane::State).await;
         let volatile_service = state.take_service(ApiMutationLane::Runtime).await;
 
@@ -2035,6 +2044,14 @@ mod tests {
         state
             .restore_service(ApiMutationLane::Runtime, volatile_service)
             .await;
+
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "runtime lane should release its resident service after restore"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2148,6 +2165,48 @@ mod tests {
         state
             .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn postgres_runtime_lane_is_ephemeral_until_taken() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("runtime_ephemeral_lane");
+        let state = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("postgres api state should open");
+
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "runtime lane should not keep a resident service before first use"
+            );
+        }
+
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let state_service = state.take_service(ApiMutationLane::State).await;
+        assert!(Arc::ptr_eq(
+            &runtime_service.inventory_snapshot_arc(),
+            &state_service.inventory_snapshot_arc()
+        ));
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "runtime lane should release its resident service after restore"
+            );
+        }
     }
 
     #[tokio::test]

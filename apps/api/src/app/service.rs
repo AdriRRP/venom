@@ -563,19 +563,11 @@ impl LocalStore {
                     return merged;
                 }
                 let runtime_windows = runtime.recent_windows();
-                let merged_windows = extend_or_merge_system_event_recent_windows(
-                    &snapshot.merged_windows,
-                    &snapshot.state_windows,
-                    &snapshot.runtime_windows,
-                    &runtime_windows,
-                );
-                let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
-                    merge_system_event_window_totals(
-                        &state.window_totals(),
-                        &runtime.window_totals(),
-                    ),
-                    merged_windows.clone(),
+                let merged = Arc::new(SystemEventQueryIndex::merged(
+                    state.as_ref(),
+                    runtime.as_ref(),
                 ));
+                let merged_windows = merged.recent_windows();
                 *cache = Some(MergedSystemEventSnapshot {
                     state,
                     runtime,
@@ -611,19 +603,11 @@ impl LocalStore {
                     return merged;
                 }
                 let state_windows = state.recent_windows();
-                let merged_windows = extend_or_merge_system_event_recent_windows(
-                    &snapshot.merged_windows,
-                    &snapshot.runtime_windows,
-                    &snapshot.state_windows,
-                    &state_windows,
-                );
-                let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
-                    merge_system_event_window_totals(
-                        &state.window_totals(),
-                        &runtime.window_totals(),
-                    ),
-                    merged_windows.clone(),
+                let merged = Arc::new(SystemEventQueryIndex::merged(
+                    state.as_ref(),
+                    runtime.as_ref(),
                 ));
+                let merged_windows = merged.recent_windows();
                 *cache = Some(MergedSystemEventSnapshot {
                     state,
                     runtime,
@@ -636,11 +620,8 @@ impl LocalStore {
             }
             _ => (state.recent_windows(), runtime.recent_windows()),
         };
-        let merged_windows = merge_system_event_recent_windows(&state_windows, &runtime_windows);
-        let merged = Arc::new(SystemEventQueryIndex::from_recent_windows(
-            merge_system_event_window_totals(&state.window_totals(), &runtime.window_totals()),
-            merged_windows.clone(),
-        ));
+        let merged = Arc::new(SystemEventQueryIndex::merged(state.as_ref(), runtime.as_ref()));
+        let merged_windows = merged.recent_windows();
         *cache = Some(MergedSystemEventSnapshot {
             state,
             runtime,
@@ -650,19 +631,6 @@ impl LocalStore {
             merged: Arc::clone(&merged),
         });
         merged
-    }
-}
-
-const fn merge_system_event_window_totals(
-    left: &venom_domain::SystemEventWindowTotals,
-    right: &venom_domain::SystemEventWindowTotals,
-) -> venom_domain::SystemEventWindowTotals {
-    venom_domain::SystemEventWindowTotals {
-        total: left.total + right.total,
-        scheduler_total: left.scheduler_total + right.scheduler_total,
-        command_total: left.command_total + right.command_total,
-        governance_total: left.governance_total + right.governance_total,
-        publication_total: left.publication_total + right.publication_total,
     }
 }
 
@@ -689,58 +657,6 @@ fn merge_system_event_recent_windows(
             &right.recent_publication_events,
         ),
     }
-}
-
-fn extend_or_merge_system_event_recent_windows(
-    cached_merged: &venom_domain::SystemEventRecentWindows,
-    unchanged_peer: &venom_domain::SystemEventRecentWindows,
-    changed_previous: &venom_domain::SystemEventRecentWindows,
-    changed_current: &venom_domain::SystemEventRecentWindows,
-) -> venom_domain::SystemEventRecentWindows {
-    venom_domain::SystemEventRecentWindows {
-        recent_events: extend_or_merge_recent_arc_events(
-            &cached_merged.recent_events,
-            &unchanged_peer.recent_events,
-            &changed_previous.recent_events,
-            &changed_current.recent_events,
-        ),
-        recent_scheduler_events: extend_or_merge_recent_arc_events(
-            &cached_merged.recent_scheduler_events,
-            &unchanged_peer.recent_scheduler_events,
-            &changed_previous.recent_scheduler_events,
-            &changed_current.recent_scheduler_events,
-        ),
-        recent_command_events: extend_or_merge_recent_arc_events(
-            &cached_merged.recent_command_events,
-            &unchanged_peer.recent_command_events,
-            &changed_previous.recent_command_events,
-            &changed_current.recent_command_events,
-        ),
-        recent_governance_events: extend_or_merge_recent_arc_events(
-            &cached_merged.recent_governance_events,
-            &unchanged_peer.recent_governance_events,
-            &changed_previous.recent_governance_events,
-            &changed_current.recent_governance_events,
-        ),
-        recent_publication_events: extend_or_merge_recent_arc_events(
-            &cached_merged.recent_publication_events,
-            &unchanged_peer.recent_publication_events,
-            &changed_previous.recent_publication_events,
-            &changed_current.recent_publication_events,
-        ),
-    }
-}
-
-fn extend_or_merge_recent_arc_events(
-    cached_merged: &[Arc<SystemEvent>],
-    unchanged_peer: &[Arc<SystemEvent>],
-    changed_previous: &[Arc<SystemEvent>],
-    changed_current: &[Arc<SystemEvent>],
-) -> Vec<Arc<SystemEvent>> {
-    if let Some(delta) = newer_recent_arc_prefix_since(changed_current, changed_previous) {
-        return merge_recent_arc_events(cached_merged, &delta);
-    }
-    merge_recent_arc_events(unchanged_peer, changed_current)
 }
 
 fn merge_recent_arc_events(
@@ -781,28 +697,6 @@ fn merge_recent_arc_events(
     }
 
     merged
-}
-
-fn newer_recent_arc_prefix_since(
-    current: &[Arc<SystemEvent>],
-    base: &[Arc<SystemEvent>],
-) -> Option<Vec<Arc<SystemEvent>>> {
-    if base.is_empty() {
-        return Some(current.to_vec());
-    }
-    if current.len() < base.len() {
-        return None;
-    }
-    let tail_start = current.len().checked_sub(base.len())?;
-    let current_tail = current.get(tail_start..)?;
-    if current_tail
-        .iter()
-        .zip(base.iter())
-        .all(|(left, right)| left.event_id == right.event_id)
-    {
-        return Some(current[..tail_start].to_vec());
-    }
-    None
 }
 
 fn compare_recent_system_event_order(

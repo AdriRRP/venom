@@ -218,6 +218,10 @@ Completed:
 73. `W161-system-event-source-arc-sharing`
     Keep the live local and Postgres `system events` index as the shared
     snapshot `Arc` itself instead of cloning the whole index on each push.
+74. `W223-postgres-runtime-and-system-event-cost-tightening`
+    Drop the fixed resident Postgres runtime lane from steady state and remove
+    avoidable hot-path cloning and merge churn around operator-facing system
+    event snapshots.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.
