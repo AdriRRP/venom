@@ -7503,7 +7503,7 @@ mod tests {
             .expect("forked risk acceptance should persist");
 
         assert!(!Arc::ptr_eq(&backend.governance, &fork.governance));
-        assert!(Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
+        assert!(!Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
     }
 
     #[tokio::test]
