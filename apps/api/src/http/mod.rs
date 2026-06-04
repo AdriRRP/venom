@@ -2027,8 +2027,8 @@ mod tests {
             );
         }
 
-        let state_service = state.take_service(ApiMutationLane::State).await;
         let volatile_service = state.take_service(ApiMutationLane::Runtime).await;
+        let state_service = state.take_service(ApiMutationLane::State).await;
 
         assert!(Arc::ptr_eq(
             &state_service.inventory_snapshot_arc(),
