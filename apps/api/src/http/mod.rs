@@ -747,21 +747,24 @@ impl ApiState {
             result.is_ok(),
             mark_remote_change_result.is_some(),
         );
-        let mut remote_change_watermark = service.observed_remote_change_watermark();
-        let remote_snapshot_refresh = self
-            .detached_remote_snapshot_refresh(refresh_from_remote_changed || result.is_ok())
-            .await;
-        let next_snapshot = if let Some(refresh_result) = remote_snapshot_refresh {
+        let remote_change_watermark = service.observed_remote_change_watermark();
+        let remote_snapshot_refresh =
+            if result.is_ok() && self.inner.remote_read_snapshot_loader.is_some() {
+                None
+            } else {
+                self.detached_remote_snapshot_refresh(refresh_from_remote_changed)
+                    .await
+            };
+        let next_snapshot = if result.is_ok() && self.inner.remote_read_snapshot_loader.is_some() {
+            Some(Arc::new(service.read_snapshot()))
+        } else if let Some(refresh_result) = remote_snapshot_refresh {
             match refresh_result {
-                Ok((snapshot, change_watermark)) => {
-                    remote_change_watermark = Some(change_watermark);
-                    Some(snapshot)
-                }
+                Ok((snapshot, _change_watermark)) => Some(snapshot),
                 Err(_error) if result.is_ok() => {
                     self.inner
                         .remote_observation_degraded
                         .store(true, Ordering::Relaxed);
-                    None
+                    Some(Arc::new(service.read_snapshot()))
                 }
                 Err(error) => {
                     self.restore_service(lane, service).await;

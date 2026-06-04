@@ -457,6 +457,42 @@ impl PostgresStore {
         Ok(true)
     }
 
+    async fn refresh_remote_before_governance_mutation(&mut self) -> Result<(), String> {
+        self.refresh_from_remote_if_stale().await.map(|_| ())
+    }
+
+    async fn reload_governance_mutation_sources_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = Arc::clone(&self.ingestion);
+        backend.load_provider_reports().await?;
+        backend.load_governance_journal_snapshot(true).await?;
+        self.governance = backend.governance;
+        self.read_model = backend.read_model;
+        self.provider_report_row_high_watermark = backend.provider_report_row_high_watermark;
+        self.governance_journal_high_watermark = backend.governance_journal_high_watermark;
+        self.refresh_read_model_and_release_board_snapshot_caches();
+        Ok(())
+    }
+
+    async fn ensure_active_finding_for_governance_mutation(
+        &mut self,
+        finding: &FindingRef,
+        inactive_message: &str,
+    ) -> Result<(), String> {
+        self.refresh_remote_before_governance_mutation().await?;
+        if self.read_model.has_active_finding(finding) {
+            return Ok(());
+        }
+
+        self.reload_governance_mutation_sources_from_remote()
+            .await?;
+        if self.read_model.has_active_finding(finding) {
+            Ok(())
+        } else {
+            Err(inactive_message.to_owned())
+        }
+    }
+
     /// Mark the latest Postgres WAL watermark as already observed by this instance.
     ///
     /// # Errors
@@ -1171,9 +1207,11 @@ impl PostgresStore {
         finding: FindingRef,
         acceptance: RiskAcceptance,
     ) -> Result<AcceptRiskResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot accept risk for an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot accept risk for an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1241,6 +1279,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1329,6 +1368,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1415,9 +1455,11 @@ impl PostgresStore {
         &mut self,
         finding: FindingRef,
     ) -> Result<ReopenFindingResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot reopen an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot reopen an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1480,9 +1522,11 @@ impl PostgresStore {
         finding: FindingRef,
         suppression: Suppression,
     ) -> Result<SuppressFindingResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot suppress an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot suppress an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1551,6 +1595,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1640,6 +1685,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1728,6 +1774,7 @@ impl PostgresStore {
         collection_key: &str,
         query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
