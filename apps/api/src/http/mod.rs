@@ -2008,6 +2008,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
     async fn postgres_open_shares_bootstrap_snapshot_arcs_across_lanes() {
         let Some(database_url) = postgres_test_url() else {
             return;
