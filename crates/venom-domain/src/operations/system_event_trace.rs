@@ -341,7 +341,10 @@ impl SystemEventQueryIndex {
                 publication_total: totals.publication_total - base_totals.publication_total,
             },
             SystemEventRecentWindows {
-                recent_events: newer_prefix_since_deque(windows.all_events, base_windows.all_events)?,
+                recent_events: newer_prefix_since_deque(
+                    windows.all_events,
+                    base_windows.all_events,
+                )?,
                 recent_scheduler_events: newer_prefix_since_deque(
                     windows.scheduler_events,
                     base_windows.scheduler_events,
