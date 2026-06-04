@@ -195,6 +195,7 @@ struct RecentEventDequeWindows {
     publication_events: VecDeque<Arc<SystemEvent>>,
 }
 
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy)]
 struct RecentEventDequeWindowRefs<'a> {
     all_events: &'a VecDeque<Arc<SystemEvent>>,
