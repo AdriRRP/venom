@@ -2047,9 +2047,9 @@ mod tests {
             .await
             .expect("postgres api state should open");
 
-        let mut state_service = state.take_service(ApiMutationLane::State).await;
         let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
         let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let mut state_service = state.take_service(ApiMutationLane::State).await;
 
         assert!(Arc::ptr_eq(
             &state_service.read_model_snapshot_arc(),
