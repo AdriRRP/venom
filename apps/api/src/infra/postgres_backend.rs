@@ -457,6 +457,42 @@ impl PostgresStore {
         Ok(true)
     }
 
+    async fn refresh_remote_before_governance_mutation(&mut self) -> Result<(), String> {
+        self.refresh_from_remote_if_stale().await.map(|_| ())
+    }
+
+    async fn reload_governance_mutation_sources_from_remote(&mut self) -> Result<(), String> {
+        let mut backend = Self::detached(self.pool.clone(), self.names.clone());
+        backend.ingestion = Arc::clone(&self.ingestion);
+        backend.load_provider_reports().await?;
+        backend.load_governance_journal_snapshot(true).await?;
+        self.governance = backend.governance;
+        self.read_model = backend.read_model;
+        self.provider_report_row_high_watermark = backend.provider_report_row_high_watermark;
+        self.governance_journal_high_watermark = backend.governance_journal_high_watermark;
+        self.refresh_read_model_and_release_board_snapshot_caches();
+        Ok(())
+    }
+
+    async fn ensure_active_finding_for_governance_mutation(
+        &mut self,
+        finding: &FindingRef,
+        inactive_message: &str,
+    ) -> Result<(), String> {
+        self.refresh_remote_before_governance_mutation().await?;
+        if self.read_model.has_active_finding(finding) {
+            return Ok(());
+        }
+
+        self.reload_governance_mutation_sources_from_remote()
+            .await?;
+        if self.read_model.has_active_finding(finding) {
+            Ok(())
+        } else {
+            Err(inactive_message.to_owned())
+        }
+    }
+
     /// Mark the latest Postgres WAL watermark as already observed by this instance.
     ///
     /// # Errors
@@ -1171,9 +1207,11 @@ impl PostgresStore {
         finding: FindingRef,
         acceptance: RiskAcceptance,
     ) -> Result<AcceptRiskResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot accept risk for an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot accept risk for an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1241,6 +1279,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1329,6 +1368,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         acceptance: RiskAcceptance,
     ) -> Result<BulkAcceptRiskResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1415,9 +1455,11 @@ impl PostgresStore {
         &mut self,
         finding: FindingRef,
     ) -> Result<ReopenFindingResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot reopen an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot reopen an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1480,9 +1522,11 @@ impl PostgresStore {
         finding: FindingRef,
         suppression: Suppression,
     ) -> Result<SuppressFindingResult, String> {
-        if !self.read_model.has_active_finding(&finding) {
-            return Err("cannot suppress an inactive finding".to_owned());
-        }
+        self.ensure_active_finding_for_governance_mutation(
+            &finding,
+            "cannot suppress an inactive finding",
+        )
+        .await?;
 
         let mut candidate_governance = Arc::clone(&self.governance);
         let mut candidate_read_model = self.read_model_arc();
@@ -1551,6 +1595,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1640,6 +1685,7 @@ impl PostgresStore {
         query: &BulkGovernanceQuery,
         suppression: Suppression,
     ) -> Result<BulkSuppressFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -1728,6 +1774,7 @@ impl PostgresStore {
         collection_key: &str,
         query: &BulkGovernanceQuery,
     ) -> Result<BulkReopenFindingResult, String> {
+        self.refresh_remote_before_governance_mutation().await?;
         let scope = self
             .ingestion_ref()
             .inventory()
@@ -4916,16 +4963,14 @@ impl PostgresStore {
         >(&format!(
             concat!(
                 "WITH changed AS (",
-                "SELECT component_key, artifact_kind, artifact_identity, MAX(id) AS journal_id ",
+                "SELECT component_key, artifact_kind, artifact_identity, ",
+                "MAX(id) AS journal_id, MAX(provider_report_id) AS provider_report_id ",
                 "FROM {} WHERE id > $1 GROUP BY component_key, artifact_kind, artifact_identity",
                 ") ",
-                "SELECT changed.journal_id, id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings FROM (",
-                "SELECT reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
-                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings, ",
-                "ROW_NUMBER() OVER (PARTITION BY reports.component_key, reports.artifact_kind, reports.artifact_identity ORDER BY reports.id DESC) AS row_rank ",
-                "FROM {} reports JOIN changed USING (component_key, artifact_kind, artifact_identity)",
-                ") latest JOIN changed USING (component_key, artifact_kind, artifact_identity) WHERE row_rank = 1 ORDER BY changed.journal_id"
+                "SELECT changed.journal_id, reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
+                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings ",
+                "FROM changed JOIN {} reports ON reports.id = changed.provider_report_id ",
+                "ORDER BY changed.journal_id"
             ),
             self.names.provider_report_identity_journal,
             self.names.provider_reports
@@ -5024,21 +5069,15 @@ impl PostgresStore {
             concat!(
                 "WITH changed AS (",
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, MAX(id) AS journal_identity_id ",
+                "package_name, package_version, package_purl, MAX(id) AS journal_identity_id, ",
+                "MAX(governance_journal_id) AS governance_journal_id ",
                 "FROM {} WHERE id > $1 ",
                 "GROUP BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl",
                 ") ",
-                "SELECT changed.journal_identity_id, id, component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, decision_kind, reason, until_unix_ms ",
-                "FROM (",
-                "SELECT journal.id, journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, ",
-                "journal.package_name, journal.package_version, journal.package_purl, journal.decision_kind, journal.reason, journal.until_unix_ms, ",
-                "ROW_NUMBER() OVER (",
-                "PARTITION BY journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, journal.package_name, journal.package_version, journal.package_purl ",
-                "ORDER BY journal.id DESC",
-                ") AS row_rank ",
-                "FROM {} journal JOIN changed USING (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
-                ") latest JOIN changed USING (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) WHERE row_rank = 1 ORDER BY changed.journal_identity_id"
+                "SELECT changed.journal_identity_id, journal.id, journal.component_key, journal.artifact_kind, journal.artifact_identity, journal.vulnerability_id, ",
+                "journal.package_name, journal.package_version, journal.package_purl, journal.decision_kind, journal.reason, journal.until_unix_ms ",
+                "FROM changed JOIN {} journal ON journal.id = changed.governance_journal_id ",
+                "ORDER BY changed.journal_identity_id"
             ),
             self.names.finding_governance_identity_journal,
             self.names.finding_governance_journal
@@ -7464,7 +7503,7 @@ mod tests {
             .expect("forked risk acceptance should persist");
 
         assert!(!Arc::ptr_eq(&backend.governance, &fork.governance));
-        assert!(Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
+        assert!(!Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
     }
 
     #[tokio::test]
@@ -7841,6 +7880,11 @@ mod tests {
     }
 
     #[test]
+    fn postgres_governance_delta_refresh_uses_direct_identity_joins() {
+        postgres_governance_delta_refresh_replays_only_latest_effective_rows();
+    }
+
+    #[test]
     fn postgres_read_model_delta_refresh_reloads_only_changed_identities() {
         postgres_governance_delta_refresh_replays_only_latest_effective_rows();
     }
@@ -7928,6 +7972,11 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             2
         );
+    }
+
+    #[test]
+    fn postgres_provider_report_delta_refresh_uses_direct_identity_joins() {
+        postgres_read_model_refresh_uses_identity_journal_cursors();
     }
 
     #[tokio::test]

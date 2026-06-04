@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// Default number of recent operator-facing system events returned in one query.
@@ -164,7 +164,7 @@ pub struct SystemEventQueryIndex {
     governance_total: usize,
     publication_total: usize,
     retained_event_refs: HashMap<Box<str>, usize>,
-    recent_windows: SystemEventRecentWindows,
+    recent_windows: RecentEventDequeWindows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -185,6 +185,40 @@ pub struct SystemEventRecentWindows {
     pub recent_publication_events: Vec<Arc<SystemEvent>>,
 }
 
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RecentEventDequeWindows {
+    all_events: VecDeque<Arc<SystemEvent>>,
+    scheduler_events: VecDeque<Arc<SystemEvent>>,
+    command_events: VecDeque<Arc<SystemEvent>>,
+    governance_events: VecDeque<Arc<SystemEvent>>,
+    publication_events: VecDeque<Arc<SystemEvent>>,
+}
+
+impl RecentEventDequeWindows {
+    fn to_public(&self) -> SystemEventRecentWindows {
+        SystemEventRecentWindows {
+            recent_events: self.all_events.iter().cloned().collect(),
+            recent_scheduler_events: self.scheduler_events.iter().cloned().collect(),
+            recent_command_events: self.command_events.iter().cloned().collect(),
+            recent_governance_events: self.governance_events.iter().cloned().collect(),
+            recent_publication_events: self.publication_events.iter().cloned().collect(),
+        }
+    }
+}
+
+impl From<SystemEventRecentWindows> for RecentEventDequeWindows {
+    fn from(value: SystemEventRecentWindows) -> Self {
+        Self {
+            all_events: value.recent_events.into(),
+            scheduler_events: value.recent_scheduler_events.into(),
+            command_events: value.recent_command_events.into(),
+            governance_events: value.recent_governance_events.into(),
+            publication_events: value.recent_publication_events.into(),
+        }
+    }
+}
+
 impl Default for SystemEventQueryIndex {
     fn default() -> Self {
         Self::new()
@@ -201,7 +235,7 @@ impl SystemEventQueryIndex {
             governance_total: 0,
             publication_total: 0,
             retained_event_refs: HashMap::new(),
-            recent_windows: SystemEventRecentWindows::default(),
+            recent_windows: RecentEventDequeWindows::default(),
         }
     }
 
@@ -243,15 +277,15 @@ impl SystemEventQueryIndex {
             }
         }
         push_recent_window_event(
-            &mut self.recent_windows.recent_events,
+            &mut self.recent_windows.all_events,
             event,
             &mut self.retained_event_refs,
         );
         let category_window = match event.category() {
-            SystemEventCategory::Scheduler => &mut self.recent_windows.recent_scheduler_events,
-            SystemEventCategory::Command => &mut self.recent_windows.recent_command_events,
-            SystemEventCategory::Governance => &mut self.recent_windows.recent_governance_events,
-            SystemEventCategory::Publication => &mut self.recent_windows.recent_publication_events,
+            SystemEventCategory::Scheduler => &mut self.recent_windows.scheduler_events,
+            SystemEventCategory::Command => &mut self.recent_windows.command_events,
+            SystemEventCategory::Governance => &mut self.recent_windows.governance_events,
+            SystemEventCategory::Publication => &mut self.recent_windows.publication_events,
         };
         push_recent_window_event(category_window, event, &mut self.retained_event_refs);
     }
@@ -260,7 +294,7 @@ impl SystemEventQueryIndex {
     pub fn merged(left: &Self, right: &Self) -> Self {
         Self::from_recent_windows(
             merge_window_totals(&left.window_totals(), &right.window_totals()),
-            merge_recent_windows(&left.recent_windows, &right.recent_windows),
+            merge_recent_windows(&left.recent_windows(), &right.recent_windows()),
         )
     }
 
@@ -325,7 +359,7 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn recent_windows(&self) -> SystemEventRecentWindows {
-        self.recent_windows.clone()
+        self.recent_windows.to_public()
     }
 
     #[must_use]
@@ -339,7 +373,7 @@ impl SystemEventQueryIndex {
         index.command_total = totals.command_total;
         index.governance_total = totals.governance_total;
         index.publication_total = totals.publication_total;
-        index.recent_windows = windows;
+        index.recent_windows = windows.into();
         index.rebuild_retained_event_refs();
         index
     }
@@ -358,7 +392,7 @@ impl SystemEventQueryIndex {
         let events = query.category.map_or_else(
             || {
                 self.recent_windows
-                    .recent_events
+                    .all_events
                     .iter()
                     .take(limit)
                     .cloned()
@@ -366,14 +400,10 @@ impl SystemEventQueryIndex {
             },
             |category| {
                 let window = match category {
-                    SystemEventCategory::Scheduler => &self.recent_windows.recent_scheduler_events,
-                    SystemEventCategory::Command => &self.recent_windows.recent_command_events,
-                    SystemEventCategory::Governance => {
-                        &self.recent_windows.recent_governance_events
-                    }
-                    SystemEventCategory::Publication => {
-                        &self.recent_windows.recent_publication_events
-                    }
+                    SystemEventCategory::Scheduler => &self.recent_windows.scheduler_events,
+                    SystemEventCategory::Command => &self.recent_windows.command_events,
+                    SystemEventCategory::Governance => &self.recent_windows.governance_events,
+                    SystemEventCategory::Publication => &self.recent_windows.publication_events,
                 };
                 window.iter().take(limit).cloned().collect::<Vec<_>>()
             },
@@ -389,12 +419,12 @@ impl SystemEventQueryIndex {
     fn rebuild_retained_event_refs(&mut self) {
         self.retained_event_refs = self
             .recent_windows
-            .recent_events
+            .all_events
             .iter()
-            .chain(self.recent_windows.recent_scheduler_events.iter())
-            .chain(self.recent_windows.recent_command_events.iter())
-            .chain(self.recent_windows.recent_governance_events.iter())
-            .chain(self.recent_windows.recent_publication_events.iter())
+            .chain(self.recent_windows.scheduler_events.iter())
+            .chain(self.recent_windows.command_events.iter())
+            .chain(self.recent_windows.governance_events.iter())
+            .chain(self.recent_windows.publication_events.iter())
             .fold(HashMap::new(), |mut refs, event| {
                 *refs.entry(event.event_id.clone()).or_insert(0) += 1;
                 refs
@@ -403,15 +433,14 @@ impl SystemEventQueryIndex {
 }
 
 fn push_recent_window_event(
-    window: &mut Vec<Arc<SystemEvent>>,
+    window: &mut VecDeque<Arc<SystemEvent>>,
     event: &Arc<SystemEvent>,
     retained_event_refs: &mut HashMap<Box<str>, usize>,
 ) {
-    window.push(Arc::clone(event));
-    window.rotate_right(1);
+    window.push_front(Arc::clone(event));
     increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
     if window.len() > MAX_SYSTEM_EVENTS_LIMIT
-        && let Some(evicted) = window.pop()
+        && let Some(evicted) = window.pop_back()
     {
         decrement_retained_event_ref(retained_event_refs, evicted.event_id.as_ref());
     }
@@ -855,5 +884,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["event-004", "event-002", "event-001"]
         );
+    }
+
+    #[test]
+    fn system_event_query_index_push_uses_ring_windows_without_semantic_regression() {
+        system_event_query_index_push_keeps_recent_windows_without_full_id_rebuilds();
     }
 }

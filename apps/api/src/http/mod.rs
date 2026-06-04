@@ -64,6 +64,13 @@ struct ServiceSlot {
     service: Mutex<Option<ApiApplication>>,
     ready: Notify,
     observed_local_change_epoch: AtomicU64,
+    residency: ServiceResidency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceResidency {
+    Resident,
+    EphemeralForkFromState,
 }
 
 enum ApiServiceSet {
@@ -250,7 +257,8 @@ impl ApiState {
         Ok(Self::new_partitioned(
             state_service,
             runtime_service,
-            publication_service,
+            Some(publication_service),
+            ServiceResidency::Resident,
         ))
     }
 
@@ -266,22 +274,21 @@ impl ApiState {
             crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
         let runtime_backend =
             crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
-        let publication_backend =
-            crate::infra::postgres_backend::PostgresStore::fork_from(&state_backend);
         let state_service = ApiApplication::from_postgres_store(state_backend);
         let runtime_service = ApiApplication::from_postgres_store(runtime_backend);
-        let publication_service = ApiApplication::from_postgres_store(publication_backend);
         Ok(Self::new_partitioned(
             state_service,
             runtime_service,
-            publication_service,
+            None,
+            ServiceResidency::EphemeralForkFromState,
         ))
     }
 
     fn new_partitioned(
         state_service: ApiApplication,
         runtime_service: ApiApplication,
-        publication_service: ApiApplication,
+        publication_service: Option<ApiApplication>,
+        publication_residency: ServiceResidency,
     ) -> Self {
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
@@ -297,16 +304,19 @@ impl ApiState {
                         service: Mutex::new(Some(state_service)),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
+                        residency: ServiceResidency::Resident,
                     },
                     runtime: ServiceSlot {
                         service: Mutex::new(Some(runtime_service)),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
+                        residency: ServiceResidency::Resident,
                     },
                     publication: ServiceSlot {
-                        service: Mutex::new(Some(publication_service)),
+                        service: Mutex::new(publication_service),
                         ready: Notify::new(),
                         observed_local_change_epoch: AtomicU64::new(0),
+                        residency: publication_residency,
                     },
                 })),
                 local_change_epoch: AtomicU64::new(0),
@@ -599,6 +609,13 @@ impl ApiState {
             if let Some(service) = guard.take() {
                 return service;
             }
+            if slot.residency == ServiceResidency::EphemeralForkFromState {
+                drop(guard);
+                if let Some(service) = self.try_fork_ephemeral_service_from_state().await {
+                    return service;
+                }
+                continue;
+            }
             drop(guard);
             slot.ready.notified().await;
         }
@@ -608,9 +625,24 @@ impl ApiState {
         self.rebase_idle_postgres_sibling_lanes(lane, &service);
         let slot = self.slot_for_lane(lane);
         let mut guard = slot.service.lock().await;
-        *guard = Some(service);
+        *guard = match slot.residency {
+            ServiceResidency::Resident => Some(service),
+            ServiceResidency::EphemeralForkFromState => None,
+        };
         drop(guard);
         slot.ready.notify_waiters();
+    }
+
+    async fn try_fork_ephemeral_service_from_state(&self) -> Option<ApiApplication> {
+        let state_slot = self.slot_for_lane(ApiMutationLane::State);
+        loop {
+            let guard = state_slot.service.lock().await;
+            if let Some(service) = guard.as_ref() {
+                return ApiApplication::fork_from(service);
+            }
+            drop(guard);
+            state_slot.ready.notified().await;
+        }
     }
 
     fn rebase_idle_postgres_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
@@ -715,21 +747,24 @@ impl ApiState {
             result.is_ok(),
             mark_remote_change_result.is_some(),
         );
-        let mut remote_change_watermark = service.observed_remote_change_watermark();
-        let remote_snapshot_refresh = self
-            .detached_remote_snapshot_refresh(refresh_from_remote_changed || result.is_ok())
-            .await;
-        let next_snapshot = if let Some(refresh_result) = remote_snapshot_refresh {
+        let remote_change_watermark = service.observed_remote_change_watermark();
+        let remote_snapshot_refresh =
+            if result.is_ok() && self.inner.remote_read_snapshot_loader.is_some() {
+                None
+            } else {
+                self.detached_remote_snapshot_refresh(refresh_from_remote_changed)
+                    .await
+            };
+        let next_snapshot = if result.is_ok() && self.inner.remote_read_snapshot_loader.is_some() {
+            Some(Arc::new(service.read_snapshot()))
+        } else if let Some(refresh_result) = remote_snapshot_refresh {
             match refresh_result {
-                Ok((snapshot, change_watermark)) => {
-                    remote_change_watermark = Some(change_watermark);
-                    Some(snapshot)
-                }
+                Ok((snapshot, _change_watermark)) => Some(snapshot),
                 Err(_error) if result.is_ok() => {
                     self.inner
                         .remote_observation_degraded
                         .store(true, Ordering::Relaxed);
-                    None
+                    Some(Arc::new(service.read_snapshot()))
                 }
                 Err(error) => {
                     self.restore_service(lane, service).await;
@@ -1894,6 +1929,7 @@ mod tests {
     use super::ApiError;
     use super::ApiHealthStatus;
     use super::ApiMutationLane;
+    use super::ApiServiceSet;
     use super::ApiState;
     use super::BindArtifactRequest;
     use super::ComponentRegistrationRequest;
@@ -2011,9 +2047,9 @@ mod tests {
             .await
             .expect("postgres api state should open");
 
-        let mut state_service = state.take_service(ApiMutationLane::State).await;
         let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
         let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let mut state_service = state.take_service(ApiMutationLane::State).await;
 
         assert!(Arc::ptr_eq(
             &state_service.read_model_snapshot_arc(),
@@ -2112,6 +2148,48 @@ mod tests {
         state
             .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn postgres_publication_lane_is_ephemeral_until_taken() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("publication_ephemeral_lane");
+        let state = ApiState::open_postgres(&database_url, &schema)
+            .await
+            .expect("postgres api state should open");
+
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "publication lane should not keep a resident service before first use"
+            );
+        }
+
+        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let state_service = state.take_service(ApiMutationLane::State).await;
+        assert!(Arc::ptr_eq(
+            &publication_service.inventory_snapshot_arc(),
+            &state_service.inventory_snapshot_arc()
+        ));
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
+
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "publication lane should release its resident service after restore"
+            );
+        }
     }
 
     #[tokio::test]
