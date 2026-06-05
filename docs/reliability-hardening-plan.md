@@ -222,6 +222,10 @@ Completed:
     Drop the fixed resident Postgres runtime lane from steady state and remove
     avoidable hot-path cloning and merge churn around operator-facing system
     event snapshots.
+75. `W224-local-volatile-lane-ephemeral-residency`
+    Reopen local runtime and publication lanes from durable disk only when they
+    are taken instead of keeping both volatile local services resident in
+    memory all the time.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.

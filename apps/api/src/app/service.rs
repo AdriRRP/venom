@@ -777,6 +777,14 @@ impl ApiApplication {
         matches!(self.backend, ApiStore::Postgres(_))
     }
 
+    #[must_use]
+    pub fn local_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        match &self.backend {
+            ApiStore::Local(local) => Some((local.state_path.clone(), local.runtime_path.clone())),
+            ApiStore::Postgres(_) => None,
+        }
+    }
+
     pub fn rebase_postgres_live_sources_from(&mut self, source: &Self) {
         if let (ApiStore::Postgres(target), ApiStore::Postgres(source)) =
             (&mut self.backend, &source.backend)
