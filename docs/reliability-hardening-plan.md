@@ -226,6 +226,10 @@ Completed:
     Reopen local runtime and publication lanes from durable disk only when they
     are taken instead of keeping both volatile local services resident in
     memory all the time.
+76. `W225-local-ephemeral-veracity-and-event-cost-tightening`
+    Make local ephemeral lane reopen semantics explicitly fail on durable open
+    errors, converge to a truthful local epoch before reuse, and tighten the
+    residual hot-path cost of local `system events` merge/index rebuilding.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.
