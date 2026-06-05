@@ -294,12 +294,13 @@ impl ApiState {
         publication_service: Option<ApiApplication>,
         publication_residency: ServiceResidency,
     ) -> Self {
-        let local_ephemeral_source = state_service.local_paths().map(|(state_path, runtime_path)| {
-            LocalEphemeralSource {
-                state_path,
-                runtime_path,
-            }
-        });
+        let local_ephemeral_source =
+            state_service
+                .local_paths()
+                .map(|(state_path, runtime_path)| LocalEphemeralSource {
+                    state_path,
+                    runtime_path,
+                });
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
             .unwrap_or(0);
@@ -645,9 +646,8 @@ impl ApiState {
         let mut guard = slot.service.lock().await;
         *guard = match slot.residency {
             ServiceResidency::Resident => Some(service),
-            ServiceResidency::EphemeralForkFromState | ServiceResidency::EphemeralReloadFromDisk => {
-                None
-            }
+            ServiceResidency::EphemeralForkFromState
+            | ServiceResidency::EphemeralReloadFromDisk => None,
         };
         drop(guard);
         slot.ready.notify_waiters();
@@ -667,14 +667,13 @@ impl ApiState {
 
     fn open_ephemeral_local_service(&self, lane: ApiMutationLane) -> Option<ApiApplication> {
         let source = self.inner.local_ephemeral_source.as_ref()?;
-        let service = ApiApplication::open_local(
-            source.state_path.clone(),
-            source.runtime_path.clone(),
-        )
-        .ok()?;
-        self.slot_for_lane(lane)
-            .observed_local_change_epoch
-            .store(self.inner.local_change_epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+        let service =
+            ApiApplication::open_local(source.state_path.clone(), source.runtime_path.clone())
+                .ok()?;
+        self.slot_for_lane(lane).observed_local_change_epoch.store(
+            self.inner.local_change_epoch.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
         Some(service)
     }
 
@@ -2258,7 +2257,10 @@ mod tests {
 
         let publication_service = state.take_service(ApiMutationLane::Publication).await;
         let state_service = state.take_service(ApiMutationLane::State).await;
-        assert_eq!(publication_service.local_paths(), state_service.local_paths());
+        assert_eq!(
+            publication_service.local_paths(),
+            state_service.local_paths()
+        );
         state
             .restore_service(ApiMutationLane::State, state_service)
             .await;
