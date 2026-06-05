@@ -322,7 +322,10 @@ impl SystemEventQueryIndex {
     ) -> (Self, SystemEventRecentWindows) {
         let index = Self::from_deque_windows(
             merge_window_totals(&left.window_totals(), &right.window_totals()),
-            merge_recent_deque_window_refs(&left.recent_windows.refs(), &right.recent_windows.refs()),
+            merge_recent_deque_window_refs(
+                &left.recent_windows.refs(),
+                &right.recent_windows.refs(),
+            ),
         );
         let windows = index.recent_windows();
         (index, windows)
@@ -330,7 +333,8 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
-        self.delta_since_with_recent_windows(base).map(|(delta, _)| delta)
+        self.delta_since_with_recent_windows(base)
+            .map(|(delta, _)| delta)
     }
 
     #[must_use]
@@ -1049,7 +1053,10 @@ mod tests {
 
         let (merged, windows) = SystemEventQueryIndex::merged_with_recent_windows(&left, &right);
 
-        assert_eq!(merged.query(&SystemEventsQuery::new().with_limit(10)).total, 4);
+        assert_eq!(
+            merged.query(&SystemEventsQuery::new().with_limit(10)).total,
+            4
+        );
         assert_eq!(
             windows
                 .recent_events

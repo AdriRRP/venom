@@ -3984,7 +3984,8 @@ impl PostgresStore {
         backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(
             self.ingestion_ref().inventory_arc(),
         ));
-        backend.inventory_definition_source_watermarks = self.inventory_definition_source_watermarks;
+        backend.inventory_definition_source_watermarks =
+            self.inventory_definition_source_watermarks;
         backend
             .load_component_context_profiles_after(
                 self.inventory_definition_source_watermarks
@@ -3999,7 +4000,8 @@ impl PostgresStore {
             .await?;
         backend
             .load_artifact_bindings_after(
-                self.inventory_definition_source_watermarks.artifact_bindings,
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings,
             )
             .await?;
         self.ingestion = backend.ingestion;
@@ -4562,9 +4564,8 @@ impl PostgresStore {
             self.names.component_context_profiles
         ))
         .bind(
-            i64::try_from(after_micros).map_err(|_| {
-                "postgres component context profile cursor out of range".to_owned()
-            })?,
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component context profile cursor out of range".to_owned())?,
         )
         .fetch_all(&self.pool)
         .await
@@ -4714,7 +4715,10 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_component_tag_memberships_after(&mut self, after_micros: u64) -> Result<(), String> {
+    async fn load_component_tag_memberships_after(
+        &mut self,
+        after_micros: u64,
+    ) -> Result<(), String> {
         let memberships = sqlx::query_as::<_, (String, String, i64)>(&format!(
             concat!(
                 "SELECT tag_key, component_key, ",
@@ -4725,9 +4729,8 @@ impl PostgresStore {
             self.names.component_tag_memberships
         ))
         .bind(
-            i64::try_from(after_micros).map_err(|_| {
-                "postgres component tag membership cursor out of range".to_owned()
-            })?,
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component tag membership cursor out of range".to_owned())?,
         )
         .fetch_all(&self.pool)
         .await
@@ -5006,12 +5009,13 @@ impl PostgresStore {
             if result.change == BindArtifactChange::Rejected {
                 return Err("postgres artifact bindings contain conflicting ownership".to_owned());
             }
-            self.inventory_definition_source_watermarks.artifact_bindings = self
-                .inventory_definition_source_watermarks
-                .artifact_bindings
-                .max(u64::try_from(created_at_micros).map_err(|_| {
-                    "postgres artifact binding created_at out of range".to_owned()
-                })?);
+            self.inventory_definition_source_watermarks
+                .artifact_bindings =
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres artifact binding created_at out of range".to_owned()
+                    })?);
         }
 
         Ok(())
@@ -5042,12 +5046,13 @@ impl PostgresStore {
             if result.change == BindArtifactChange::Rejected {
                 return Err("postgres artifact bindings contain conflicting ownership".to_owned());
             }
-            self.inventory_definition_source_watermarks.artifact_bindings = self
-                .inventory_definition_source_watermarks
-                .artifact_bindings
-                .max(u64::try_from(created_at_micros).map_err(|_| {
-                    "postgres artifact binding created_at out of range".to_owned()
-                })?);
+            self.inventory_definition_source_watermarks
+                .artifact_bindings =
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres artifact binding created_at out of range".to_owned()
+                    })?);
         }
 
         Ok(())
@@ -6442,7 +6447,7 @@ impl PostgresReadSnapshotLoader {
                 inventory,
                 base.inventory_definition_source_watermarks,
             )
-                .await?
+            .await?
         } else {
             inventory
         };
@@ -6691,9 +6696,7 @@ impl PostgresReadSnapshotLoader {
             )
             .await?;
         backend
-            .load_artifact_bindings_after(
-                inventory_definition_source_watermarks.artifact_bindings,
-            )
+            .load_artifact_bindings_after(inventory_definition_source_watermarks.artifact_bindings)
             .await?;
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
@@ -7317,9 +7320,9 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::CHANGE_LANE_COMPONENT_BINDINGS;
     use super::CHANGE_LANE_COLLECTION_MEMBERSHIPS;
     use super::CHANGE_LANE_COLLECTION_SOURCES;
+    use super::CHANGE_LANE_COMPONENT_BINDINGS;
     use super::CHANGE_LANE_CONTEXT_PROFILES;
     use super::CHANGE_LANE_INVENTORY_CORE;
     use super::LoadedPostgresReadSnapshot;
