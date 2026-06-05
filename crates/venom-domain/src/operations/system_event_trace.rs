@@ -312,14 +312,36 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn merged(left: &Self, right: &Self) -> Self {
-        Self::from_recent_windows(
+        Self::merged_with_recent_windows(left, right).0
+    }
+
+    #[must_use]
+    pub fn merged_with_recent_windows(
+        left: &Self,
+        right: &Self,
+    ) -> (Self, SystemEventRecentWindows) {
+        let index = Self::from_deque_windows(
             merge_window_totals(&left.window_totals(), &right.window_totals()),
-            merge_recent_window_refs(&left.recent_windows.refs(), &right.recent_windows.refs()),
-        )
+            merge_recent_deque_window_refs(
+                &left.recent_windows.refs(),
+                &right.recent_windows.refs(),
+            ),
+        );
+        let windows = index.recent_windows();
+        (index, windows)
     }
 
     #[must_use]
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        self.delta_since_with_recent_windows(base)
+            .map(|(delta, _)| delta)
+    }
+
+    #[must_use]
+    pub fn delta_since_with_recent_windows(
+        &self,
+        base: &Self,
+    ) -> Option<(Self, SystemEventRecentWindows)> {
         let totals = self.window_totals();
         let base_totals = base.window_totals();
         if totals.total < base_totals.total
@@ -333,7 +355,7 @@ impl SystemEventQueryIndex {
 
         let windows = self.recent_windows.refs();
         let base_windows = base.recent_windows.refs();
-        Some(Self::from_recent_windows(
+        let index = Self::from_deque_windows(
             SystemEventWindowTotals {
                 total: totals.total - base_totals.total,
                 scheduler_total: totals.scheduler_total - base_totals.scheduler_total,
@@ -341,29 +363,33 @@ impl SystemEventQueryIndex {
                 governance_total: totals.governance_total - base_totals.governance_total,
                 publication_total: totals.publication_total - base_totals.publication_total,
             },
-            SystemEventRecentWindows {
-                recent_events: newer_prefix_since_deque(
-                    windows.all_events,
-                    base_windows.all_events,
-                )?,
-                recent_scheduler_events: newer_prefix_since_deque(
+            RecentEventDequeWindows {
+                all_events: newer_prefix_since_deque(windows.all_events, base_windows.all_events)?
+                    .into(),
+                scheduler_events: newer_prefix_since_deque(
                     windows.scheduler_events,
                     base_windows.scheduler_events,
-                )?,
-                recent_command_events: newer_prefix_since_deque(
+                )?
+                .into(),
+                command_events: newer_prefix_since_deque(
                     windows.command_events,
                     base_windows.command_events,
-                )?,
-                recent_governance_events: newer_prefix_since_deque(
+                )?
+                .into(),
+                governance_events: newer_prefix_since_deque(
                     windows.governance_events,
                     base_windows.governance_events,
-                )?,
-                recent_publication_events: newer_prefix_since_deque(
+                )?
+                .into(),
+                publication_events: newer_prefix_since_deque(
                     windows.publication_events,
                     base_windows.publication_events,
-                )?,
+                )?
+                .into(),
             },
-        ))
+        );
+        let delta_windows = index.recent_windows();
+        Some((index, delta_windows))
     }
 
     #[must_use]
@@ -387,7 +413,15 @@ impl SystemEventQueryIndex {
         totals: SystemEventWindowTotals,
         windows: SystemEventRecentWindows,
     ) -> Self {
-        let (recent_windows, retained_event_refs) = recent_deque_windows_and_retained_refs(windows);
+        let recent_windows: RecentEventDequeWindows = windows.into();
+        Self::from_deque_windows(totals, recent_windows)
+    }
+
+    fn from_deque_windows(
+        totals: SystemEventWindowTotals,
+        recent_windows: RecentEventDequeWindows,
+    ) -> Self {
+        let retained_event_refs = retained_event_refs_from_deque_windows(&recent_windows);
         let mut index = Self::new();
         index.total = totals.total;
         index.scheduler_total = totals.scheduler_total;
@@ -438,42 +472,12 @@ impl SystemEventQueryIndex {
     }
 }
 
-fn recent_deque_windows_and_retained_refs(
-    windows: SystemEventRecentWindows,
-) -> (RecentEventDequeWindows, HashMap<Box<str>, usize>) {
+fn retained_event_refs_from_deque_windows(
+    windows: &RecentEventDequeWindows,
+) -> HashMap<Box<str>, usize> {
     let mut retained_event_refs = HashMap::new();
-    let recent_windows = RecentEventDequeWindows {
-        all_events: collect_recent_window_and_refs(windows.recent_events, &mut retained_event_refs),
-        scheduler_events: collect_recent_window_and_refs(
-            windows.recent_scheduler_events,
-            &mut retained_event_refs,
-        ),
-        command_events: collect_recent_window_and_refs(
-            windows.recent_command_events,
-            &mut retained_event_refs,
-        ),
-        governance_events: collect_recent_window_and_refs(
-            windows.recent_governance_events,
-            &mut retained_event_refs,
-        ),
-        publication_events: collect_recent_window_and_refs(
-            windows.recent_publication_events,
-            &mut retained_event_refs,
-        ),
-    };
-    (recent_windows, retained_event_refs)
-}
-
-fn collect_recent_window_and_refs(
-    events: Vec<Arc<SystemEvent>>,
-    retained_event_refs: &mut HashMap<Box<str>, usize>,
-) -> VecDeque<Arc<SystemEvent>> {
-    let mut window = VecDeque::with_capacity(events.len());
-    for event in events {
-        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
-        window.push_back(event);
-    }
-    window
+    collect_recent_window_refs(windows.refs(), &mut retained_event_refs);
+    retained_event_refs
 }
 
 fn push_recent_window_event(
@@ -552,28 +556,50 @@ fn stitch_recent_append_deque(
         .collect()
 }
 
-fn merge_recent_window_refs(
+fn merge_recent_deque_window_refs(
     left: &RecentEventDequeWindowRefs<'_>,
     right: &RecentEventDequeWindowRefs<'_>,
-) -> SystemEventRecentWindows {
-    SystemEventRecentWindows {
-        recent_events: merge_recent_arc_event_deques(left.all_events, right.all_events),
-        recent_scheduler_events: merge_recent_arc_event_deques(
+) -> RecentEventDequeWindows {
+    RecentEventDequeWindows {
+        all_events: merge_recent_arc_event_deques(left.all_events, right.all_events).into(),
+        scheduler_events: merge_recent_arc_event_deques(
             left.scheduler_events,
             right.scheduler_events,
-        ),
-        recent_command_events: merge_recent_arc_event_deques(
-            left.command_events,
-            right.command_events,
-        ),
-        recent_governance_events: merge_recent_arc_event_deques(
+        )
+        .into(),
+        command_events: merge_recent_arc_event_deques(left.command_events, right.command_events)
+            .into(),
+        governance_events: merge_recent_arc_event_deques(
             left.governance_events,
             right.governance_events,
-        ),
-        recent_publication_events: merge_recent_arc_event_deques(
+        )
+        .into(),
+        publication_events: merge_recent_arc_event_deques(
             left.publication_events,
             right.publication_events,
-        ),
+        )
+        .into(),
+    }
+}
+
+fn collect_recent_window_refs(
+    windows: RecentEventDequeWindowRefs<'_>,
+    retained_event_refs: &mut HashMap<Box<str>, usize>,
+) {
+    for event in windows.all_events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+    }
+    for event in windows.scheduler_events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+    }
+    for event in windows.command_events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+    }
+    for event in windows.governance_events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+    }
+    for event in windows.publication_events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
     }
 }
 
@@ -1006,5 +1032,46 @@ mod tests {
         assert_eq!(page.events.len(), 4);
         assert_eq!(publication_page.total, 1);
         assert_eq!(publication_page.events[0].event_id.as_ref(), "event-004");
+    }
+
+    #[test]
+    fn system_event_query_index_merged_with_recent_windows_reuses_one_window_build() {
+        let left = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-003", 3, SystemEventKind::FindingRiskAccepted),
+                timed_event("event-001", 1, SystemEventKind::ScanCommandCompleted),
+            ]
+            .iter(),
+        );
+        let right = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-004", 4, SystemEventKind::IntegrationEventPublished),
+                timed_event("event-002", 2, SystemEventKind::CollectionScanMaterialized),
+            ]
+            .iter(),
+        );
+
+        let (merged, windows) = SystemEventQueryIndex::merged_with_recent_windows(&left, &right);
+
+        assert_eq!(
+            merged.query(&SystemEventsQuery::new().with_limit(10)).total,
+            4
+        );
+        assert_eq!(
+            windows
+                .recent_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-002", "event-004", "event-001", "event-003"]
+        );
+        assert_eq!(
+            windows
+                .recent_publication_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-004"]
+        );
     }
 }

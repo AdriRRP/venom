@@ -132,6 +132,9 @@ pub struct InventoryDefinitionSourceWatermarks {
     pub components: u64,
     pub context_profiles: u64,
     pub component_tags: u64,
+    pub component_context_assignments: u64,
+    pub component_tag_memberships: u64,
+    pub artifact_bindings: u64,
     pub collection_definitions: u64,
     pub collection_sources: u64,
     pub collection_memberships: u64,
@@ -3978,13 +3981,32 @@ impl PostgresStore {
 
     async fn refresh_component_bindings_from_remote(&mut self) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
-        let mut inventory = Arc::unwrap_or_clone(self.ingestion_ref().inventory_arc());
-        inventory.reset_component_bindings_for_rebuild();
-        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
-        backend.load_component_context_profiles().await?;
-        backend.load_component_tag_memberships().await?;
-        backend.load_artifact_bindings().await?;
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(
+            self.ingestion_ref().inventory_arc(),
+        ));
+        backend.inventory_definition_source_watermarks =
+            self.inventory_definition_source_watermarks;
+        backend
+            .load_component_context_profiles_after(
+                self.inventory_definition_source_watermarks
+                    .component_context_assignments,
+            )
+            .await?;
+        backend
+            .load_component_tag_memberships_after(
+                self.inventory_definition_source_watermarks
+                    .component_tag_memberships,
+            )
+            .await?;
+        backend
+            .load_artifact_bindings_after(
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings,
+            )
+            .await?;
         self.ingestion = backend.ingestion;
+        self.inventory_definition_source_watermarks =
+            backend.inventory_definition_source_watermarks;
         self.refresh_inventory_snapshot_cache();
         Ok(())
     }
@@ -4496,14 +4518,18 @@ impl PostgresStore {
     }
 
     async fn load_component_context_profiles(&mut self) -> Result<(), String> {
-        let assignments = sqlx::query_as::<_, (String, String)>(&format!(
-            concat!("SELECT component_key, profile_key FROM {} ORDER BY component_key"),
+        let assignments = sqlx::query_as::<_, (String, String, i64)>(&format!(
+            concat!(
+                "SELECT component_key, profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} ORDER BY updated_at, component_key"
+            ),
             self.names.component_context_profiles
         ))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres component context profiles load failed: {error}"))?;
-        for (component_key, profile_key) in assignments {
+        for (component_key, profile_key, updated_at_micros) in assignments {
             let result = self
                 .ingestion_mut()
                 .inventory_mut()
@@ -4513,6 +4539,56 @@ impl PostgresStore {
                     "postgres component context profiles contain invalid assignment".to_owned(),
                 );
             }
+            self.inventory_definition_source_watermarks
+                .component_context_assignments = self
+                .inventory_definition_source_watermarks
+                .component_context_assignments
+                .max(u64::try_from(updated_at_micros).map_err(|_| {
+                    "postgres component context profile updated_at out of range".to_owned()
+                })?);
+        }
+        Ok(())
+    }
+
+    async fn load_component_context_profiles_after(
+        &mut self,
+        after_micros: u64,
+    ) -> Result<(), String> {
+        let assignments = sqlx::query_as::<_, (String, String, i64)>(&format!(
+            concat!(
+                "SELECT component_key, profile_key, ",
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
+                "ORDER BY updated_at, component_key"
+            ),
+            self.names.component_context_profiles
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component context profile cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres component context profile delta load failed: {error}")
+        })?;
+        for (component_key, profile_key, updated_at_micros) in assignments {
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .assign_context_profile(&component_key, &profile_key);
+            if result.change == AssignContextProfileChange::Rejected {
+                return Err(
+                    "postgres component context profiles contain invalid assignment".to_owned(),
+                );
+            }
+            self.inventory_definition_source_watermarks
+                .component_context_assignments = self
+                .inventory_definition_source_watermarks
+                .component_context_assignments
+                .max(u64::try_from(updated_at_micros).map_err(|_| {
+                    "postgres component context profile updated_at out of range".to_owned()
+                })?);
         }
         Ok(())
     }
@@ -4607,9 +4683,10 @@ impl PostgresStore {
     }
 
     async fn load_component_tag_memberships(&mut self) -> Result<(), String> {
-        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
+        let memberships = sqlx::query_as::<_, (String, String, i64)>(&format!(
             concat!(
-                "SELECT tag_key, component_key FROM {} ",
+                "SELECT tag_key, component_key, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros FROM {} ",
                 "ORDER BY created_at, tag_key, component_key"
             ),
             self.names.component_tag_memberships
@@ -4617,7 +4694,7 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres component tag memberships load failed: {error}"))?;
-        for (tag_key, component_key) in memberships {
+        for (tag_key, component_key, created_at_micros) in memberships {
             let result = self
                 .ingestion_mut()
                 .inventory_mut()
@@ -4627,6 +4704,54 @@ impl PostgresStore {
                     "postgres component tag memberships contain invalid ownership".to_owned(),
                 );
             }
+            self.inventory_definition_source_watermarks
+                .component_tag_memberships = self
+                .inventory_definition_source_watermarks
+                .component_tag_memberships
+                .max(u64::try_from(created_at_micros).map_err(|_| {
+                    "postgres component tag membership created_at out of range".to_owned()
+                })?);
+        }
+        Ok(())
+    }
+
+    async fn load_component_tag_memberships_after(
+        &mut self,
+        after_micros: u64,
+    ) -> Result<(), String> {
+        let memberships = sqlx::query_as::<_, (String, String, i64)>(&format!(
+            concat!(
+                "SELECT tag_key, component_key, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros FROM {} ",
+                "WHERE (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint > $1 ",
+                "ORDER BY created_at, tag_key, component_key"
+            ),
+            self.names.component_tag_memberships
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres component tag membership cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres component tag membership delta load failed: {error}"))?;
+        for (tag_key, component_key, created_at_micros) in memberships {
+            let result = self
+                .ingestion_mut()
+                .inventory_mut()
+                .assign_component_tag(&tag_key, &component_key);
+            if result.change == AssignComponentTagChange::Rejected {
+                return Err(
+                    "postgres component tag memberships contain invalid ownership".to_owned(),
+                );
+            }
+            self.inventory_definition_source_watermarks
+                .component_tag_memberships = self
+                .inventory_definition_source_watermarks
+                .component_tag_memberships
+                .max(u64::try_from(created_at_micros).map_err(|_| {
+                    "postgres component tag membership created_at out of range".to_owned()
+                })?);
         }
         Ok(())
     }
@@ -4865,9 +4990,10 @@ impl PostgresStore {
     }
 
     async fn load_artifact_bindings(&mut self) -> Result<(), String> {
-        let bindings = sqlx::query_as::<_, (String, String, String)>(&format!(
+        let bindings = sqlx::query_as::<_, (String, String, String, i64)>(&format!(
             concat!(
-                "SELECT component_key, artifact_kind, artifact_identity ",
+                "SELECT component_key, artifact_kind, artifact_identity, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
                 "FROM {} ORDER BY created_at, component_key, artifact_kind, artifact_identity"
             ),
             self.names.artifact_bindings
@@ -4875,7 +5001,7 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres artifact bindings load failed: {error}"))?;
-        for (component_key, artifact_kind, artifact_identity) in bindings {
+        for (component_key, artifact_kind, artifact_identity, created_at_micros) in bindings {
             let result = self.ingestion_mut().inventory_mut().bind_artifact(
                 component_key.as_ref(),
                 ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
@@ -4883,6 +5009,50 @@ impl PostgresStore {
             if result.change == BindArtifactChange::Rejected {
                 return Err("postgres artifact bindings contain conflicting ownership".to_owned());
             }
+            self.inventory_definition_source_watermarks
+                .artifact_bindings =
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres artifact binding created_at out of range".to_owned()
+                    })?);
+        }
+
+        Ok(())
+    }
+
+    async fn load_artifact_bindings_after(&mut self, after_micros: u64) -> Result<(), String> {
+        let bindings = sqlx::query_as::<_, (String, String, String, i64)>(&format!(
+            concat!(
+                "SELECT component_key, artifact_kind, artifact_identity, ",
+                "(EXTRACT(EPOCH FROM created_at) * 1000000)::bigint AS created_at_micros ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM created_at) * 1000000)::bigint > $1 ",
+                "ORDER BY created_at, component_key, artifact_kind, artifact_identity"
+            ),
+            self.names.artifact_bindings
+        ))
+        .bind(
+            i64::try_from(after_micros)
+                .map_err(|_| "postgres artifact binding cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres artifact binding delta load failed: {error}"))?;
+        for (component_key, artifact_kind, artifact_identity, created_at_micros) in bindings {
+            let result = self.ingestion_mut().inventory_mut().bind_artifact(
+                component_key.as_ref(),
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
+            );
+            if result.change == BindArtifactChange::Rejected {
+                return Err("postgres artifact bindings contain conflicting ownership".to_owned());
+            }
+            self.inventory_definition_source_watermarks
+                .artifact_bindings =
+                self.inventory_definition_source_watermarks
+                    .artifact_bindings
+                    .max(u64::try_from(created_at_micros).map_err(|_| {
+                        "postgres artifact binding created_at out of range".to_owned()
+                    })?);
         }
 
         Ok(())
@@ -6273,8 +6443,11 @@ impl PostgresReadSnapshotLoader {
             inventory
         };
         let inventory = if lane_mask & CHANGE_LANE_COMPONENT_BINDINGS != 0 {
-            self.load_component_binding_inventory_snapshot(inventory)
-                .await?
+            self.load_component_binding_inventory_snapshot(
+                inventory,
+                base.inventory_definition_source_watermarks,
+            )
+            .await?
         } else {
             inventory
         };
@@ -6507,14 +6680,24 @@ impl PostgresReadSnapshotLoader {
     async fn load_component_binding_inventory_snapshot(
         &self,
         inventory: Arc<ComponentInventory>,
+        inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks,
     ) -> Result<Arc<ComponentInventory>, String> {
         let mut backend = PostgresStore::detached(self.pool.clone(), self.names.clone());
-        let mut inventory = Arc::unwrap_or_clone(inventory);
-        inventory.reset_component_bindings_for_rebuild();
-        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(Arc::new(inventory)));
-        backend.load_component_context_profiles().await?;
-        backend.load_component_tag_memberships().await?;
-        backend.load_artifact_bindings().await?;
+        backend.ingestion = Arc::new(FindingIngestion::from_inventory_arc(inventory));
+        backend.inventory_definition_source_watermarks = inventory_definition_source_watermarks;
+        backend
+            .load_component_context_profiles_after(
+                inventory_definition_source_watermarks.component_context_assignments,
+            )
+            .await?;
+        backend
+            .load_component_tag_memberships_after(
+                inventory_definition_source_watermarks.component_tag_memberships,
+            )
+            .await?;
+        backend
+            .load_artifact_bindings_after(inventory_definition_source_watermarks.artifact_bindings)
+            .await?;
         backend.refresh_inventory_snapshot_cache();
         Ok(backend.inventory_snapshot_arc())
     }
@@ -7139,7 +7322,9 @@ fn micros_to_system_time(value: i64) -> Result<SystemTime, String> {
 mod tests {
     use super::CHANGE_LANE_COLLECTION_MEMBERSHIPS;
     use super::CHANGE_LANE_COLLECTION_SOURCES;
+    use super::CHANGE_LANE_COMPONENT_BINDINGS;
     use super::CHANGE_LANE_CONTEXT_PROFILES;
+    use super::CHANGE_LANE_INVENTORY_CORE;
     use super::LoadedPostgresReadSnapshot;
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
@@ -7723,6 +7908,110 @@ mod tests {
     #[test]
     fn detached_postgres_read_snapshot_reloads_inventory_core_from_changed_identities() {
         detached_postgres_read_snapshot_reloads_inventory_core_sub_lanes_incrementally();
+    }
+
+    #[tokio::test]
+    async fn detached_postgres_read_snapshot_reloads_component_binding_sub_lanes_incrementally() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("detached_component_binding_sub_lanes");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .register_context_profile(ContextProfileRegistration::new(
+                "context:corp-api-baseline",
+                "Corporate API Baseline",
+                false,
+                true,
+                false,
+            ))
+            .await
+            .expect("context profile should persist");
+        let _ = backend
+            .register_component_tag(ComponentTagRegistration::new(
+                "tag:corp-api",
+                "Corporate API",
+            ))
+            .await
+            .expect("component tag should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after binding fixture registration");
+        let snapshot_base = snapshot_base(&backend);
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let _ = writer
+            .assign_context_profile("component:payments-api", "context:corp-api-baseline")
+            .await
+            .expect("component context assignment should persist");
+        let current_change_watermark = loader
+            .current_change_watermark()
+            .await
+            .expect("current watermark should advance after context assignment");
+        let lane_mask = loader
+            .changed_lane_mask(since_change_watermark, current_change_watermark)
+            .await
+            .expect("component binding lane mask should be readable");
+        assert_ne!(lane_mask & CHANGE_LANE_COMPONENT_BINDINGS, 0);
+        assert_eq!(lane_mask & CHANGE_LANE_INVENTORY_CORE, 0);
+
+        let refreshed_after_context = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load context assignment delta");
+        assert_eq!(
+            refreshed_after_context
+                .inventory
+                .managed_component_context_profile("component:payments-api")
+                .map(|profile| profile.profile_key),
+            Some(Box::<str>::from("context:corp-api-baseline"))
+        );
+
+        let next_base = loaded_snapshot_base(&refreshed_after_context);
+        let _ = writer
+            .assign_component_tag("tag:corp-api", "component:payments-api")
+            .await
+            .expect("component tag membership should persist");
+
+        let refreshed_after_membership = loader
+            .load(refreshed_after_context.change_watermark, next_base)
+            .await
+            .expect("detached fresh read should load component tag membership delta");
+        assert_eq!(
+            refreshed_after_membership
+                .inventory
+                .component_tag_keys("component:payments-api")
+                .expect("component should remain visible"),
+            vec![Box::<str>::from("tag:corp-api")]
+        );
+
+        let next_base = loaded_snapshot_base(&refreshed_after_membership);
+        let extra_artifact = ArtifactRef::new(
+            ArtifactKind::ContainerImage,
+            "registry.example/payments@sha256:222",
+        );
+        let _ = writer
+            .bind_artifact("component:payments-api", extra_artifact.clone())
+            .await
+            .expect("extra artifact binding should persist");
+
+        let refreshed_after_artifact = loader
+            .load(refreshed_after_membership.change_watermark, next_base)
+            .await
+            .expect("detached fresh read should load artifact binding delta");
+        assert!(
+            refreshed_after_artifact
+                .inventory
+                .component_owns_artifact("component:payments-api", &extra_artifact)
+        );
     }
 
     #[tokio::test]

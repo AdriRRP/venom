@@ -230,6 +230,10 @@ Completed:
     Make local ephemeral lane reopen semantics explicitly fail on durable open
     errors, converge to a truthful local epoch before reuse, and tighten the
     residual hot-path cost of local `system events` merge/index rebuilding.
+77. `W226-binding-delta-and-system-event-window-tightening`
+    Move component-binding inventory refresh off whole-subgraph reloads and
+    tighten remaining `system events` window materialization on local merge
+    paths.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.
