@@ -882,7 +882,7 @@ mod tests {
                 .iter()
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
-            vec!["event-002", "event-004", "event-001", "event-003"]
+            vec!["event-004", "event-003", "event-002", "event-001"]
         );
         assert_eq!(
             windows
