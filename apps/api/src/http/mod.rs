@@ -44,6 +44,9 @@ use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
 
 type ApiMutationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
+#[cfg(test)]
+type LocalEphemeralOpenProbe =
+    Arc<dyn Fn(&ApiState, ApiMutationLane) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -55,9 +58,7 @@ struct ApiStateInner {
     local_change_epoch: AtomicU64,
     local_ephemeral_source: Option<LocalEphemeralSource>,
     #[cfg(test)]
-    local_ephemeral_open_probe: StdMutex<
-        Option<Arc<dyn Fn(&ApiState, ApiMutationLane) -> Result<(), String> + Send + Sync>>,
-    >,
+    local_ephemeral_open_probe: StdMutex<Option<LocalEphemeralOpenProbe>>,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
@@ -358,7 +359,7 @@ impl ApiState {
     #[cfg(test)]
     fn set_local_ephemeral_open_probe<F>(&self, probe: F)
     where
-        F: Fn(&ApiState, ApiMutationLane) -> Result<(), String> + Send + Sync + 'static,
+        F: Fn(&Self, ApiMutationLane) -> Result<(), String> + Send + Sync + 'static,
     {
         *self
             .inner
@@ -696,13 +697,14 @@ impl ApiState {
             ApiApplication::open_local(source.state_path.clone(), source.runtime_path.clone())
                 .map_err(ApiError::from)?;
         #[cfg(test)]
-        if let Some(probe) = self
+        let probe = self
             .inner
             .local_ephemeral_open_probe
             .lock()
             .expect("local ephemeral open probe should not be poisoned")
-            .take()
-        {
+            .take();
+        #[cfg(test)]
+        if let Some(probe) = probe {
             probe(self, lane).map_err(ApiError::internal)?;
         }
         for _attempt in 0..4 {
