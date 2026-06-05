@@ -51,6 +51,7 @@ pub struct ApiState {
 struct ApiStateInner {
     services: ApiServiceSet,
     local_change_epoch: AtomicU64,
+    local_ephemeral_source: Option<LocalEphemeralSource>,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
@@ -67,10 +68,17 @@ struct ServiceSlot {
     residency: ServiceResidency,
 }
 
+#[derive(Clone)]
+struct LocalEphemeralSource {
+    state_path: PathBuf,
+    runtime_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServiceResidency {
     Resident,
     EphemeralForkFromState,
+    EphemeralReloadFromDisk,
 }
 
 enum ApiServiceSet {
@@ -250,16 +258,12 @@ impl ApiState {
         let runtime_path = runtime_path.into();
         let state_service = ApiApplication::open_local(state_path, runtime_path)
             .map_err(|error| error.to_string())?;
-        let runtime_service = ApiApplication::fork_local_from(&state_service)
-            .ok_or_else(|| "local api service fork unavailable".to_owned())?;
-        let publication_service = ApiApplication::fork_local_from(&state_service)
-            .ok_or_else(|| "local api service fork unavailable".to_owned())?;
         Ok(Self::new_partitioned(
             state_service,
-            Some(runtime_service),
-            ServiceResidency::Resident,
-            Some(publication_service),
-            ServiceResidency::Resident,
+            None,
+            ServiceResidency::EphemeralReloadFromDisk,
+            None,
+            ServiceResidency::EphemeralReloadFromDisk,
         ))
     }
 
@@ -290,6 +294,12 @@ impl ApiState {
         publication_service: Option<ApiApplication>,
         publication_residency: ServiceResidency,
     ) -> Self {
+        let local_ephemeral_source = state_service.local_paths().map(|(state_path, runtime_path)| {
+            LocalEphemeralSource {
+                state_path,
+                runtime_path,
+            }
+        });
         let remote_snapshot_watermark = state_service
             .observed_remote_change_watermark()
             .unwrap_or(0);
@@ -320,6 +330,7 @@ impl ApiState {
                     },
                 })),
                 local_change_epoch: AtomicU64::new(0),
+                local_ephemeral_source,
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -616,6 +627,13 @@ impl ApiState {
                 }
                 continue;
             }
+            if slot.residency == ServiceResidency::EphemeralReloadFromDisk {
+                drop(guard);
+                if let Some(service) = self.open_ephemeral_local_service(lane) {
+                    return service;
+                }
+                continue;
+            }
             drop(guard);
             slot.ready.notified().await;
         }
@@ -627,7 +645,9 @@ impl ApiState {
         let mut guard = slot.service.lock().await;
         *guard = match slot.residency {
             ServiceResidency::Resident => Some(service),
-            ServiceResidency::EphemeralForkFromState => None,
+            ServiceResidency::EphemeralForkFromState | ServiceResidency::EphemeralReloadFromDisk => {
+                None
+            }
         };
         drop(guard);
         slot.ready.notify_waiters();
@@ -643,6 +663,19 @@ impl ApiState {
             drop(guard);
             state_slot.ready.notified().await;
         }
+    }
+
+    fn open_ephemeral_local_service(&self, lane: ApiMutationLane) -> Option<ApiApplication> {
+        let source = self.inner.local_ephemeral_source.as_ref()?;
+        let service = ApiApplication::open_local(
+            source.state_path.clone(),
+            source.runtime_path.clone(),
+        )
+        .ok()?;
+        self.slot_for_lane(lane)
+            .observed_local_change_epoch
+            .store(self.inner.local_change_epoch.load(Ordering::Relaxed), Ordering::Relaxed);
+        Some(service)
     }
 
     fn rebase_idle_postgres_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
@@ -2166,6 +2199,80 @@ mod tests {
         state
             .restore_service(ApiMutationLane::Publication, publication_service)
             .await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn local_runtime_lane_is_ephemeral_until_taken() {
+        let state = ApiState::open(
+            temp_path("local-runtime-ephemeral", "state"),
+            temp_path("local-runtime-ephemeral", "runtime"),
+        )
+        .expect("api state should open");
+
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "local runtime lane should not keep a resident service before first use"
+            );
+        }
+
+        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let state_service = state.take_service(ApiMutationLane::State).await;
+        assert_eq!(runtime_service.local_paths(), state_service.local_paths());
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+
+        {
+            let runtime_guard = slots.runtime.service.lock().await;
+            assert!(
+                runtime_guard.is_none(),
+                "local runtime lane should release its resident service after restore"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::significant_drop_tightening)]
+    async fn local_publication_lane_is_ephemeral_until_taken() {
+        let state = ApiState::open(
+            temp_path("local-publication-ephemeral", "state"),
+            temp_path("local-publication-ephemeral", "runtime"),
+        )
+        .expect("api state should open");
+
+        let ApiServiceSet::Partitioned(slots) = &state.inner.services;
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "local publication lane should not keep a resident service before first use"
+            );
+        }
+
+        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let state_service = state.take_service(ApiMutationLane::State).await;
+        assert_eq!(publication_service.local_paths(), state_service.local_paths());
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
+
+        {
+            let publication_guard = slots.publication.service.lock().await;
+            assert!(
+                publication_guard.is_none(),
+                "local publication lane should release its resident service after restore"
+            );
+        }
     }
 
     #[tokio::test]
