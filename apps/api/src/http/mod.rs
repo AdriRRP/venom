@@ -36,12 +36,17 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, watch};
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::scanning::ScanCommandStatus;
 
 type ApiMutationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
+#[cfg(test)]
+type LocalEphemeralOpenProbe =
+    Arc<dyn Fn(&ApiState, ApiMutationLane) -> Result<(), String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -52,6 +57,8 @@ struct ApiStateInner {
     services: ApiServiceSet,
     local_change_epoch: AtomicU64,
     local_ephemeral_source: Option<LocalEphemeralSource>,
+    #[cfg(test)]
+    local_ephemeral_open_probe: StdMutex<Option<LocalEphemeralOpenProbe>>,
     remote_change_probe: Option<service::PostgresRemoteChangeProbe>,
     remote_read_snapshot_loader: Option<service::PostgresReadSnapshotLoader>,
     remote_refresh: Mutex<()>,
@@ -332,6 +339,8 @@ impl ApiState {
                 })),
                 local_change_epoch: AtomicU64::new(0),
                 local_ephemeral_source,
+                #[cfg(test)]
+                local_ephemeral_open_probe: StdMutex::new(None),
                 remote_change_probe,
                 remote_read_snapshot_loader,
                 remote_refresh: Mutex::new(()),
@@ -345,6 +354,18 @@ impl ApiState {
 
     fn read_snapshot(&self) -> Arc<ApiReadSnapshot> {
         self.inner.read_snapshot_rx.borrow().clone()
+    }
+
+    #[cfg(test)]
+    fn set_local_ephemeral_open_probe<F>(&self, probe: F)
+    where
+        F: Fn(&Self, ApiMutationLane) -> Result<(), String> + Send + Sync + 'static,
+    {
+        *self
+            .inner
+            .local_ephemeral_open_probe
+            .lock()
+            .expect("local ephemeral open probe should not be poisoned") = Some(Arc::new(probe));
     }
 
     fn health_status(&self) -> ApiHealthStatus {
@@ -433,7 +454,7 @@ impl ApiState {
                 return Ok(next_snapshot);
             }
         }
-        let mut service = self.take_service(ApiMutationLane::State).await;
+        let mut service = self.take_service(ApiMutationLane::State).await?;
         let changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
             Err(error) => {
@@ -614,26 +635,23 @@ impl ApiState {
         }
     }
 
-    async fn take_service(&self, lane: ApiMutationLane) -> ApiApplication {
+    async fn take_service(&self, lane: ApiMutationLane) -> Result<ApiApplication, ApiError> {
         let slot = self.slot_for_lane(lane);
         loop {
             let mut guard = slot.service.lock().await;
             if let Some(service) = guard.take() {
-                return service;
+                return Ok(service);
             }
             if slot.residency == ServiceResidency::EphemeralForkFromState {
                 drop(guard);
                 if let Some(service) = self.try_fork_ephemeral_service_from_state().await {
-                    return service;
+                    return Ok(service);
                 }
                 continue;
             }
             if slot.residency == ServiceResidency::EphemeralReloadFromDisk {
                 drop(guard);
-                if let Some(service) = self.open_ephemeral_local_service(lane) {
-                    return service;
-                }
-                continue;
+                return self.open_ephemeral_local_service(lane);
             }
             drop(guard);
             slot.ready.notified().await;
@@ -665,16 +683,44 @@ impl ApiState {
         }
     }
 
-    fn open_ephemeral_local_service(&self, lane: ApiMutationLane) -> Option<ApiApplication> {
-        let source = self.inner.local_ephemeral_source.as_ref()?;
-        let service =
+    fn open_ephemeral_local_service(
+        &self,
+        lane: ApiMutationLane,
+    ) -> Result<ApiApplication, ApiError> {
+        let source = self
+            .inner
+            .local_ephemeral_source
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("local ephemeral lane source is unavailable"))?;
+        let mut stable_epoch = self.inner.local_change_epoch.load(Ordering::Relaxed);
+        let mut service =
             ApiApplication::open_local(source.state_path.clone(), source.runtime_path.clone())
-                .ok()?;
-        self.slot_for_lane(lane).observed_local_change_epoch.store(
-            self.inner.local_change_epoch.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        Some(service)
+                .map_err(ApiError::from)?;
+        #[cfg(test)]
+        let probe = self
+            .inner
+            .local_ephemeral_open_probe
+            .lock()
+            .expect("local ephemeral open probe should not be poisoned")
+            .take();
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            probe(self, lane).map_err(ApiError::internal)?;
+        }
+        for _attempt in 0..4 {
+            let observed_epoch = self.inner.local_change_epoch.load(Ordering::Relaxed);
+            if observed_epoch == stable_epoch {
+                self.slot_for_lane(lane)
+                    .observed_local_change_epoch
+                    .store(observed_epoch, Ordering::Relaxed);
+                return Ok(service);
+            }
+            service.refresh_local_from_disk().map_err(ApiError::from)?;
+            stable_epoch = observed_epoch;
+        }
+        Err(ApiError::internal(
+            "local ephemeral lane could not converge to a stable durable snapshot",
+        ))
     }
 
     fn rebase_idle_postgres_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
@@ -759,7 +805,7 @@ impl ApiState {
         F: for<'a> FnOnce(&'a mut ApiApplication) -> ApiMutationFuture<'a, T>,
         R: FnOnce(&ApiApplication) -> SnapshotRefresh,
     {
-        let mut service = self.take_service(lane).await;
+        let mut service = self.take_service(lane).await?;
         self.refresh_local_service_if_stale(lane, &mut service)?;
         let refresh_from_remote_changed = match service.refresh_from_remote_if_stale().await {
             Ok(changed) => changed,
@@ -1910,6 +1956,7 @@ struct ErrorBody {
     error: String,
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -1968,8 +2015,10 @@ mod tests {
     use super::build_router;
     use super::remote_snapshot_is_current;
     use super::should_publish_remote_snapshot;
+    use crate::app::service::ApiApplication;
     use crate::app::service::ProviderReportFindingRequest;
     use crate::app::service::ProviderScanReportRequest;
+    use crate::app::service::RegisterComponentResponse;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -2059,8 +2108,14 @@ mod tests {
             );
         }
 
-        let volatile_service = state.take_service(ApiMutationLane::Runtime).await;
-        let state_service = state.take_service(ApiMutationLane::State).await;
+        let volatile_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
 
         assert!(Arc::ptr_eq(
             &state_service.inventory_snapshot_arc(),
@@ -2097,9 +2152,18 @@ mod tests {
             .await
             .expect("postgres api state should open");
 
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
-        let publication_service = state.take_service(ApiMutationLane::Publication).await;
-        let mut state_service = state.take_service(ApiMutationLane::State).await;
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("publication lane should reopen");
+        let mut state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
 
         assert!(Arc::ptr_eq(
             &state_service.read_model_snapshot_arc(),
@@ -2157,8 +2221,14 @@ mod tests {
             .restore_service(ApiMutationLane::State, state_service)
             .await;
 
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
-        let publication_service = state.take_service(ApiMutationLane::Publication).await;
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("publication lane should reopen");
 
         assert!(Arc::ptr_eq(
             &rebased_read_model,
@@ -2184,13 +2254,17 @@ mod tests {
             temp_path("runtime-publication-slot", "runtime"),
         )
         .expect("api state should open");
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
         let publication_service = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             state.take_service(ApiMutationLane::Publication),
         )
         .await
-        .expect("publication lane should not wait for the runtime slot");
+        .expect("publication lane should not wait for the runtime slot")
+        .expect("publication lane should reopen");
 
         state
             .restore_service(ApiMutationLane::Runtime, runtime_service)
@@ -2218,8 +2292,14 @@ mod tests {
             );
         }
 
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
-        let state_service = state.take_service(ApiMutationLane::State).await;
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("local runtime lane should reopen from disk");
+        let state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
         assert_eq!(runtime_service.local_paths(), state_service.local_paths());
         state
             .restore_service(ApiMutationLane::State, state_service)
@@ -2255,8 +2335,14 @@ mod tests {
             );
         }
 
-        let publication_service = state.take_service(ApiMutationLane::Publication).await;
-        let state_service = state.take_service(ApiMutationLane::State).await;
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("local publication lane should reopen from disk");
+        let state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
         assert_eq!(
             publication_service.local_paths(),
             state_service.local_paths()
@@ -2275,6 +2361,95 @@ mod tests {
                 "local publication lane should release its resident service after restore"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn local_ephemeral_runtime_lane_reopen_failure_is_explicit() {
+        let state = ApiState::open(
+            temp_path("local-runtime-ephemeral-failure", "state"),
+            temp_path("local-runtime-ephemeral-failure", "runtime"),
+        )
+        .expect("api state should open");
+
+        let source = state
+            .inner
+            .local_ephemeral_source
+            .as_ref()
+            .expect("local ephemeral source should exist")
+            .clone();
+        std::fs::remove_file(&source.state_path).expect("state history should be removable");
+        std::fs::create_dir(&source.state_path).expect("state path directory should be creatable");
+
+        let error = match state.take_service(ApiMutationLane::Runtime).await {
+            Ok(_service) => panic!("runtime lane reopen should fail explicitly"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn local_ephemeral_runtime_lane_reopen_converges_after_concurrent_state_change() {
+        let state = ApiState::open(
+            temp_path("local-runtime-ephemeral-converges", "state"),
+            temp_path("local-runtime-ephemeral-converges", "runtime"),
+        )
+        .expect("api state should open");
+
+        state.set_local_ephemeral_open_probe(|state, _lane| {
+            let source = state
+                .inner
+                .local_ephemeral_source
+                .as_ref()
+                .expect("local ephemeral source should exist")
+                .clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("probe runtime should build");
+                runtime.block_on(async move {
+                    let mut writer = ApiApplication::open_local(
+                        source.state_path.clone(),
+                        source.runtime_path.clone(),
+                    )
+                    .expect("probe writer should open");
+                    let _: RegisterComponentResponse = writer
+                        .register_component(ComponentRegistrationRequest {
+                            component_key: "component:probe".to_owned(),
+                            name: "Probe".to_owned(),
+                        })
+                        .await
+                        .expect("probe registration should persist");
+                });
+            })
+            .join()
+            .expect("probe mutation thread should join");
+            state
+                .inner
+                .local_change_epoch
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen after convergence");
+        assert_eq!(
+            runtime_service
+                .inventory_snapshot_arc()
+                .managed_components(),
+            1
+        );
+        let observed_epoch = state
+            .slot_for_lane(ApiMutationLane::Runtime)
+            .observed_local_change_epoch
+            .load(Ordering::Relaxed);
+        let current_epoch = state.inner.local_change_epoch.load(Ordering::Relaxed);
+        assert_eq!(observed_epoch, current_epoch);
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
     }
 
     #[tokio::test]
@@ -2297,8 +2472,14 @@ mod tests {
             );
         }
 
-        let runtime_service = state.take_service(ApiMutationLane::Runtime).await;
-        let state_service = state.take_service(ApiMutationLane::State).await;
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
         assert!(Arc::ptr_eq(
             &runtime_service.inventory_snapshot_arc(),
             &state_service.inventory_snapshot_arc()
@@ -2339,8 +2520,14 @@ mod tests {
             );
         }
 
-        let publication_service = state.take_service(ApiMutationLane::Publication).await;
-        let state_service = state.take_service(ApiMutationLane::State).await;
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("publication lane should reopen");
+        let state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
         assert!(Arc::ptr_eq(
             &publication_service.inventory_snapshot_arc(),
             &state_service.inventory_snapshot_arc()

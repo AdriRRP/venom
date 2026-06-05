@@ -540,13 +540,14 @@ impl LocalStore {
         let (state_windows, runtime_windows) = match cache.as_ref() {
             Some(snapshot) if Arc::ptr_eq(&snapshot.state, &state) => {
                 if let Some(runtime_delta) = runtime.delta_since(snapshot.runtime.as_ref()) {
+                    let runtime_delta_windows = runtime_delta.recent_windows();
                     let runtime_windows = merge_system_event_recent_windows(
                         &snapshot.runtime_windows,
-                        &runtime_delta.recent_windows(),
+                        &runtime_delta_windows,
                     );
                     let merged_windows = merge_system_event_recent_windows(
                         &snapshot.merged_windows,
-                        &runtime_delta.recent_windows(),
+                        &runtime_delta_windows,
                     );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
@@ -580,13 +581,14 @@ impl LocalStore {
             }
             Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
                 if let Some(state_delta) = state.delta_since(snapshot.state.as_ref()) {
+                    let state_delta_windows = state_delta.recent_windows();
                     let state_windows = merge_system_event_recent_windows(
                         &snapshot.state_windows,
-                        &state_delta.recent_windows(),
+                        &state_delta_windows,
                     );
                     let merged_windows = merge_system_event_recent_windows(
                         &snapshot.merged_windows,
-                        &state_delta.recent_windows(),
+                        &state_delta_windows,
                     );
                     let merged = Arc::new(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
@@ -4236,5 +4238,10 @@ mod tests {
     #[test]
     fn local_merged_system_event_snapshot_reuses_cached_windows_across_bounded_single_side_churn() {
         local_merged_system_event_snapshot_reuses_cached_peer_window_for_longer_append_tails();
+    }
+
+    #[test]
+    fn local_merged_system_event_snapshot_reuses_cached_windows_after_state_reopen() {
+        local_merged_system_event_snapshot_reuses_cached_peer_window();
     }
 }

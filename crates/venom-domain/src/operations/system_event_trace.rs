@@ -387,14 +387,15 @@ impl SystemEventQueryIndex {
         totals: SystemEventWindowTotals,
         windows: SystemEventRecentWindows,
     ) -> Self {
+        let (recent_windows, retained_event_refs) = recent_deque_windows_and_retained_refs(windows);
         let mut index = Self::new();
         index.total = totals.total;
         index.scheduler_total = totals.scheduler_total;
         index.command_total = totals.command_total;
         index.governance_total = totals.governance_total;
         index.publication_total = totals.publication_total;
-        index.recent_windows = windows.into();
-        index.rebuild_retained_event_refs();
+        index.recent_windows = recent_windows;
+        index.retained_event_refs = retained_event_refs;
         index
     }
 
@@ -435,21 +436,44 @@ impl SystemEventQueryIndex {
             events,
         }
     }
+}
 
-    fn rebuild_retained_event_refs(&mut self) {
-        self.retained_event_refs = self
-            .recent_windows
-            .all_events
-            .iter()
-            .chain(self.recent_windows.scheduler_events.iter())
-            .chain(self.recent_windows.command_events.iter())
-            .chain(self.recent_windows.governance_events.iter())
-            .chain(self.recent_windows.publication_events.iter())
-            .fold(HashMap::new(), |mut refs, event| {
-                *refs.entry(event.event_id.clone()).or_insert(0) += 1;
-                refs
-            });
+fn recent_deque_windows_and_retained_refs(
+    windows: SystemEventRecentWindows,
+) -> (RecentEventDequeWindows, HashMap<Box<str>, usize>) {
+    let mut retained_event_refs = HashMap::new();
+    let recent_windows = RecentEventDequeWindows {
+        all_events: collect_recent_window_and_refs(windows.recent_events, &mut retained_event_refs),
+        scheduler_events: collect_recent_window_and_refs(
+            windows.recent_scheduler_events,
+            &mut retained_event_refs,
+        ),
+        command_events: collect_recent_window_and_refs(
+            windows.recent_command_events,
+            &mut retained_event_refs,
+        ),
+        governance_events: collect_recent_window_and_refs(
+            windows.recent_governance_events,
+            &mut retained_event_refs,
+        ),
+        publication_events: collect_recent_window_and_refs(
+            windows.recent_publication_events,
+            &mut retained_event_refs,
+        ),
+    };
+    (recent_windows, retained_event_refs)
+}
+
+fn collect_recent_window_and_refs(
+    events: Vec<Arc<SystemEvent>>,
+    retained_event_refs: &mut HashMap<Box<str>, usize>,
+) -> VecDeque<Arc<SystemEvent>> {
+    let mut window = VecDeque::with_capacity(events.len());
+    for event in events {
+        increment_retained_event_ref(retained_event_refs, event.event_id.as_ref());
+        window.push_back(event);
     }
+    window
 }
 
 fn push_recent_window_event(
@@ -951,5 +975,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["event-004", "event-003"]
         );
+    }
+
+    #[test]
+    fn system_event_query_index_merged_reuses_incremental_retained_refs() {
+        let left = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-003", 3, SystemEventKind::FindingRiskAccepted),
+                timed_event("event-001", 1, SystemEventKind::ScanCommandCompleted),
+            ]
+            .iter(),
+        );
+        let right = SystemEventQueryIndex::from_newest_first(
+            [
+                timed_event("event-004", 4, SystemEventKind::IntegrationEventPublished),
+                timed_event("event-002", 2, SystemEventKind::CollectionScanMaterialized),
+            ]
+            .iter(),
+        );
+
+        let merged = SystemEventQueryIndex::merged(&left, &right);
+        let page = merged.query(&SystemEventsQuery::new().with_limit(10));
+        let publication_page = merged.query(
+            &SystemEventsQuery::new()
+                .with_category(SystemEventCategory::Publication)
+                .with_limit(10),
+        );
+
+        assert_eq!(page.total, 4);
+        assert_eq!(page.events.len(), 4);
+        assert_eq!(publication_page.total, 1);
+        assert_eq!(publication_page.events[0].event_id.as_ref(), "event-004");
     }
 }
