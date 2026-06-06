@@ -864,7 +864,7 @@ impl ApiState {
             && response.pending_remaining == 0
             && response.outcome.as_str() == "idle"
         {
-            response.outcome = "drained".to_owned();
+            "drained".clone_into(&mut response.outcome);
         }
 
         Ok(response)
@@ -986,7 +986,7 @@ impl ApiState {
             && response.pending_remaining == 0
             && response.outcome.as_str() == "idle"
         {
-            response.outcome = "drained".to_owned();
+            "drained".clone_into(&mut response.outcome);
         }
 
         Ok(response)
