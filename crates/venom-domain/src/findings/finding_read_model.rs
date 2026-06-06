@@ -221,10 +221,10 @@ impl FindingReadModel {
         &mut self,
         component_key: Box<str>,
         artifact: ArtifactRef,
-        finding: ReportedFinding,
+        finding: &ReportedFinding,
     ) {
         let key = TrackedArtifactKey::new(component_key, artifact);
-        let record = ActiveFindingRecord::from(&finding);
+        let record = ActiveFindingRecord::from(finding);
         let findings = Arc::make_mut(&mut self.active).entry(key).or_default();
         match findings.binary_search_by(|candidate| finding_sort_key(candidate, &record)) {
             Ok(index) => findings[index] = record,
@@ -917,7 +917,7 @@ mod tests {
         read_model.replay_active_finding_upsert(
             "component:payments-api".into(),
             artifact(),
-            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
+            &ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
                 .with_severity(Severity::Critical),
         );
         read_model.replay_active_finding_remove(&FindingRef::new(

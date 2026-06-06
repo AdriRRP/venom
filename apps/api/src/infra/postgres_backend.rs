@@ -5304,7 +5304,7 @@ impl PostgresStore {
                 self.read_model_mut().replay_active_finding_upsert(
                     component_key.into_boxed_str(),
                     artifact,
-                    reported,
+                    &reported,
                 );
             } else {
                 self.read_model_mut().replay_active_finding_remove(&finding);
