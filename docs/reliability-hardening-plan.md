@@ -238,6 +238,10 @@ Completed:
     Standardize local volatile API lanes on ephemeral fork-from-state residency
     so local and Postgres paths share the same lane topology instead of keeping
     a separate reopen-from-disk branch.
+79. `W228-system-event-cache-shape-closure`
+    Introduce one cache-native recent-window shape for `system events` and let
+    local merged snapshots reuse that shape directly instead of bouncing
+    through public `Vec` windows on hot paths.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.

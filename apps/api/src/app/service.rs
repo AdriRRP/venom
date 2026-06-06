@@ -515,9 +515,9 @@ struct LocalStore {
 struct MergedSystemEventSnapshot {
     state: Arc<SystemEventQueryIndex>,
     runtime: Arc<SystemEventQueryIndex>,
-    state_windows: venom_domain::SystemEventRecentWindows,
-    runtime_windows: venom_domain::SystemEventRecentWindows,
-    merged_windows: venom_domain::SystemEventRecentWindows,
+    state_windows: venom_domain::SystemEventRecentWindowCache,
+    runtime_windows: venom_domain::SystemEventRecentWindowCache,
+    merged_windows: venom_domain::SystemEventRecentWindowCache,
     merged: Arc<SystemEventQueryIndex>,
 }
 
@@ -540,13 +540,13 @@ impl LocalStore {
         let (state_windows, runtime_windows) = match cache.as_ref() {
             Some(snapshot) if Arc::ptr_eq(&snapshot.state, &state) => {
                 if let Some((runtime_delta, runtime_delta_windows)) =
-                    runtime.delta_since_with_recent_windows(snapshot.runtime.as_ref())
+                    runtime.delta_since_with_recent_window_cache(snapshot.runtime.as_ref())
                 {
-                    let runtime_windows = merge_system_event_recent_windows(
+                    let runtime_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &snapshot.runtime_windows,
                         &runtime_delta_windows,
                     );
-                    let merged_windows = merge_system_event_recent_windows(
+                    let merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &snapshot.merged_windows,
                         &runtime_delta_windows,
                     );
@@ -564,9 +564,9 @@ impl LocalStore {
                     });
                     return merged;
                 }
-                let runtime_windows = runtime.recent_windows();
+                let runtime_windows = runtime.recent_window_cache();
                 let (merged_index, merged_windows) =
-                    SystemEventQueryIndex::merged_with_recent_windows(
+                    SystemEventQueryIndex::merged_with_recent_window_cache(
                         state.as_ref(),
                         runtime.as_ref(),
                     );
@@ -583,13 +583,13 @@ impl LocalStore {
             }
             Some(snapshot) if Arc::ptr_eq(&snapshot.runtime, &runtime) => {
                 if let Some((state_delta, state_delta_windows)) =
-                    state.delta_since_with_recent_windows(snapshot.state.as_ref())
+                    state.delta_since_with_recent_window_cache(snapshot.state.as_ref())
                 {
-                    let state_windows = merge_system_event_recent_windows(
+                    let state_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &snapshot.state_windows,
                         &state_delta_windows,
                     );
-                    let merged_windows = merge_system_event_recent_windows(
+                    let merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &snapshot.merged_windows,
                         &state_delta_windows,
                     );
@@ -607,9 +607,9 @@ impl LocalStore {
                     });
                     return merged;
                 }
-                let state_windows = state.recent_windows();
+                let state_windows = state.recent_window_cache();
                 let (merged_index, merged_windows) =
-                    SystemEventQueryIndex::merged_with_recent_windows(
+                    SystemEventQueryIndex::merged_with_recent_window_cache(
                         state.as_ref(),
                         runtime.as_ref(),
                     );
@@ -624,10 +624,10 @@ impl LocalStore {
                 });
                 return merged;
             }
-            _ => (state.recent_windows(), runtime.recent_windows()),
+            _ => (state.recent_window_cache(), runtime.recent_window_cache()),
         };
         let (merged_index, merged_windows) =
-            SystemEventQueryIndex::merged_with_recent_windows(state.as_ref(), runtime.as_ref());
+            SystemEventQueryIndex::merged_with_recent_window_cache(state.as_ref(), runtime.as_ref());
         let merged = Arc::new(merged_index);
         *cache = Some(MergedSystemEventSnapshot {
             state,
@@ -639,81 +639,6 @@ impl LocalStore {
         });
         merged
     }
-}
-
-fn merge_system_event_recent_windows(
-    left: &venom_domain::SystemEventRecentWindows,
-    right: &venom_domain::SystemEventRecentWindows,
-) -> venom_domain::SystemEventRecentWindows {
-    venom_domain::SystemEventRecentWindows {
-        recent_events: merge_recent_arc_events(&left.recent_events, &right.recent_events),
-        recent_scheduler_events: merge_recent_arc_events(
-            &left.recent_scheduler_events,
-            &right.recent_scheduler_events,
-        ),
-        recent_command_events: merge_recent_arc_events(
-            &left.recent_command_events,
-            &right.recent_command_events,
-        ),
-        recent_governance_events: merge_recent_arc_events(
-            &left.recent_governance_events,
-            &right.recent_governance_events,
-        ),
-        recent_publication_events: merge_recent_arc_events(
-            &left.recent_publication_events,
-            &right.recent_publication_events,
-        ),
-    }
-}
-
-fn merge_recent_arc_events(
-    left: &[Arc<SystemEvent>],
-    right: &[Arc<SystemEvent>],
-) -> Vec<Arc<SystemEvent>> {
-    let mut merged = Vec::with_capacity(
-        (left.len() + right.len()).min(venom_domain::operations::MAX_SYSTEM_EVENTS_LIMIT),
-    );
-    let mut left_index = 0;
-    let mut right_index = 0;
-
-    while merged.len() < venom_domain::operations::MAX_SYSTEM_EVENTS_LIMIT
-        && (left_index < left.len() || right_index < right.len())
-    {
-        let take_left = match (left.get(left_index), right.get(right_index)) {
-            (Some(left_event), Some(right_event)) => {
-                compare_recent_system_event_order(left_event, right_event).is_lt()
-            }
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => break,
-        };
-        if take_left {
-            merged.push(Arc::clone(
-                left.get(left_index)
-                    .expect("left recent event should exist for merge"),
-            ));
-            left_index += 1;
-        } else {
-            merged.push(Arc::clone(
-                right
-                    .get(right_index)
-                    .expect("right recent event should exist for merge"),
-            ));
-            right_index += 1;
-        }
-    }
-
-    merged
-}
-
-fn compare_recent_system_event_order(
-    left: &SystemEvent,
-    right: &SystemEvent,
-) -> std::cmp::Ordering {
-    right
-        .occurred_at_unix_ms
-        .cmp(&left.occurred_at_unix_ms)
-        .then_with(|| left.event_id.cmp(&right.event_id))
 }
 
 impl ApiApplication {
@@ -4213,7 +4138,7 @@ mod tests {
                 .expect("merged cache should be refreshed after state change");
             let tuple = (
                 snapshot.runtime.clone(),
-                snapshot.runtime_windows.recent_events.len(),
+                snapshot.runtime_windows.recent_event_count(),
                 snapshot.runtime.recent_windows().recent_events.len(),
             );
             drop(cache);
