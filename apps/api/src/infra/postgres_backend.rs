@@ -7283,7 +7283,7 @@ fn provider_report_finding_deltas(
                     active: false,
                 });
             }
-            (Some(_), Some(_)) | (None, Some(_)) => {
+            (Some(_) | None, Some(_)) => {
                 deltas.push(ProviderFindingDelta {
                     snapshot: current_iter.next().expect("right peek should match next"),
                     active: true,
