@@ -618,7 +618,7 @@ impl ApiState {
     }
 
     async fn restore_service(&self, lane: ApiMutationLane, service: ApiApplication) {
-        self.rebase_idle_postgres_sibling_lanes(lane, &service);
+        self.rebase_idle_sibling_lanes(lane, &service);
         let slot = self.slot_for_lane(lane);
         let mut guard = slot.service.lock().await;
         *guard = match slot.residency {
@@ -641,10 +641,7 @@ impl ApiState {
         }
     }
 
-    fn rebase_idle_postgres_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
-        if !source.is_postgres() {
-            return;
-        }
+    fn rebase_idle_sibling_lanes(&self, lane: ApiMutationLane, source: &ApiApplication) {
         for sibling_lane in [
             ApiMutationLane::State,
             ApiMutationLane::Runtime,
@@ -660,7 +657,11 @@ impl ApiState {
             let Some(sibling) = guard.as_mut() else {
                 continue;
             };
-            sibling.rebase_postgres_live_sources_from(source);
+            if source.is_postgres() {
+                sibling.rebase_postgres_live_sources_from(source);
+            } else if let Some(rebased) = ApiApplication::fork_from(source) {
+                *sibling = rebased;
+            }
         }
     }
 
@@ -859,6 +860,13 @@ impl ApiState {
             }
         }
 
+        if response.processed > 0
+            && response.pending_remaining == 0
+            && response.outcome.as_str() == "idle"
+        {
+            response.outcome = "drained".to_owned();
+        }
+
         Ok(response)
     }
 
@@ -972,6 +980,13 @@ impl ApiState {
             if has_error || matches!(step.outcome.as_str(), "idle" | "drained") {
                 break;
             }
+        }
+
+        if response.attempted > 0
+            && response.pending_remaining == 0
+            && response.outcome.as_str() == "idle"
+        {
+            response.outcome = "drained".to_owned();
         }
 
         Ok(response)
@@ -2067,6 +2082,109 @@ mod tests {
         let state = ApiState::open_postgres(&database_url, &schema)
             .await
             .expect("postgres api state should open");
+
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("publication lane should reopen");
+        let mut state_service = state
+            .take_service(ApiMutationLane::State)
+            .await
+            .expect("state lane should be available");
+
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &runtime_service.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &state_service.read_model_snapshot_arc(),
+            &publication_service.read_model_snapshot_arc()
+        ));
+
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
+
+        state_service
+            .register_component(ComponentRegistrationRequest {
+                component_key: "component:payments-api".to_owned(),
+                name: "Payments API".to_owned(),
+            })
+            .await
+            .expect("registration should persist");
+        state_service
+            .bind_artifact(
+                "component:payments-api",
+                BindArtifactRequest {
+                    artifact_kind: "container-image".to_owned(),
+                    artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                },
+            )
+            .await
+            .expect("artifact binding should persist");
+        state_service
+            .record_provider_report(ProviderScanReportRequest {
+                provider_key: "fixture-provider".to_owned(),
+                component_key: "component:payments-api".to_owned(),
+                artifact_kind: "container-image".to_owned(),
+                artifact_identity: "registry.example/payments@sha256:111".to_owned(),
+                freshness: "deterministic".to_owned(),
+                knowledge_revision: Some("fixture-db:2026-05-29".to_owned()),
+                findings: vec![ProviderReportFindingRequest {
+                    vulnerability_id: "CVE-2026-0001".to_owned(),
+                    package_name: "openssl".to_owned(),
+                    package_version: "3.0.0".to_owned(),
+                    severity: "high".to_owned(),
+                }],
+            })
+            .await
+            .expect("provider report should persist");
+
+        let rebased_read_model = state_service.read_model_snapshot_arc();
+        state
+            .restore_service(ApiMutationLane::State, state_service)
+            .await;
+
+        let runtime_service = state
+            .take_service(ApiMutationLane::Runtime)
+            .await
+            .expect("runtime lane should reopen");
+        let publication_service = state
+            .take_service(ApiMutationLane::Publication)
+            .await
+            .expect("publication lane should reopen");
+
+        assert!(Arc::ptr_eq(
+            &rebased_read_model,
+            &runtime_service.read_model_snapshot_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            &rebased_read_model,
+            &publication_service.read_model_snapshot_arc()
+        ));
+
+        state
+            .restore_service(ApiMutationLane::Runtime, runtime_service)
+            .await;
+        state
+            .restore_service(ApiMutationLane::Publication, publication_service)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn local_idle_lanes_rebase_to_latest_resident_sources() {
+        let state = ApiState::open(
+            temp_path("local-idle-lane-residency-rebase", "state"),
+            temp_path("local-idle-lane-residency-rebase", "runtime"),
+        )
+        .expect("api state should open");
 
         let runtime_service = state
             .take_service(ApiMutationLane::Runtime)
