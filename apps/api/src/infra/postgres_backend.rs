@@ -1934,7 +1934,7 @@ impl PostgresStore {
                 ),
             )
             .events
-            .into_iter()
+            .iter()
             .map(|event| event.as_ref().clone())
             .collect()
     }
@@ -7277,19 +7277,13 @@ fn provider_report_finding_deltas(
                     active: false,
                 });
             }
-            (Some(_), Some(_)) => {
-                deltas.push(ProviderFindingDelta {
-                    snapshot: current_iter.next().expect("right peek should match next"),
-                    active: true,
-                });
-            }
             (Some(_), None) => {
                 deltas.push(ProviderFindingDelta {
                     snapshot: previous_iter.next().expect("left peek should match next"),
                     active: false,
                 });
             }
-            (None, Some(_)) => {
+            (Some(_), Some(_)) | (None, Some(_)) => {
                 deltas.push(ProviderFindingDelta {
                     snapshot: current_iter.next().expect("right peek should match next"),
                     active: true,

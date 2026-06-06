@@ -229,7 +229,7 @@ impl ApiReadSnapshot {
         let query = build_system_events_query(request)?;
         let category = query.category.map(|value| value.as_str().to_owned());
         let mut response =
-            ListSystemEventsResponse::from_page(self.system_event_index.query(&query));
+            ListSystemEventsResponse::from_page(&self.system_event_index.query(&query));
         response.category = category;
         Ok(response)
     }
@@ -3038,7 +3038,7 @@ pub struct ListSystemEventsResponse {
 }
 
 impl ListSystemEventsResponse {
-    fn from_page(page: SystemEventsPage) -> Self {
+    fn from_page(page: &SystemEventsPage) -> Self {
         Self {
             category: None,
             total: page.total,
