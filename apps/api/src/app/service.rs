@@ -626,8 +626,10 @@ impl LocalStore {
             }
             _ => (state.recent_window_cache(), runtime.recent_window_cache()),
         };
-        let (merged_index, merged_windows) =
-            SystemEventQueryIndex::merged_with_recent_window_cache(state.as_ref(), runtime.as_ref());
+        let (merged_index, merged_windows) = SystemEventQueryIndex::merged_with_recent_window_cache(
+            state.as_ref(),
+            runtime.as_ref(),
+        );
         let merged = Arc::new(merged_index);
         *cache = Some(MergedSystemEventSnapshot {
             state,
