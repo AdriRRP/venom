@@ -6436,7 +6436,7 @@ impl PostgresStore {
     ) -> Result<u64, String> {
         let deltas = provider_report_finding_deltas(previous_findings, &report.findings);
         if deltas.is_empty() {
-            return self.load_provider_report_source_watermark().await;
+            return Ok(0);
         }
 
         let mut query = QueryBuilder::<Postgres>::new(format!(
