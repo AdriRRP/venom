@@ -3046,7 +3046,7 @@ impl ListSystemEventsResponse {
             limit: page.limit,
             events: page
                 .events
-                .into_iter()
+                .iter()
                 .map(|event| SystemEventItem::from(event.as_ref()))
                 .collect(),
         }

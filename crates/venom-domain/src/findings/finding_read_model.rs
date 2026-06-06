@@ -217,6 +217,45 @@ impl FindingReadModel {
         Arc::make_mut(&mut self.active).insert(key, canonicalize_findings(canonical_findings));
     }
 
+    pub fn replay_active_finding_upsert(
+        &mut self,
+        component_key: Box<str>,
+        artifact: ArtifactRef,
+        finding: ReportedFinding,
+    ) {
+        let key = TrackedArtifactKey::new(component_key, artifact);
+        let record = ActiveFindingRecord::from(&finding);
+        let findings = Arc::make_mut(&mut self.active).entry(key).or_default();
+        match findings.binary_search_by(|candidate| finding_sort_key(candidate, &record)) {
+            Ok(index) => findings[index] = record,
+            Err(index) => findings.insert(index, record),
+        }
+    }
+
+    pub fn replay_active_finding_remove(&mut self, finding: &FindingRef) {
+        let key = TrackedArtifactKey::new(finding.component_key.clone(), finding.artifact.clone());
+        let active = Arc::make_mut(&mut self.active);
+        let Some(findings) = active.get_mut(&key) else {
+            return;
+        };
+
+        let needle = ActiveFindingRecord {
+            vulnerability_id: finding.vulnerability_id.clone(),
+            package_name: finding.package.name.clone(),
+            package_version: finding.package.version.clone(),
+            package_purl: finding.package.purl.clone(),
+            severity: Severity::Unknown,
+        };
+        if let Ok(index) =
+            findings.binary_search_by(|candidate| finding_sort_key(candidate, &needle))
+        {
+            findings.remove(index);
+        }
+        if findings.is_empty() {
+            active.remove(&key);
+        }
+    }
+
     pub fn accept_risk(&mut self, finding: FindingRef, acceptance: RiskAcceptance) {
         Arc::make_mut(&mut self.decisions)
             .insert(finding, FindingDecision::RiskAccepted(acceptance));
@@ -863,6 +902,41 @@ mod tests {
             &artifact(),
             "CVE-2026-0001"
         ));
+    }
+
+    #[test]
+    fn replay_active_finding_delta_updates_one_artifact_without_full_snapshot_replay() {
+        let mut read_model = FindingReadModel::new();
+        read_model.record_scan_report(&report(vec![
+            ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                .with_severity(Severity::Low),
+            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
+                .with_severity(Severity::Medium),
+        ]));
+
+        read_model.replay_active_finding_upsert(
+            "component:payments-api".into(),
+            artifact(),
+            ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
+                .with_severity(Severity::Critical),
+        );
+        read_model.replay_active_finding_remove(&FindingRef::new(
+            "component:payments-api",
+            artifact(),
+            "CVE-2026-0001",
+            PackageCoordinate::new("openssl", "3.0.0"),
+        ));
+
+        let page = read_model.query_active_findings(&ActiveFindingsQuery::new(
+            "component:payments-api",
+            artifact(),
+        ));
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            page.findings[0].finding.vulnerability_id.as_ref(),
+            "CVE-2026-0002"
+        );
+        assert_eq!(page.findings[0].severity, Severity::Critical);
     }
 
     #[test]
