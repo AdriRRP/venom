@@ -13,7 +13,7 @@ use venom_domain::findings::{
     FindingChangeSet, FindingDecision, FindingGovernance, FindingIngestion, FindingProvider,
     FindingProviderError, FindingProviderErrorKind, FindingReadModel, FindingRef,
     ProviderScanReport, ReopenFindingChange, ReopenFindingResult, ReportedFinding, RiskAcceptance,
-    ScanRequest, SuppressFindingChange, SuppressFindingResult, Suppression,
+    ScanRequest, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
 };
 use venom_domain::integration::{
     ConfigureIntegrationRuntimeChange, ConfigureIntegrationRuntimeResult,
@@ -266,6 +266,26 @@ type GovernanceJournalRow = (
     Option<String>,
     Option<i64>,
 );
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ProviderFindingKey {
+    vulnerability_id: Box<str>,
+    package_name: Box<str>,
+    package_version: Box<str>,
+    package_purl: Option<Box<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderFindingSnapshot {
+    key: ProviderFindingKey,
+    severity: Severity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderFindingDelta {
+    snapshot: ProviderFindingSnapshot,
+    active: bool,
+}
 
 #[derive(Default)]
 struct SystemEventTotals {
@@ -1159,12 +1179,10 @@ impl PostgresStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| format!("postgres provider report insert failed: {error}"))?;
-        let provider_report_identity_cursor = self
-            .append_provider_report_identity_journal_in_transaction(
+        let provider_report_finding_cursor = self
+            .append_provider_report_journals_in_transaction(
                 &mut transaction,
-                &report.component_key,
-                report.artifact.kind,
-                &report.artifact.identity,
+                report,
                 provider_report_row_id,
             )
             .await?;
@@ -1193,7 +1211,7 @@ impl PostgresStore {
         self.read_model = candidate_read_model;
         self.provider_report_row_high_watermark = self
             .provider_report_row_high_watermark
-            .max(provider_report_identity_cursor);
+            .max(provider_report_finding_cursor);
         self.refresh_read_model_and_release_board_snapshot_caches();
         Arc::make_mut(&mut self.pending_integration_events).push(pending_integration_event);
         Ok(change_set)
@@ -1916,7 +1934,7 @@ impl PostgresStore {
                 ),
             )
             .events
-            .into_iter()
+            .iter()
             .map(|event| event.as_ref().clone())
             .collect()
     }
@@ -2811,6 +2829,13 @@ impl PostgresStore {
         let provider_report_row_id = self
             .insert_provider_report(&mut transaction, report)
             .await?;
+        let provider_report_finding_cursor = self
+            .append_provider_report_journals_in_transaction(
+                &mut transaction,
+                report,
+                provider_report_row_id,
+            )
+            .await?;
         self.insert_pending_integration_events(
             &mut transaction,
             &[
@@ -2841,8 +2866,7 @@ impl PostgresStore {
             .await?;
         self.commit_transaction(transaction).await?;
         Ok((
-            u64::try_from(provider_report_row_id)
-                .map_err(|_| "postgres provider report id out of range".to_owned())?,
+            provider_report_finding_cursor,
             row_source_cursor(
                 u64::try_from(updated_at_micros)
                     .map_err(|_| "postgres scan command updated_at out of range".to_owned())?,
@@ -2902,6 +2926,65 @@ impl PostgresStore {
         .fetch_one(&mut **transaction)
         .await
         .map_err(|error| format!("postgres provider report insert failed: {error}"))
+    }
+
+    async fn append_provider_report_journals_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        report: &ProviderScanReport,
+        provider_report_id: i64,
+    ) -> Result<u64, String> {
+        let _ = self
+            .append_provider_report_identity_journal_in_transaction(
+                transaction,
+                &report.component_key,
+                report.artifact.kind,
+                &report.artifact.identity,
+                provider_report_id,
+            )
+            .await?;
+        let previous_findings = self
+            .load_previous_provider_report_findings_in_transaction(
+                transaction,
+                &report.component_key,
+                report.artifact.kind,
+                &report.artifact.identity,
+                provider_report_id,
+            )
+            .await?;
+        self.append_provider_report_finding_journal_in_transaction(
+            transaction,
+            report,
+            provider_report_id,
+            &previous_findings,
+        )
+        .await
+    }
+
+    async fn load_previous_provider_report_findings_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        component_key: &str,
+        artifact_kind: ArtifactKind,
+        artifact_identity: &str,
+        exclude_provider_report_id: i64,
+    ) -> Result<Vec<ReportedFinding>, String> {
+        sqlx::query_scalar::<_, Json<Vec<ReportedFinding>>>(&format!(
+            concat!(
+                "SELECT findings FROM {} ",
+                "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3 AND id <> $4 ",
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            self.names.provider_reports
+        ))
+        .bind(component_key)
+        .bind(artifact_kind_name(artifact_kind))
+        .bind(artifact_identity)
+        .bind(exclude_provider_report_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| format!("postgres previous provider report load failed: {error}"))
+        .map(|row| row.map(|Json(findings)| findings).unwrap_or_default())
     }
 
     async fn insert_pending_integration_events(
@@ -3117,6 +3200,7 @@ impl PostgresStore {
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
         self.create_provider_report_identity_journal_table().await?;
+        self.create_provider_report_finding_journal_table().await?;
         self.create_finding_risk_acceptances_table().await?;
         self.create_finding_suppressions_table().await?;
         self.create_finding_governance_journal_table().await?;
@@ -3622,6 +3706,34 @@ impl PostgresStore {
         .await
         .map_err(|error| {
             format!("postgres provider report identity journal table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
+    async fn create_provider_report_finding_journal_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "id BIGSERIAL PRIMARY KEY, ",
+                "component_key TEXT NOT NULL, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "vulnerability_id TEXT NOT NULL, ",
+                "package_name TEXT NOT NULL, ",
+                "package_version TEXT NOT NULL, ",
+                "package_purl TEXT NOT NULL DEFAULT '', ",
+                "severity TEXT NULL, ",
+                "active BOOLEAN NOT NULL, ",
+                "provider_report_id BIGINT NOT NULL, ",
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.provider_report_finding_journal
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres provider report finding journal table create failed: {error}")
         })?;
         Ok(())
     }
@@ -4242,10 +4354,12 @@ impl PostgresStore {
     async fn load_collections_after(&mut self, after_micros: u64) -> Result<(), String> {
         let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
             concat!(
+                "SELECT collection_key, name, context_profile_key, updated_at_micros FROM (",
                 "SELECT collection_key, name, context_profile_key, ",
-                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
-                "ORDER BY updated_at, collection_key"
+                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros, ",
+                "ROW_NUMBER() OVER (PARTITION BY collection_key ORDER BY updated_at DESC, collection_key DESC) AS row_rank ",
+                "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1",
+                ") latest WHERE row_rank = 1 ORDER BY updated_at_micros, collection_key"
             ),
             self.names.collections
         ))
@@ -4333,10 +4447,12 @@ impl PostgresStore {
         let sources =
             sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(&format!(
                 concat!(
+                    "SELECT collection_key, source_kind, mode, component_keys, updated_at_micros FROM (",
                     "SELECT collection_key, source_kind, mode, component_keys, ",
-                    "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                    "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
-                    "ORDER BY updated_at, collection_key"
+                    "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros, ",
+                    "ROW_NUMBER() OVER (PARTITION BY collection_key ORDER BY updated_at DESC, collection_key DESC) AS row_rank ",
+                    "FROM {} WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1",
+                    ") latest WHERE row_rank = 1 ORDER BY updated_at_micros, collection_key"
                 ),
                 self.names.collection_sources
             ))
@@ -5116,34 +5232,35 @@ impl PostgresStore {
     }
 
     async fn load_provider_reports_after(&mut self, after_id: u64) -> Result<(), String> {
-        let reports = sqlx::query_as::<
+        let rows = sqlx::query_as::<
             _,
             (
                 i64,
-                i64,
                 String,
                 String,
                 String,
                 String,
-                i64,
+                String,
+                String,
                 String,
                 Option<String>,
-                Json<Vec<ReportedFinding>>,
+                bool,
             ),
         >(&format!(
             concat!(
                 "WITH changed AS (",
-                "SELECT component_key, artifact_kind, artifact_identity, ",
-                "MAX(id) AS journal_id, MAX(provider_report_id) AS provider_report_id ",
-                "FROM {} WHERE id > $1 GROUP BY component_key, artifact_kind, artifact_identity",
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, MAX(id) AS journal_id ",
+                "FROM {} WHERE id > $1 ",
+                "GROUP BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl",
                 ") ",
-                "SELECT changed.journal_id, reports.id, reports.provider_key, reports.component_key, reports.artifact_kind, reports.artifact_identity, ",
-                "reports.observed_at_micros, reports.freshness, reports.knowledge_revision, reports.findings ",
-                "FROM changed JOIN {} reports ON reports.id = changed.provider_report_id ",
+                "SELECT changed.journal_id, journal.component_key, journal.artifact_kind, journal.artifact_identity, ",
+                "journal.vulnerability_id, journal.package_name, journal.package_version, journal.package_purl, journal.severity, journal.active ",
+                "FROM changed JOIN {} journal ON journal.id = changed.journal_id ",
                 "ORDER BY changed.journal_id"
             ),
-            self.names.provider_report_identity_journal,
-            self.names.provider_reports
+            self.names.provider_report_finding_journal,
+            self.names.provider_report_finding_journal
         ))
         .bind(
             i64::try_from(after_id)
@@ -5154,31 +5271,48 @@ impl PostgresStore {
         .map_err(|error| format!("postgres provider report delta load failed: {error}"))?;
         for (
             journal_id,
-            id,
-            provider_key,
             component_key,
             artifact_kind,
             artifact_identity,
-            observed_at_micros,
-            freshness,
-            knowledge_revision,
-            findings,
-        ) in reports
+            vulnerability_id,
+            package_name,
+            package_version,
+            package_purl,
+            severity,
+            active,
+        ) in rows
         {
-            let report = ProviderScanReport {
-                provider_key: provider_key.into_boxed_str(),
-                component_key: component_key.into_boxed_str(),
-                artifact: ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
-                observed_at: micros_to_system_time(observed_at_micros)?,
-                freshness: parse_freshness(&freshness)?,
-                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
-                findings: findings.0,
-            };
-            self.apply_provider_report_row(id, &report)?;
+            let artifact =
+                ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity);
+            let finding = FindingRef::new(
+                component_key.clone(),
+                artifact.clone(),
+                vulnerability_id,
+                venom_domain::PackageCoordinate {
+                    name: package_name.into_boxed_str(),
+                    version: package_version.into_boxed_str(),
+                    purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+                },
+            );
+            if active {
+                let reported =
+                    ReportedFinding::new(finding.vulnerability_id.clone(), finding.package.clone())
+                        .with_severity(parse_severity(severity.as_deref().ok_or_else(|| {
+                            "postgres provider report finding journal active row missing severity"
+                                .to_owned()
+                        })?)?);
+                self.read_model_mut().replay_active_finding_upsert(
+                    component_key.into_boxed_str(),
+                    artifact,
+                    &reported,
+                );
+            } else {
+                self.read_model_mut().replay_active_finding_remove(&finding);
+            }
             self.provider_report_row_high_watermark =
                 self.provider_report_row_high_watermark
                     .max(u64::try_from(journal_id).map_err(|_| {
-                        "postgres provider report identity journal id out of range".to_owned()
+                        "postgres provider report finding journal id out of range".to_owned()
                     })?);
         }
         Ok(())
@@ -5303,16 +5437,16 @@ impl PostgresStore {
     async fn load_provider_report_source_watermark(&self) -> Result<u64, String> {
         let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
             "SELECT MAX(id) FROM {}",
-            self.names.provider_report_identity_journal
+            self.names.provider_report_finding_journal
         ))
         .fetch_one(&self.pool)
         .await
         .map_err(|error| {
-            format!("postgres provider report identity journal watermark read failed: {error}")
+            format!("postgres provider report finding journal watermark read failed: {error}")
         })?
         .unwrap_or_default();
         u64::try_from(max_id).map_err(|_| {
-            "postgres provider report identity journal watermark out of range".to_owned()
+            "postgres provider report finding journal watermark out of range".to_owned()
         })
     }
 
@@ -5840,7 +5974,11 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres recent system events load failed: {error}"))?;
 
-        let mut windows = SystemEventRecentWindows::default();
+        let mut recent_events = Vec::new();
+        let mut recent_scheduler_events = Vec::new();
+        let mut recent_command_events = Vec::new();
+        let mut recent_governance_events = Vec::new();
+        let mut recent_publication_events = Vec::new();
         for row in rows {
             let (
                 event_id,
@@ -5871,27 +6009,27 @@ impl PostgresStore {
                 detail,
             ))?);
             if global_rank <= limit {
-                windows.recent_events.push(event.clone());
+                recent_events.push(event.clone());
             }
             match category.as_str() {
                 "scheduler" => {
                     if category_rank <= limit {
-                        windows.recent_scheduler_events.push(event.clone());
+                        recent_scheduler_events.push(event.clone());
                     }
                 }
                 "command" => {
                     if category_rank <= limit {
-                        windows.recent_command_events.push(event.clone());
+                        recent_command_events.push(event.clone());
                     }
                 }
                 "governance" => {
                     if category_rank <= limit {
-                        windows.recent_governance_events.push(event.clone());
+                        recent_governance_events.push(event.clone());
                     }
                 }
                 "publication" => {
                     if category_rank <= limit {
-                        windows.recent_publication_events.push(event.clone());
+                        recent_publication_events.push(event.clone());
                     }
                 }
                 _ => {
@@ -5901,7 +6039,13 @@ impl PostgresStore {
                 }
             }
         }
-        Ok(windows)
+        Ok(SystemEventRecentWindows {
+            recent_events: recent_events.into(),
+            recent_scheduler_events: recent_scheduler_events.into(),
+            recent_command_events: recent_command_events.into(),
+            recent_governance_events: recent_governance_events.into(),
+            recent_publication_events: recent_publication_events.into(),
+        })
     }
 
     async fn load_latest_system_event_cursor(&self) -> Result<EventSourceCursor, String> {
@@ -6281,6 +6425,55 @@ impl PostgresStore {
             u64::try_from(id)
                 .map_err(|_| "postgres provider report identity journal id out of range".to_owned())
         })
+    }
+
+    async fn append_provider_report_finding_journal_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        report: &ProviderScanReport,
+        provider_report_id: i64,
+        previous_findings: &[ReportedFinding],
+    ) -> Result<u64, String> {
+        let deltas = provider_report_finding_deltas(previous_findings, &report.findings);
+        if deltas.is_empty() {
+            return Ok(0);
+        }
+
+        let mut query = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {} \
+            (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, active, provider_report_id) ",
+            self.names.provider_report_finding_journal
+        ));
+        query.push_values(deltas.iter(), |mut row, delta| {
+            row.push_bind(report.component_key.as_ref())
+                .push_bind(artifact_kind_name(report.artifact.kind))
+                .push_bind(report.artifact.identity.as_ref())
+                .push_bind(delta.snapshot.key.vulnerability_id.as_ref())
+                .push_bind(delta.snapshot.key.package_name.as_ref())
+                .push_bind(delta.snapshot.key.package_version.as_ref())
+                .push_bind(delta.snapshot.key.package_purl.as_deref().unwrap_or(""))
+                .push_bind(
+                    delta
+                        .active
+                        .then_some(severity_name(delta.snapshot.severity)),
+                )
+                .push_bind(delta.active)
+                .push_bind(provider_report_id);
+        });
+        query.push(" RETURNING id");
+        query
+            .build_query_as::<(i64,)>()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| {
+                format!("postgres provider report finding journal insert failed: {error}")
+            })?
+            .into_iter()
+            .try_fold(0_u64, |cursor, (id,)| {
+                u64::try_from(id).map(|id| cursor.max(id)).map_err(|_| {
+                    "postgres provider report finding journal id out of range".to_owned()
+                })
+            })
     }
 
     async fn append_governance_identity_journal_in_transaction(
@@ -6988,6 +7181,7 @@ struct TableNames {
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
     provider_report_identity_journal: Box<str>,
+    provider_report_finding_journal: Box<str>,
     finding_risk_acceptances: Box<str>,
     finding_suppressions: Box<str>,
     finding_governance_journal: Box<str>,
@@ -7023,6 +7217,8 @@ impl TableNames {
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             provider_report_identity_journal: format!("{schema}.provider_report_identity_journal")
                 .into_boxed_str(),
+            provider_report_finding_journal: format!("{schema}.provider_report_finding_journal")
+                .into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
             finding_suppressions: format!("{schema}.finding_suppressions").into_boxed_str(),
             finding_governance_journal: format!("{schema}.finding_governance_journal")
@@ -7053,6 +7249,73 @@ fn validate_schema_name(schema: &str) -> Result<Box<str>, String> {
     Ok(schema.to_owned().into_boxed_str())
 }
 
+fn provider_report_finding_deltas(
+    previous: &[ReportedFinding],
+    current: &[ReportedFinding],
+) -> Vec<ProviderFindingDelta> {
+    let previous = canonical_provider_finding_snapshots(previous);
+    let current = canonical_provider_finding_snapshots(current);
+    let mut deltas = Vec::new();
+    let mut previous_iter = previous.into_iter().peekable();
+    let mut current_iter = current.into_iter().peekable();
+
+    while previous_iter.peek().is_some() || current_iter.peek().is_some() {
+        match (previous_iter.peek(), current_iter.peek()) {
+            (Some(left), Some(right)) if left.key == right.key => {
+                let left = previous_iter.next().expect("left peek should match next");
+                let right = current_iter.next().expect("right peek should match next");
+                if left.severity != right.severity {
+                    deltas.push(ProviderFindingDelta {
+                        snapshot: right,
+                        active: true,
+                    });
+                }
+            }
+            (Some(left), Some(right)) if left.key < right.key => {
+                deltas.push(ProviderFindingDelta {
+                    snapshot: previous_iter.next().expect("left peek should match next"),
+                    active: false,
+                });
+            }
+            (Some(_), None) => {
+                deltas.push(ProviderFindingDelta {
+                    snapshot: previous_iter.next().expect("left peek should match next"),
+                    active: false,
+                });
+            }
+            (Some(_) | None, Some(_)) => {
+                deltas.push(ProviderFindingDelta {
+                    snapshot: current_iter.next().expect("right peek should match next"),
+                    active: true,
+                });
+            }
+            (None, None) => break,
+        }
+    }
+
+    deltas
+}
+
+fn canonical_provider_finding_snapshots(
+    findings: &[ReportedFinding],
+) -> Vec<ProviderFindingSnapshot> {
+    let mut snapshots = findings
+        .iter()
+        .map(|finding| ProviderFindingSnapshot {
+            key: ProviderFindingKey {
+                vulnerability_id: finding.vulnerability_id.clone(),
+                package_name: finding.package.name.clone(),
+                package_version: finding.package.version.clone(),
+                package_purl: finding.package.purl.clone(),
+            },
+            severity: finding.severity,
+        })
+        .collect::<Vec<_>>();
+    snapshots.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+    snapshots.dedup_by(|left, right| left.key == right.key);
+    snapshots
+}
+
 const fn artifact_kind_name(value: ArtifactKind) -> &'static str {
     match value {
         ArtifactKind::ContainerImage => "container-image",
@@ -7065,6 +7328,29 @@ fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, String> {
         "container-image" => Ok(ArtifactKind::ContainerImage),
         "sbom-document" => Ok(ArtifactKind::SbomDocument),
         other => Err(format!("unsupported artifact kind: {other}")),
+    }
+}
+
+const fn severity_name(value: Severity) -> &'static str {
+    match value {
+        Severity::Unknown => "unknown",
+        Severity::None => "none",
+        Severity::Low => "low",
+        Severity::Medium => "medium",
+        Severity::High => "high",
+        Severity::Critical => "critical",
+    }
+}
+
+fn parse_severity(value: &str) -> Result<Severity, String> {
+    match value {
+        "unknown" => Ok(Severity::Unknown),
+        "none" => Ok(Severity::None),
+        "low" => Ok(Severity::Low),
+        "medium" => Ok(Severity::Medium),
+        "high" => Ok(Severity::High),
+        "critical" => Ok(Severity::Critical),
+        other => Err(format!("unsupported severity: {other}")),
     }
 }
 
@@ -7340,7 +7626,7 @@ mod tests {
         FindingGovernanceState, FindingProvider, FindingProviderError, IntegrationEvent,
         IntegrationEventPublishError, IntegrationEventPublisher, PackageCoordinate,
         PendingIntegrationEvent, ProviderScanReport, ReportedFinding, RiskAcceptance,
-        RunNextScanResult, ScanCommandStatus, Suppression, SystemEventKind,
+        RunNextScanResult, ScanCommandStatus, Severity, Suppression, SystemEventKind,
     };
 
     fn postgres_test_url() -> Option<String> {
@@ -8261,6 +8547,102 @@ mod tests {
                 .active_finding_count("component:payments-api", &artifact()),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_read_model_refresh_replays_only_changed_finding_deltas() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("finding_delta_refresh");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let first_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![
+                ReportedFinding::new("CVE-2026-0001", PackageCoordinate::new("openssl", "3.0.0"))
+                    .with_severity(Severity::Low),
+                ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
+                    .with_severity(Severity::Medium),
+            ],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-16");
+        let _ = backend
+            .record_scan_report(&first_report)
+            .await
+            .expect("first provider report should persist");
+
+        let loader = backend.read_snapshot_loader();
+        let since_change_watermark = backend
+            .current_change_watermark()
+            .await
+            .expect("current watermark should be readable after first report");
+        let base_cursor = backend.read_model_source_watermark();
+        let snapshot_base = snapshot_base(&backend);
+
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should reopen");
+        let second_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![
+                ReportedFinding::new("CVE-2026-0002", PackageCoordinate::new("libxml2", "2.11.0"))
+                    .with_severity(Severity::Critical),
+                ReportedFinding::new("CVE-2026-0003", PackageCoordinate::new("zlib", "1.2.13"))
+                    .with_severity(Severity::High),
+            ],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-17");
+        let _ = writer
+            .record_scan_report(&second_report)
+            .await
+            .expect("second provider report should persist");
+
+        let delta_rows = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*)::bigint FROM {} WHERE id > $1",
+            writer.names.provider_report_finding_journal
+        ))
+        .bind(i64::try_from(base_cursor).expect("base cursor should fit in i64"))
+        .fetch_one(&writer.pool)
+        .await
+        .expect("finding delta journal count should load");
+        assert_eq!(delta_rows, 3);
+
+        let refreshed = loader
+            .load(since_change_watermark, snapshot_base)
+            .await
+            .expect("detached fresh read should load finding deltas");
+
+        let page =
+            refreshed
+                .read_model
+                .query_active_findings(&venom_domain::ActiveFindingsQuery::new(
+                    "component:payments-api",
+                    artifact(),
+                ));
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.findings
+                .iter()
+                .map(|finding| finding.finding.vulnerability_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["CVE-2026-0002", "CVE-2026-0003"]
+        );
+        assert_eq!(page.findings[0].severity, Severity::Critical);
     }
 
     #[test]

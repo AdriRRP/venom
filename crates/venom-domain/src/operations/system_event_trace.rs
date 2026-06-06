@@ -152,7 +152,7 @@ pub struct SystemEventsPage {
     pub total: usize,
     pub returned: usize,
     pub limit: usize,
-    pub events: Vec<Arc<SystemEvent>>,
+    pub events: Arc<[Arc<SystemEvent>]>,
 }
 
 /// One bounded, truthful query index over operator-facing system events.
@@ -178,11 +178,11 @@ pub struct SystemEventWindowTotals {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SystemEventRecentWindows {
-    pub recent_events: Vec<Arc<SystemEvent>>,
-    pub recent_scheduler_events: Vec<Arc<SystemEvent>>,
-    pub recent_command_events: Vec<Arc<SystemEvent>>,
-    pub recent_governance_events: Vec<Arc<SystemEvent>>,
-    pub recent_publication_events: Vec<Arc<SystemEvent>>,
+    pub recent_events: Arc<[Arc<SystemEvent>]>,
+    pub recent_scheduler_events: Arc<[Arc<SystemEvent>]>,
+    pub recent_command_events: Arc<[Arc<SystemEvent>]>,
+    pub recent_governance_events: Arc<[Arc<SystemEvent>]>,
+    pub recent_publication_events: Arc<[Arc<SystemEvent>]>,
 }
 
 #[allow(clippy::struct_field_names)]
@@ -213,11 +213,31 @@ impl SystemEventRecentWindowCache {
 
     fn to_public(&self) -> SystemEventRecentWindows {
         SystemEventRecentWindows {
-            recent_events: self.all_events.iter().cloned().collect(),
-            recent_scheduler_events: self.scheduler_events.iter().cloned().collect(),
-            recent_command_events: self.command_events.iter().cloned().collect(),
-            recent_governance_events: self.governance_events.iter().cloned().collect(),
-            recent_publication_events: self.publication_events.iter().cloned().collect(),
+            recent_events: self.all_events.iter().cloned().collect::<Vec<_>>().into(),
+            recent_scheduler_events: self
+                .scheduler_events
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            recent_command_events: self
+                .command_events
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            recent_governance_events: self
+                .governance_events
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            recent_publication_events: self
+                .publication_events
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
         }
     }
 
@@ -240,11 +260,11 @@ impl SystemEventRecentWindowCache {
 impl From<SystemEventRecentWindows> for SystemEventRecentWindowCache {
     fn from(value: SystemEventRecentWindows) -> Self {
         Self {
-            all_events: value.recent_events.into(),
-            scheduler_events: value.recent_scheduler_events.into(),
-            command_events: value.recent_command_events.into(),
-            governance_events: value.recent_governance_events.into(),
-            publication_events: value.recent_publication_events.into(),
+            all_events: value.recent_events.iter().cloned().collect(),
+            scheduler_events: value.recent_scheduler_events.iter().cloned().collect(),
+            command_events: value.recent_command_events.iter().cloned().collect(),
+            governance_events: value.recent_governance_events.iter().cloned().collect(),
+            publication_events: value.recent_publication_events.iter().cloned().collect(),
         }
     }
 }
@@ -497,7 +517,7 @@ impl SystemEventQueryIndex {
             total,
             returned: events.len(),
             limit,
-            events,
+            events: events.into(),
         }
     }
 }
@@ -716,7 +736,7 @@ pub fn query_system_events<'a>(
         total,
         returned: returned_events.len(),
         limit,
-        events: returned_events,
+        events: returned_events.into(),
     }
 }
 
@@ -864,15 +884,17 @@ mod tests {
                             SystemEventKind::ScanCommandCompleted,
                         ))
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 recent_scheduler_events: vec![Arc::new(timed_event(
                     "scheduler-001",
                     999,
                     SystemEventKind::CollectionScanMaterialized,
-                ))],
-                recent_command_events: Vec::new(),
-                recent_governance_events: Vec::new(),
-                recent_publication_events: Vec::new(),
+                ))]
+                .into(),
+                recent_command_events: Vec::<Arc<SystemEvent>>::new().into(),
+                recent_governance_events: Vec::<Arc<SystemEvent>>::new().into(),
+                recent_publication_events: Vec::<Arc<SystemEvent>>::new().into(),
             },
         );
 

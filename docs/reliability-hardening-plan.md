@@ -242,6 +242,11 @@ Completed:
     Introduce one cache-native recent-window shape for `system events` and let
     local merged snapshots reuse that shape directly instead of bouncing
     through public `Vec` windows on hot paths.
+80. `W229-durable-granularity-closure`
+    Close the remaining recurring structural findings by moving Postgres
+    read-model refresh onto durable finding-level deltas, refreshing
+    collection definitions and sources from latest changed entities only, and
+    tightening the public `system events` edge onto shared immutable shapes.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.
