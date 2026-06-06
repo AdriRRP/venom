@@ -234,6 +234,10 @@ Completed:
     Move component-binding inventory refresh off whole-subgraph reloads and
     tighten remaining `system events` window materialization on local merge
     paths.
+78. `W227-local-forked-volatile-lane-parity`
+    Standardize local volatile API lanes on ephemeral fork-from-state residency
+    so local and Postgres paths share the same lane topology instead of keeping
+    a separate reopen-from-disk branch.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.

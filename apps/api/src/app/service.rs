@@ -781,6 +781,7 @@ impl ApiApplication {
         matches!(self.backend, ApiStore::Postgres(_))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn local_paths(&self) -> Option<(PathBuf, PathBuf)> {
         match &self.backend {
