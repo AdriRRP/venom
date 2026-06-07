@@ -230,7 +230,7 @@ type CollectionSnapshotRow = (
     Option<String>,
     Option<String>,
     Option<String>,
-    Option<Json<Vec<String>>>,
+    Json<Vec<String>>,
     Json<Vec<String>>,
 );
 type ActiveFindingSnapshotRow = (
@@ -691,6 +691,12 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection insert failed: {error}"))?;
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut tx,
+                &candidate_inventory,
+                registration.collection_key.as_ref(),
+            )
+            .await?;
             let definition_cursor = self
                 .append_collection_change_journal_in_transaction(
                     &mut tx,
@@ -764,6 +770,12 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut tx,
+                &candidate_inventory,
+                collection_key,
+            )
+            .await?;
             let membership_cursor = self
                 .append_collection_change_journal_in_transaction(
                     &mut tx,
@@ -837,6 +849,12 @@ impl PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut tx,
+                &candidate_inventory,
+                collection_key,
+            )
+            .await?;
             let membership_cursor = self
                 .append_collection_change_journal_in_transaction(
                     &mut tx,
@@ -894,6 +912,12 @@ impl PostgresStore {
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection source upsert failed: {error}"))?;
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut tx,
+                &candidate_inventory,
+                collection_key,
+            )
+            .await?;
             let source_cursor = self
                 .append_collection_change_journal_in_transaction(
                     &mut tx,
@@ -975,6 +999,12 @@ impl PostgresStore {
                     .await?,
                 );
             }
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut transaction,
+                &candidate_inventory,
+                collection_key,
+            )
+            .await?;
             self.commit_transaction(transaction).await?;
             *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.inventory_definition_source_watermarks
@@ -1126,6 +1156,12 @@ impl PostgresStore {
             .map_err(|error| {
                 format!("postgres collection context profile update failed: {error}")
             })?;
+            self.upsert_collection_snapshot_head_in_transaction(
+                &mut tx,
+                &candidate_inventory,
+                collection_key,
+            )
+            .await?;
             let definition_cursor = self
                 .append_collection_change_journal_in_transaction(
                     &mut tx,
@@ -3022,13 +3058,21 @@ impl PostgresStore {
                 &report.artifact.identity,
             )
             .await?;
+        let deltas = provider_report_finding_deltas(&previous_findings, &report.findings);
         self.upsert_provider_report_head_in_transaction(transaction, report, provider_report_id)
             .await?;
+        self.apply_provider_report_active_finding_heads_in_transaction(
+            transaction,
+            report,
+            provider_report_id,
+            &deltas,
+        )
+        .await?;
         self.append_provider_report_finding_journal_in_transaction(
             transaction,
             report,
             provider_report_id,
-            &previous_findings,
+            &deltas,
         )
         .await
     }
@@ -3089,6 +3133,64 @@ impl PostgresStore {
         .execute(&mut **transaction)
         .await
         .map_err(|error| format!("postgres provider report head upsert failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn apply_provider_report_active_finding_heads_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        report: &ProviderScanReport,
+        provider_report_id: i64,
+        deltas: &[ProviderFindingDelta],
+    ) -> Result<(), String> {
+        for delta in deltas {
+            if delta.active {
+                sqlx::query(&format!(
+                    concat!(
+                        "INSERT INTO {} ",
+                        "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id) ",
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+                        "ON CONFLICT (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl) ",
+                        "DO UPDATE SET severity = EXCLUDED.severity, provider_report_id = EXCLUDED.provider_report_id"
+                    ),
+                    self.names.provider_report_active_findings
+                ))
+                .bind(report.component_key.as_ref())
+                .bind(artifact_kind_name(report.artifact.kind))
+                .bind(report.artifact.identity.as_ref())
+                .bind(delta.snapshot.key.vulnerability_id.as_ref())
+                .bind(delta.snapshot.key.package_name.as_ref())
+                .bind(delta.snapshot.key.package_version.as_ref())
+                .bind(delta.snapshot.key.package_purl.as_deref().unwrap_or(""))
+                .bind(severity_name(delta.snapshot.severity))
+                .bind(provider_report_id)
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| {
+                    format!("postgres provider report active finding upsert failed: {error}")
+                })?;
+            } else {
+                sqlx::query(&format!(
+                    concat!(
+                        "DELETE FROM {} WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3 ",
+                        "AND vulnerability_id = $4 AND package_name = $5 AND package_version = $6 AND package_purl = $7"
+                    ),
+                    self.names.provider_report_active_findings
+                ))
+                .bind(report.component_key.as_ref())
+                .bind(artifact_kind_name(report.artifact.kind))
+                .bind(report.artifact.identity.as_ref())
+                .bind(delta.snapshot.key.vulnerability_id.as_ref())
+                .bind(delta.snapshot.key.package_name.as_ref())
+                .bind(delta.snapshot.key.package_version.as_ref())
+                .bind(delta.snapshot.key.package_purl.as_deref().unwrap_or(""))
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| {
+                    format!("postgres provider report active finding delete failed: {error}")
+                })?;
+            }
+        }
         Ok(())
     }
 
@@ -3305,6 +3407,7 @@ impl PostgresStore {
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
         self.create_provider_report_heads_table().await?;
+        self.create_provider_report_active_findings_table().await?;
         self.create_provider_report_finding_journal_table().await?;
         self.create_finding_risk_acceptances_table().await?;
         self.create_finding_suppressions_table().await?;
@@ -3312,11 +3415,116 @@ impl PostgresStore {
         self.create_finding_governance_identity_journal_table()
             .await?;
         self.create_collection_change_journal_table().await?;
+        self.create_collection_snapshot_heads_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
+        self.backfill_authoritative_snapshot_tables().await?;
         self.install_change_watermark_triggers().await?;
 
+        Ok(())
+    }
+
+    async fn backfill_authoritative_snapshot_tables(&self) -> Result<(), String> {
+        self.rebuild_provider_report_heads_from_source().await?;
+        self.rebuild_provider_report_active_findings_from_journal()
+            .await?;
+        self.rebuild_collection_snapshot_heads_from_source().await?;
+        Ok(())
+    }
+
+    async fn rebuild_provider_report_heads_from_source(&self) -> Result<(), String> {
+        sqlx::query(&format!("DELETE FROM {}", self.names.provider_report_heads))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres provider report head reset failed: {error}"))?;
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, provider_key, observed_at_micros, freshness, knowledge_revision, findings, provider_report_id) ",
+                "SELECT component_key, artifact_kind, artifact_identity, provider_key, observed_at_micros, freshness, knowledge_revision, findings, id ",
+                "FROM (",
+                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, observed_at_micros, freshness, knowledge_revision, findings, ",
+                "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
+                "FROM {}",
+                ") latest WHERE row_rank = 1"
+            ),
+            self.names.provider_report_heads,
+            self.names.provider_reports
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report head backfill failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn rebuild_provider_report_active_findings_from_journal(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            self.names.provider_report_active_findings
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres provider report active findings reset failed: {error}")
+        })?;
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id) ",
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id ",
+                "FROM (",
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id, active, ",
+                "ROW_NUMBER() OVER (",
+                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
+                "ORDER BY id DESC",
+                ") AS row_rank ",
+                "FROM {}",
+                ") latest WHERE row_rank = 1 AND active = TRUE"
+            ),
+            self.names.provider_report_active_findings,
+            self.names.provider_report_finding_journal
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres provider report active finding backfill failed: {error}")
+        })?;
+        Ok(())
+    }
+
+    async fn rebuild_collection_snapshot_heads_from_source(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            self.names.collection_snapshot_heads
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection snapshot head reset failed: {error}"))?;
+        sqlx::query(&format!(
+            concat!(
+                "WITH membership_lists AS (",
+                "SELECT collection_key, ",
+                "COALESCE(jsonb_agg(component_key ORDER BY component_key), '[]'::jsonb) AS membership_component_keys ",
+                "FROM {} GROUP BY collection_key",
+                ") ",
+                "INSERT INTO {} ",
+                "(collection_key, name, context_profile_key, source_kind, mode, source_component_keys, membership_component_keys) ",
+                "SELECT c.collection_key, c.name, c.context_profile_key, ",
+                "s.source_kind, s.mode, COALESCE(s.component_keys, '[]'::jsonb), ",
+                "COALESCE(m.membership_component_keys, '[]'::jsonb) ",
+                "FROM {} c ",
+                "LEFT JOIN {} s ON s.collection_key = c.collection_key ",
+                "LEFT JOIN membership_lists m ON m.collection_key = c.collection_key"
+            ),
+            self.names.collection_memberships,
+            self.names.collection_snapshot_heads,
+            self.names.collections,
+            self.names.collection_sources
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection snapshot head backfill failed: {error}"))?;
         Ok(())
     }
 
@@ -3817,6 +4025,34 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_provider_report_active_findings_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "vulnerability_id TEXT NOT NULL, ",
+                "package_name TEXT NOT NULL, ",
+                "package_version TEXT NOT NULL, ",
+                "package_purl TEXT NOT NULL DEFAULT '', ",
+                "severity TEXT NOT NULL, ",
+                "provider_report_id BIGINT NOT NULL REFERENCES {}(id) ON DELETE CASCADE, ",
+                "PRIMARY KEY (component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl)",
+                ")"
+            ),
+            self.names.provider_report_active_findings,
+            self.names.components,
+            self.names.provider_reports
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres provider report active findings table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
     async fn create_provider_report_finding_journal_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -3968,6 +4204,30 @@ impl PostgresStore {
         .await
         .map_err(|error| {
             format!("postgres collection change journal table create failed: {error}")
+        })?;
+        Ok(())
+    }
+
+    async fn create_collection_snapshot_heads_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "collection_key TEXT PRIMARY KEY REFERENCES {}(collection_key) ON DELETE CASCADE, ",
+                "name TEXT NOT NULL, ",
+                "context_profile_key TEXT NULL, ",
+                "source_kind TEXT NULL, ",
+                "mode TEXT NULL, ",
+                "source_component_keys JSONB NOT NULL DEFAULT '[]'::jsonb, ",
+                "membership_component_keys JSONB NOT NULL DEFAULT '[]'::jsonb",
+                ")"
+            ),
+            self.names.collection_snapshot_heads,
+            self.names.collections
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            format!("postgres collection snapshot heads table create failed: {error}")
         })?;
         Ok(())
     }
@@ -4425,23 +4685,11 @@ impl PostgresStore {
             .unwrap_or_default();
         sqlx::query_as::<_, CollectionSnapshotRow>(&format!(
             concat!(
-                "WITH membership_lists AS (",
-                "SELECT collection_key, ",
-                "COALESCE(jsonb_agg(component_key ORDER BY component_key), '[]'::jsonb) AS membership_component_keys ",
-                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) GROUP BY collection_key",
-                ") ",
-                "SELECT c.collection_key, c.name, c.context_profile_key, ",
-                "s.source_kind, s.mode, s.component_keys, ",
-                "COALESCE(m.membership_component_keys, '[]'::jsonb) AS membership_component_keys ",
-                "FROM {} c ",
-                "LEFT JOIN {} s ON s.collection_key = c.collection_key ",
-                "LEFT JOIN membership_lists m ON m.collection_key = c.collection_key ",
-                "WHERE NOT $1 OR c.collection_key = ANY($2) ",
-                "ORDER BY c.collection_key"
+                "SELECT collection_key, name, context_profile_key, source_kind, mode, ",
+                "source_component_keys, membership_component_keys ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ORDER BY collection_key"
             ),
-            self.names.collection_memberships,
-            self.names.collections,
-            self.names.collection_sources
+            self.names.collection_snapshot_heads
         ))
         .bind(filtered)
         .bind(&collection_keys)
@@ -4460,7 +4708,7 @@ impl PostgresStore {
             context_profile_key,
             source_kind,
             mode,
-            source_component_keys,
+            Json(source_component_keys),
             Json(member_component_keys),
         ) in snapshots
         {
@@ -4481,13 +4729,12 @@ impl PostgresStore {
                     );
                 }
             }
-            if let (Some(source_kind), Some(mode), Some(Json(component_keys))) =
-                (source_kind, mode, source_component_keys)
+            if let (Some(source_kind), Some(mode)) = (source_kind, mode)
             {
                 let source = parse_collection_source(
                     &source_kind,
                     &mode,
-                    component_keys
+                    source_component_keys
                         .into_iter()
                         .map(String::into_boxed_str)
                         .collect::<Vec<_>>(),
@@ -5248,22 +5495,16 @@ impl PostgresStore {
             concat!(
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
                 "package_name, package_version, package_purl, severity ",
-                "FROM (",
-                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
-                "package_name, package_version, package_purl, severity, active, ",
-                "ROW_NUMBER() OVER (",
-                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
-                "ORDER BY id DESC",
-                ") AS row_rank ",
-                "FROM {}",
-                ") latest WHERE row_rank = 1 AND active = TRUE ",
+                "FROM {} ",
                 "ORDER BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl"
             ),
-            self.names.provider_report_finding_journal
+            self.names.provider_report_active_findings
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres provider report finding snapshot load failed: {error}"))?;
+        .map_err(|error| {
+            format!("postgres provider report active finding snapshot load failed: {error}")
+        })?;
 
         let mut findings_by_artifact = ActiveFindingsByArtifact::new();
         for row in finding_rows {
@@ -6536,9 +6777,8 @@ impl PostgresStore {
         tx: &mut Transaction<'_, Postgres>,
         report: &ProviderScanReport,
         provider_report_id: i64,
-        previous_findings: &[ReportedFinding],
+        deltas: &[ProviderFindingDelta],
     ) -> Result<u64, String> {
-        let deltas = provider_report_finding_deltas(previous_findings, &report.findings);
         if deltas.is_empty() {
             return Ok(0);
         }
@@ -6611,6 +6851,66 @@ impl PostgresStore {
             u64::try_from(id)
                 .map_err(|_| "postgres governance identity journal id out of range".to_owned())
         })
+    }
+
+    async fn upsert_collection_snapshot_head_in_transaction(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        inventory: &ComponentInventory,
+        collection_key: &str,
+    ) -> Result<(), String> {
+        let collection = inventory
+            .collections()
+            .into_iter()
+            .find(|collection| collection.collection_key.as_ref() == collection_key)
+            .ok_or_else(|| {
+                format!("postgres collection snapshot head missing collection: {collection_key}")
+            })?;
+        let (source_kind, mode, source_component_keys) = collection
+            .source
+            .as_ref()
+            .map_or((None, None, Vec::new()), |source| {
+                (
+                    Some(collection_source_kind_name(source)),
+                    Some(collection_source_mode_name(source.mode())),
+                    source
+                        .component_keys()
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            });
+        let membership_component_keys = collection
+            .component_keys
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>();
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(collection_key, name, context_profile_key, source_kind, mode, source_component_keys, membership_component_keys) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7) ",
+                "ON CONFLICT (collection_key) DO UPDATE SET ",
+                "name = EXCLUDED.name, ",
+                "context_profile_key = EXCLUDED.context_profile_key, ",
+                "source_kind = EXCLUDED.source_kind, ",
+                "mode = EXCLUDED.mode, ",
+                "source_component_keys = EXCLUDED.source_component_keys, ",
+                "membership_component_keys = EXCLUDED.membership_component_keys"
+            ),
+            self.names.collection_snapshot_heads
+        ))
+        .bind(collection.collection_key.as_ref())
+        .bind(collection.name.as_ref())
+        .bind(collection.context_profile_key.as_deref())
+        .bind(source_kind)
+        .bind(mode)
+        .bind(Json(source_component_keys))
+        .bind(Json(membership_component_keys))
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| format!("postgres collection snapshot head upsert failed: {error}"))?;
+        Ok(())
     }
 
     async fn append_collection_change_journal_in_transaction(
@@ -7273,12 +7573,14 @@ struct TableNames {
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
     provider_report_heads: Box<str>,
+    provider_report_active_findings: Box<str>,
     provider_report_finding_journal: Box<str>,
     finding_risk_acceptances: Box<str>,
     finding_suppressions: Box<str>,
     finding_governance_journal: Box<str>,
     finding_governance_identity_journal: Box<str>,
     collection_change_journal: Box<str>,
+    collection_snapshot_heads: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
     system_events: Box<str>,
@@ -7308,6 +7610,10 @@ impl TableNames {
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             provider_report_heads: format!("{schema}.provider_report_heads").into_boxed_str(),
+            provider_report_active_findings: format!(
+                "{schema}.provider_report_active_findings"
+            )
+            .into_boxed_str(),
             provider_report_finding_journal: format!("{schema}.provider_report_finding_journal")
                 .into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
@@ -7319,6 +7625,8 @@ impl TableNames {
             )
             .into_boxed_str(),
             collection_change_journal: format!("{schema}.collection_change_journal")
+                .into_boxed_str(),
+            collection_snapshot_heads: format!("{schema}.collection_snapshot_heads")
                 .into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
@@ -8334,6 +8642,100 @@ mod tests {
         assert_eq!(provider_report_id, latest_report_id);
         assert_eq!(knowledge_revision.as_deref(), Some("fixture-db:2026-05-21"));
         assert_eq!(findings, second_report.findings);
+    }
+
+    #[tokio::test]
+    async fn postgres_reopen_backfills_authoritative_snapshot_tables_when_they_are_empty() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("authoritative_snapshot_backfill");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-22");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .configure_collection_source(
+                "release:2026.05",
+                CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                    CollectionSourceMode::Replace,
+                    vec![Box::<str>::from("component:payments-api")],
+                )),
+            )
+            .await
+            .expect("collection source should persist");
+        let _ = backend
+            .materialize_collection_source("release:2026.05")
+            .await
+            .expect("collection source materialization should persist");
+
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_active_findings
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("active finding heads should clear");
+        sqlx::query(&format!("DELETE FROM {}", backend.names.provider_report_heads))
+            .execute(&backend.pool)
+            .await
+            .expect("provider report heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot heads should clear");
+
+        let reopened = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should reopen");
+
+        assert_eq!(
+            reopened
+                .read_model_snapshot_arc()
+                .active_finding_count("component:payments-api", &artifact()),
+            1
+        );
+        let source = reopened
+            .inventory_snapshot()
+            .collection_source("release:2026.05")
+            .expect("collection source should backfill");
+        assert_eq!(source.mode(), CollectionSourceMode::Replace);
+        assert_eq!(
+            reopened
+                .inventory_snapshot()
+                .collection_members("release:2026.05"),
+            Some(vec![Box::<str>::from("component:payments-api")])
+        );
     }
 
     #[tokio::test]
