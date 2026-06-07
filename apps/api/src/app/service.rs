@@ -566,9 +566,11 @@ impl LocalStore {
                 }
                 let runtime_windows = runtime.recent_window_cache();
                 let (merged_index, merged_windows) =
-                    SystemEventQueryIndex::merged_with_recent_window_cache(
-                        state.as_ref(),
-                        runtime.as_ref(),
+                    SystemEventQueryIndex::merged_from_window_caches(
+                        state.window_totals(),
+                        runtime.window_totals(),
+                        &snapshot.state_windows,
+                        &runtime_windows,
                     );
                 let merged = Arc::new(merged_index);
                 *cache = Some(MergedSystemEventSnapshot {
@@ -609,9 +611,11 @@ impl LocalStore {
                 }
                 let state_windows = state.recent_window_cache();
                 let (merged_index, merged_windows) =
-                    SystemEventQueryIndex::merged_with_recent_window_cache(
-                        state.as_ref(),
-                        runtime.as_ref(),
+                    SystemEventQueryIndex::merged_from_window_caches(
+                        state.window_totals(),
+                        runtime.window_totals(),
+                        &state_windows,
+                        &snapshot.runtime_windows,
                     );
                 let merged = Arc::new(merged_index);
                 *cache = Some(MergedSystemEventSnapshot {
@@ -626,9 +630,11 @@ impl LocalStore {
             }
             _ => (state.recent_window_cache(), runtime.recent_window_cache()),
         };
-        let (merged_index, merged_windows) = SystemEventQueryIndex::merged_with_recent_window_cache(
-            state.as_ref(),
-            runtime.as_ref(),
+        let (merged_index, merged_windows) = SystemEventQueryIndex::merged_from_window_caches(
+            state.window_totals(),
+            runtime.window_totals(),
+            &state_windows,
+            &runtime_windows,
         );
         let merged = Arc::new(merged_index);
         *cache = Some(MergedSystemEventSnapshot {

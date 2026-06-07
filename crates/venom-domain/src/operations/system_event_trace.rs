@@ -377,9 +377,24 @@ impl SystemEventQueryIndex {
         left: &Self,
         right: &Self,
     ) -> (Self, SystemEventRecentWindowCache) {
-        let windows = merge_recent_window_caches(&left.recent_windows, &right.recent_windows);
+        Self::merged_from_window_caches(
+            left.window_totals(),
+            right.window_totals(),
+            &left.recent_windows,
+            &right.recent_windows,
+        )
+    }
+
+    #[must_use]
+    pub fn merged_from_window_caches(
+        left_totals: SystemEventWindowTotals,
+        right_totals: SystemEventWindowTotals,
+        left_windows: &SystemEventRecentWindowCache,
+        right_windows: &SystemEventRecentWindowCache,
+    ) -> (Self, SystemEventRecentWindowCache) {
+        let windows = merge_recent_window_caches(left_windows, right_windows);
         let index = Self::from_recent_window_cache(
-            merge_window_totals(&left.window_totals(), &right.window_totals()),
+            merge_window_totals(&left_totals, &right_totals),
             windows.clone(),
         );
         (index, windows)

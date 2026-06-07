@@ -508,6 +508,11 @@ Completed:
      Introduce authoritative provider-report heads for cold rebuilds, one
      canonical joined collection snapshot loader, and remove the last avoidable
      production bounce through public `system events` windows.
+103. `W233-authoritative-derived-state-closure`
+     Make cold and detached Postgres rebuild paths consume upgrade-safe
+     authoritative derived state for active findings and collections, and
+     tighten local `system events` fallback merges around already-fetched
+     cache-native windows.
 
 ## Exit condition
 
