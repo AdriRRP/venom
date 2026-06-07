@@ -213,6 +213,7 @@ type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule
 type CommandRecordMap = BTreeMap<Box<str>, ScanCommandRecord>;
 type CommandOrder = Vec<Box<str>>;
 type PendingIntegrationEventList = Vec<PendingIntegrationEvent>;
+type ActiveFindingsByArtifact = BTreeMap<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>;
 type ProviderReportSnapshotRow = (
     i64,
     String,
@@ -5325,20 +5326,15 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres provider report finding snapshot load failed: {error}"))?;
 
-        let mut findings_by_artifact =
-            BTreeMap::<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>::new();
+        let mut findings_by_artifact = ActiveFindingsByArtifact::new();
         for row in finding_rows {
-            self.append_active_finding_snapshot_row(&mut findings_by_artifact, row)?;
+            Self::append_active_finding_snapshot_row(&mut findings_by_artifact, row)?;
         }
         Ok(findings_by_artifact)
     }
 
     fn append_active_finding_snapshot_row(
-        &self,
-        findings_by_artifact: &mut BTreeMap<
-            (Box<str>, ArtifactKind, Box<str>),
-            Vec<ReportedFinding>,
-        >,
+        findings_by_artifact: &mut ActiveFindingsByArtifact,
         row: ActiveFindingSnapshotRow,
     ) -> Result<(), String> {
         let (
@@ -5353,9 +5349,9 @@ impl PostgresStore {
         ) = row;
         findings_by_artifact
             .entry((
-                component_key.clone().into_boxed_str(),
+                component_key.into_boxed_str(),
                 parse_artifact_kind(&artifact_kind)?,
-                artifact_identity.clone().into_boxed_str(),
+                artifact_identity.into_boxed_str(),
             ))
             .or_default()
             .push(
@@ -5375,10 +5371,7 @@ impl PostgresStore {
     fn apply_provider_report_snapshot_row(
         &mut self,
         row: ProviderReportSnapshotRow,
-        findings_by_artifact: &mut BTreeMap<
-            (Box<str>, ArtifactKind, Box<str>),
-            Vec<ReportedFinding>,
-        >,
+        findings_by_artifact: &mut ActiveFindingsByArtifact,
     ) -> Result<(), String> {
         let (
             id,
@@ -5393,16 +5386,17 @@ impl PostgresStore {
         let artifact_kind = parse_artifact_kind(&artifact_kind)?;
         let artifact_identity = artifact_identity.into_boxed_str();
         let component_key = component_key.into_boxed_str();
+        let artifact_key = (
+            component_key.clone(),
+            artifact_kind,
+            artifact_identity.clone(),
+        );
         let findings = findings_by_artifact
-            .remove(&(
-                component_key.clone(),
-                artifact_kind,
-                artifact_identity.clone(),
-            ))
+            .remove(&artifact_key)
             .unwrap_or_default();
         let report = ProviderScanReport {
             provider_key: provider_key.into_boxed_str(),
-            component_key: component_key.clone(),
+            component_key,
             artifact: ArtifactRef::new(artifact_kind, artifact_identity),
             observed_at: micros_to_system_time(observed_at_micros)?,
             freshness: parse_freshness(&freshness)?,
