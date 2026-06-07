@@ -4368,8 +4368,8 @@ impl PostgresStore {
                 return Err("postgres collection sources contain invalid configuration".to_owned());
             }
         }
-        self.inventory_definition_source_watermarks.collection_sources =
-            self.load_collection_source_watermark().await?;
+        self.inventory_definition_source_watermarks
+            .collection_sources = self.load_collection_source_watermark().await?;
         Ok(())
     }
 
@@ -4462,8 +4462,8 @@ impl PostgresStore {
                 return Err("postgres collection sources contain invalid configuration".to_owned());
             }
         }
-        self.inventory_definition_source_watermarks.collection_sources =
-            self.load_collection_source_watermark().await?;
+        self.inventory_definition_source_watermarks
+            .collection_sources = self.load_collection_source_watermark().await?;
         Ok(())
     }
 
@@ -5308,10 +5308,8 @@ impl PostgresStore {
         .await
         .map_err(|error| format!("postgres provider report finding snapshot load failed: {error}"))?;
 
-        let mut findings_by_artifact = BTreeMap::<
-            (Box<str>, ArtifactKind, Box<str>),
-            Vec<ReportedFinding>,
-        >::new();
+        let mut findings_by_artifact =
+            BTreeMap::<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>::new();
         for (
             component_key,
             artifact_kind,
@@ -5629,7 +5627,10 @@ impl PostgresStore {
             .await
     }
 
-    async fn load_collection_change_source_watermark(&self, section_kind: &str) -> Result<u64, String> {
+    async fn load_collection_change_source_watermark(
+        &self,
+        section_kind: &str,
+    ) -> Result<u64, String> {
         let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
             "SELECT MAX(id) FROM {} WHERE section_kind = $1",
             self.names.collection_change_journal
