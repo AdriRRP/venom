@@ -4135,7 +4135,8 @@ impl PostgresStore {
             )
             .await?;
         self.ingestion = backend.ingestion;
-        self.inventory_definition_source_watermarks = backend.inventory_definition_source_watermarks;
+        self.inventory_definition_source_watermarks =
+            backend.inventory_definition_source_watermarks;
         self.refresh_inventory_snapshot_cache();
         Ok(())
     }
@@ -4385,9 +4386,7 @@ impl PostgresStore {
         .bind(&collection_keys)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| {
-            format!("postgres collection definition targeted load failed: {error}")
-        })?;
+        .map_err(|error| format!("postgres collection definition targeted load failed: {error}"))?;
         for (collection_key, name, context_profile_key, updated_at_micros) in collections {
             self.ingestion_mut()
                 .inventory_mut()
@@ -4429,20 +4428,19 @@ impl PostgresStore {
             .iter()
             .map(|key| key.to_string())
             .collect::<Vec<_>>();
-        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(
-            &format!(
+        let sources =
+            sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(&format!(
                 concat!(
                     "SELECT collection_key, source_kind, mode, component_keys, ",
                     "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
                     "FROM {} WHERE collection_key = ANY($1) ORDER BY updated_at, collection_key"
                 ),
                 self.names.collection_sources
-            ),
-        )
-        .bind(&collection_keys)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection source targeted load failed: {error}"))?;
+            ))
+            .bind(&collection_keys)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection source targeted load failed: {error}"))?;
         for (collection_key, source_kind, mode, Json(component_keys), updated_at_micros) in sources
         {
             let source = parse_collection_source(
@@ -4492,9 +4490,7 @@ impl PostgresStore {
         .bind(&collection_keys)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| {
-            format!("postgres collection membership targeted load failed: {error}")
-        })?;
+        .map_err(|error| format!("postgres collection membership targeted load failed: {error}"))?;
         for (collection_key, component_key) in memberships {
             let result = self
                 .ingestion_mut()
@@ -4504,9 +4500,8 @@ impl PostgresStore {
                 return Err("postgres collection memberships contain invalid ownership".to_owned());
             }
         }
-        self.inventory_definition_source_watermarks.collection_memberships = self
-            .load_collection_membership_source_watermark()
-            .await?;
+        self.inventory_definition_source_watermarks
+            .collection_memberships = self.load_collection_membership_source_watermark().await?;
         Ok(())
     }
 
@@ -4552,9 +4547,7 @@ impl PostgresStore {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| {
-            format!("postgres changed collection source key load failed: {error}")
-        })?;
+        .map_err(|error| format!("postgres changed collection source key load failed: {error}"))?;
         Ok(keys.into_iter().map(String::into_boxed_str).collect())
     }
 
@@ -4587,8 +4580,10 @@ impl PostgresStore {
         lane_mask: i32,
     ) -> Result<(), String> {
         let definition_keys = if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
-            self.load_changed_collection_definition_keys_after(base_watermarks.collection_definitions)
-                .await?
+            self.load_changed_collection_definition_keys_after(
+                base_watermarks.collection_definitions,
+            )
+            .await?
         } else {
             Vec::new()
         };
@@ -4635,22 +4630,23 @@ impl PostgresStore {
         }
 
         if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
-            self.inventory_definition_source_watermarks.collection_definitions =
+            self.inventory_definition_source_watermarks
+                .collection_definitions =
                 self.load_collection_definition_source_watermark().await?;
         } else {
-            self.inventory_definition_source_watermarks.collection_definitions =
-                base_watermarks.collection_definitions;
+            self.inventory_definition_source_watermarks
+                .collection_definitions = base_watermarks.collection_definitions;
         }
         if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
-            self.inventory_definition_source_watermarks.collection_sources =
-                self.load_collection_source_watermark().await?;
+            self.inventory_definition_source_watermarks
+                .collection_sources = self.load_collection_source_watermark().await?;
         } else {
-            self.inventory_definition_source_watermarks.collection_sources =
-                base_watermarks.collection_sources;
+            self.inventory_definition_source_watermarks
+                .collection_sources = base_watermarks.collection_sources;
         }
         if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS == 0 {
-            self.inventory_definition_source_watermarks.collection_memberships =
-                base_watermarks.collection_memberships;
+            self.inventory_definition_source_watermarks
+                .collection_memberships = base_watermarks.collection_memberships;
         }
         Ok(())
     }
@@ -5575,9 +5571,7 @@ impl PostgresStore {
 
     async fn load_collection_definition_source_watermark(&self) -> Result<u64, String> {
         let max_updated_at = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            concat!(
-                "SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"
-            ),
+            concat!("SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"),
             self.names.collections
         ))
         .fetch_one(&self.pool)
@@ -5590,9 +5584,7 @@ impl PostgresStore {
 
     async fn load_collection_source_watermark(&self) -> Result<u64, String> {
         let max_updated_at = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            concat!(
-                "SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"
-            ),
+            concat!("SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"),
             self.names.collection_sources
         ))
         .fetch_one(&self.pool)
