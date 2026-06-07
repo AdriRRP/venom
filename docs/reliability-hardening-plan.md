@@ -251,6 +251,11 @@ Completed:
     Unify detached and live durable cursors, refresh Postgres collections from
     changed collection keys against current authoritative rows, and remove the
     last avoidable `system events` edge materialization churn.
+82. `W231-durable-journal-granularity-closure`
+    Unify cold and hot Postgres read-model replay around the finding journal,
+    collapse collection refresh onto one compact collection change journal, and
+    keep Postgres `system events` snapshot rebuilds on cache-native recent
+    windows instead of re-materializing public shapes.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.
