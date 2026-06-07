@@ -4373,7 +4373,7 @@ impl PostgresStore {
         }
         let collection_keys = collection_keys
             .iter()
-            .map(|key| key.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>();
         let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
             concat!(
@@ -4426,7 +4426,7 @@ impl PostgresStore {
         }
         let collection_keys = collection_keys
             .iter()
-            .map(|key| key.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>();
         let sources =
             sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(&format!(
@@ -4478,7 +4478,7 @@ impl PostgresStore {
         }
         let collection_keys = collection_keys
             .iter()
-            .map(|key| key.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>();
         let memberships = sqlx::query_as::<_, (String, String)>(&format!(
             concat!(
@@ -4606,7 +4606,7 @@ impl PostgresStore {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_context_profiles_for_rebuild_keys(
-                    definition_keys.iter().map(|key| key.as_ref()),
+                    definition_keys.iter().map(std::convert::AsRef::as_ref),
                 );
             self.load_collection_definitions_for_keys(&definition_keys)
                 .await?;
@@ -4615,7 +4615,7 @@ impl PostgresStore {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_sources_for_rebuild_keys(
-                    source_keys.iter().map(|key| key.as_ref()),
+                    source_keys.iter().map(std::convert::AsRef::as_ref),
                 );
             self.load_collection_sources_for_keys(&source_keys).await?;
         }
@@ -4623,7 +4623,7 @@ impl PostgresStore {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_memberships_for_rebuild_keys(
-                    membership_keys.iter().map(|key| key.as_ref()),
+                    membership_keys.iter().map(std::convert::AsRef::as_ref),
                 );
             self.load_collection_memberships_for_keys(&membership_keys)
                 .await?;
@@ -8092,6 +8092,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&backend.ingestion, &fork.ingestion));
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn detached_postgres_read_snapshot_advances_read_model_source_watermark_for_new_reports()
     {
