@@ -213,11 +213,11 @@ impl SystemEventRecentWindowCache {
 
     #[must_use]
     pub fn from_public_windows(
-        recent_events: Arc<[Arc<SystemEvent>]>,
-        recent_scheduler_events: Arc<[Arc<SystemEvent>]>,
-        recent_command_events: Arc<[Arc<SystemEvent>]>,
-        recent_governance_events: Arc<[Arc<SystemEvent>]>,
-        recent_publication_events: Arc<[Arc<SystemEvent>]>,
+        recent_events: &Arc<[Arc<SystemEvent>]>,
+        recent_scheduler_events: &Arc<[Arc<SystemEvent>]>,
+        recent_command_events: &Arc<[Arc<SystemEvent>]>,
+        recent_governance_events: &Arc<[Arc<SystemEvent>]>,
+        recent_publication_events: &Arc<[Arc<SystemEvent>]>,
     ) -> Self {
         Self {
             all_events: recent_events.iter().cloned().collect(),
@@ -261,11 +261,11 @@ impl SystemEventRecentWindowCache {
 impl From<SystemEventRecentWindows> for SystemEventRecentWindowCache {
     fn from(value: SystemEventRecentWindows) -> Self {
         Self::from_public_windows(
-            value.recent_events,
-            value.recent_scheduler_events,
-            value.recent_command_events,
-            value.recent_governance_events,
-            value.recent_publication_events,
+            &value.recent_events,
+            &value.recent_scheduler_events,
+            &value.recent_command_events,
+            &value.recent_governance_events,
+            &value.recent_publication_events,
         )
     }
 }

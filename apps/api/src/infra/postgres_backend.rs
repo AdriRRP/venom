@@ -6208,11 +6208,11 @@ impl PostgresStore {
             }
         }
         Ok(SystemEventRecentWindowCache::from_public_windows(
-            recent_events.into(),
-            recent_scheduler_events.into(),
-            recent_command_events.into(),
-            recent_governance_events.into(),
-            recent_publication_events.into(),
+            &recent_events.into(),
+            &recent_scheduler_events.into(),
+            &recent_command_events.into(),
+            &recent_governance_events.into(),
+            &recent_publication_events.into(),
         ))
     }
 
