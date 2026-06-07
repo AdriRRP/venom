@@ -1,6 +1,6 @@
 # W230-durable-snapshot-contract-closure
 
-Status: done
+Status: `done`
 
 ## Goal
 
