@@ -477,6 +477,37 @@ Completed:
 92. `W222-system-event-index-ring-window-shape`
     Switch the system-event recent-window hot path to ring-style storage so
     append, trim, and recent-query work stop paying vector front-rotation cost.
+93. `W223-postgres-runtime-and-system-event-cost-tightening`
+    Drop fixed resident Postgres runtime residency in steady state and remove
+    avoidable snapshot/window churn around operator-facing `system events`.
+94. `W224-local-volatile-lane-ephemeral-residency`
+    Make local runtime and publication lanes ephemeral so local steady state no
+    longer pays full resident volatile-lane cost.
+95. `W225-local-ephemeral-veracity-and-event-cost-tightening`
+    Make local ephemeral lane reopen semantics truthful on failure/epoch
+    convergence and tighten residual `system events` merge/index cost.
+96. `W226-binding-delta-and-system-event-window-tightening`
+    Move component-binding refresh to durable deltas and remove avoidable
+    public-window materialization from local `system events` merge paths.
+97. `W227-local-forked-volatile-lane-parity`
+    Converge local volatile-lane topology onto the same fork-from-state model
+    used by Postgres so both backends share one idiomatic residency contract.
+98. `W228-system-event-cache-shape-closure`
+    Keep hot-path `system events` work on cache-native shapes so local merge and
+    index deltas stop bouncing through public window materialization.
+99. `W229-durable-granularity-closure`
+    Push Postgres findings and collections refresh further toward durable
+    granular identity/entity journals instead of watermark-wide reloads.
+100. `W230-durable-snapshot-contract-closure`
+     Unify detached and live durable snapshot contracts for findings,
+     collections, and `system events` so the residual edge paths stop drifting.
+101. `W231-durable-journal-granularity-closure`
+     Converge cold rebuild and incremental refresh on the same granular durable
+     journal contracts for findings, collections, and `system events`.
+102. `W232-authoritative-snapshot-edge-closure`
+     Introduce authoritative provider-report heads for cold rebuilds, one
+     canonical joined collection snapshot loader, and remove the last avoidable
+     production bounce through public `system events` windows.
 
 ## Exit condition
 
