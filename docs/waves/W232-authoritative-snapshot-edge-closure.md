@@ -1,6 +1,6 @@
 # W232-authoritative-snapshot-edge-closure
 
-Status: `completed`
+Status: `done`
 
 ## Goal
 
