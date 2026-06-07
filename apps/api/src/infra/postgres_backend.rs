@@ -36,7 +36,7 @@ use venom_domain::inventory::{
 };
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::operations::{
-    MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventKind, SystemEventRecentWindows,
+    MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventKind, SystemEventRecentWindowCache,
     SystemEventWindowTotals,
 };
 use venom_domain::scanning::{
@@ -177,6 +177,9 @@ const CHANGE_LANE_INTEGRATION_OUTBOX: i32 = 1 << 11;
 const CHANGE_LANE_INTEGRATION_RUNTIME: i32 = 1 << 12;
 const CHANGE_LANE_COLLECTION_SCHEDULES: i32 = 1 << 13;
 const CHANGE_LANE_PROVIDER_RUNTIME_CONFIGS: i32 = 1 << 14;
+const COLLECTION_CHANGE_SECTION_DEFINITION: &str = "definition";
+const COLLECTION_CHANGE_SECTION_SOURCE: &str = "source";
+const COLLECTION_CHANGE_SECTION_MEMBERSHIP: &str = "membership";
 const CHANGE_LANE_INVENTORY_CORE: i32 =
     CHANGE_LANE_COMPONENTS | CHANGE_LANE_CONTEXT_PROFILES | CHANGE_LANE_COMPONENT_TAGS;
 const CHANGE_LANE_COLLECTIONS: i32 = CHANGE_LANE_COLLECTION_DEFINITIONS
@@ -210,6 +213,27 @@ type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule
 type CommandRecordMap = BTreeMap<Box<str>, ScanCommandRecord>;
 type CommandOrder = Vec<Box<str>>;
 type PendingIntegrationEventList = Vec<PendingIntegrationEvent>;
+type ActiveFindingsByArtifact = BTreeMap<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>;
+type ProviderReportSnapshotRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+);
+type ActiveFindingSnapshotRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 type SystemEventRow = (
     String,
     i64,
@@ -487,7 +511,9 @@ impl PostgresStore {
     async fn reload_governance_mutation_sources_from_remote(&mut self) -> Result<(), String> {
         let mut backend = Self::detached(self.pool.clone(), self.names.clone());
         backend.ingestion = Arc::clone(&self.ingestion);
-        backend.load_provider_reports().await?;
+        backend
+            .load_provider_report_snapshots_from_finding_journal()
+            .await?;
         backend.load_governance_journal_snapshot(true).await?;
         self.governance = backend.governance;
         self.read_model = backend.read_model;
@@ -646,16 +672,32 @@ impl PostgresStore {
         let mut candidate_inventory = self.ingestion_ref().inventory().clone();
         let result = candidate_inventory.register_collection(registration.clone());
         if result.change == RegisterCollectionChange::Created {
+            let mut tx = self.begin_transaction().await?;
             sqlx::query(&format!(
                 "INSERT INTO {} (collection_key, name) VALUES ($1, $2)",
                 self.names.collections
             ))
             .bind(registration.collection_key.as_ref())
             .bind(registration.name.as_ref())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection insert failed: {error}"))?;
+            let definition_cursor = self
+                .append_collection_change_journal_in_transaction(
+                    &mut tx,
+                    registration.collection_key.as_ref(),
+                    COLLECTION_CHANGE_SECTION_DEFINITION,
+                    None,
+                    "created",
+                )
+                .await?;
+            self.commit_transaction(tx).await?;
             *self.ingestion_mut().inventory_mut() = candidate_inventory;
+            self.inventory_definition_source_watermarks
+                .collection_definitions = self
+                .inventory_definition_source_watermarks
+                .collection_definitions
+                .max(definition_cursor);
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -714,10 +756,11 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection membership insert failed: {error}"))?;
             let membership_cursor = self
-                .append_collection_membership_journal_in_transaction(
+                .append_collection_change_journal_in_transaction(
                     &mut tx,
                     collection_key,
-                    component_key,
+                    COLLECTION_CHANGE_SECTION_MEMBERSHIP,
+                    Some(component_key),
                     "added",
                 )
                 .await?;
@@ -786,10 +829,11 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("postgres collection membership delete failed: {error}"))?;
             let membership_cursor = self
-                .append_collection_membership_journal_in_transaction(
+                .append_collection_change_journal_in_transaction(
                     &mut tx,
                     collection_key,
-                    component_key,
+                    COLLECTION_CHANGE_SECTION_MEMBERSHIP,
+                    Some(component_key),
                     "removed",
                 )
                 .await?;
@@ -819,7 +863,8 @@ impl PostgresStore {
         let result =
             candidate_inventory.configure_collection_source(collection_key, source.clone());
         if result.change == ConfigureCollectionSourceChange::Configured {
-            let updated_at_micros = sqlx::query_scalar::<_, i64>(&format!(
+            let mut tx = self.begin_transaction().await?;
+            sqlx::query_scalar::<_, i64>(&format!(
                 concat!(
                     "INSERT INTO {} (collection_key, source_kind, mode, component_keys) VALUES ($1, $2, $3, $4) ",
                     "ON CONFLICT (collection_key) DO UPDATE SET source_kind = EXCLUDED.source_kind, mode = EXCLUDED.mode, component_keys = EXCLUDED.component_keys, updated_at = NOW() ",
@@ -837,17 +882,25 @@ impl PostgresStore {
                     .map(ToString::to_string)
                     .collect::<Vec<_>>(),
             ))
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("postgres collection source upsert failed: {error}"))?;
+            let source_cursor = self
+                .append_collection_change_journal_in_transaction(
+                    &mut tx,
+                    collection_key,
+                    COLLECTION_CHANGE_SECTION_SOURCE,
+                    None,
+                    "upserted",
+                )
+                .await?;
+            self.commit_transaction(tx).await?;
             *self.ingestion_mut().inventory_mut() = candidate_inventory;
             self.inventory_definition_source_watermarks
                 .collection_sources = self
                 .inventory_definition_source_watermarks
                 .collection_sources
-                .max(u64::try_from(updated_at_micros).map_err(|_| {
-                    "postgres collection source updated_at out of range".to_owned()
-                })?);
+                .max(source_cursor);
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -880,10 +933,11 @@ impl PostgresStore {
                     format!("postgres collection source membership delete failed: {error}")
                 })?;
                 membership_cursor = membership_cursor.max(
-                    self.append_collection_membership_journal_in_transaction(
+                    self.append_collection_change_journal_in_transaction(
                         &mut transaction,
                         collection_key,
-                        component_key.as_ref(),
+                        COLLECTION_CHANGE_SECTION_MEMBERSHIP,
+                        Some(component_key.as_ref()),
                         "removed",
                     )
                     .await?,
@@ -902,10 +956,11 @@ impl PostgresStore {
                     format!("postgres collection source membership insert failed: {error}")
                 })?;
                 membership_cursor = membership_cursor.max(
-                    self.append_collection_membership_journal_in_transaction(
+                    self.append_collection_change_journal_in_transaction(
                         &mut transaction,
                         collection_key,
-                        component_key.as_ref(),
+                        COLLECTION_CHANGE_SECTION_MEMBERSHIP,
+                        Some(component_key.as_ref()),
                         "added",
                     )
                     .await?,
@@ -1047,6 +1102,7 @@ impl PostgresStore {
         let result =
             candidate_inventory.assign_context_profile_for_collection(collection_key, profile_key);
         if result.change == AssignCollectionContextProfileChange::Assigned {
+            let mut tx = self.begin_transaction().await?;
             sqlx::query(&format!(
                 concat!(
                     "UPDATE {} SET context_profile_key = $2, updated_at = NOW() ",
@@ -1056,12 +1112,27 @@ impl PostgresStore {
             ))
             .bind(collection_key)
             .bind(profile_key)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| {
                 format!("postgres collection context profile update failed: {error}")
             })?;
+            let definition_cursor = self
+                .append_collection_change_journal_in_transaction(
+                    &mut tx,
+                    collection_key,
+                    COLLECTION_CHANGE_SECTION_DEFINITION,
+                    None,
+                    "updated",
+                )
+                .await?;
+            self.commit_transaction(tx).await?;
             *self.ingestion_mut().inventory_mut() = candidate_inventory;
+            self.inventory_definition_source_watermarks
+                .collection_definitions = self
+                .inventory_definition_source_watermarks
+                .collection_definitions
+                .max(definition_cursor);
             self.refresh_read_snapshot_caches();
         }
         Ok(result)
@@ -2934,15 +3005,6 @@ impl PostgresStore {
         report: &ProviderScanReport,
         provider_report_id: i64,
     ) -> Result<u64, String> {
-        let _ = self
-            .append_provider_report_identity_journal_in_transaction(
-                transaction,
-                &report.component_key,
-                report.artifact.kind,
-                &report.artifact.identity,
-                provider_report_id,
-            )
-            .await?;
         let previous_findings = self
             .load_previous_provider_report_findings_in_transaction(
                 transaction,
@@ -3199,14 +3261,13 @@ impl PostgresStore {
         self.create_provider_runtime_configs_table().await?;
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
-        self.create_provider_report_identity_journal_table().await?;
         self.create_provider_report_finding_journal_table().await?;
         self.create_finding_risk_acceptances_table().await?;
         self.create_finding_suppressions_table().await?;
         self.create_finding_governance_journal_table().await?;
         self.create_finding_governance_identity_journal_table()
             .await?;
-        self.create_collection_membership_journal_table().await?;
+        self.create_collection_change_journal_table().await?;
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
@@ -3688,28 +3749,6 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn create_provider_report_identity_journal_table(&self) -> Result<(), String> {
-        sqlx::query(&format!(
-            concat!(
-                "CREATE TABLE IF NOT EXISTS {} (",
-                "id BIGSERIAL PRIMARY KEY, ",
-                "component_key TEXT NOT NULL, ",
-                "artifact_kind TEXT NOT NULL, ",
-                "artifact_identity TEXT NOT NULL, ",
-                "provider_report_id BIGINT NOT NULL, ",
-                "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-                ")"
-            ),
-            self.names.provider_report_identity_journal
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|error| {
-            format!("postgres provider report identity journal table create failed: {error}")
-        })?;
-        Ok(())
-    }
-
     async fn create_provider_report_finding_journal_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -3843,23 +3882,24 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn create_collection_membership_journal_table(&self) -> Result<(), String> {
+    async fn create_collection_change_journal_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
                 "CREATE TABLE IF NOT EXISTS {} (",
                 "id BIGSERIAL PRIMARY KEY, ",
                 "collection_key TEXT NOT NULL, ",
-                "component_key TEXT NOT NULL, ",
+                "section_kind TEXT NOT NULL, ",
+                "entity_key TEXT NULL, ",
                 "change_kind TEXT NOT NULL, ",
                 "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
                 ")"
             ),
-            self.names.collection_membership_journal
+            self.names.collection_change_journal
         ))
         .execute(&self.pool)
         .await
         .map_err(|error| {
-            format!("postgres collection membership journal table create failed: {error}")
+            format!("postgres collection change journal table create failed: {error}")
         })?;
         Ok(())
     }
@@ -3970,7 +4010,8 @@ impl PostgresStore {
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
         self.load_integration_runtime_config().await?;
-        self.load_provider_reports().await?;
+        self.load_provider_report_snapshots_from_finding_journal()
+            .await?;
         self.load_governance_journal_snapshot(true).await?;
         self.governance_journal_high_watermark = self
             .governance_journal_high_watermark
@@ -4291,7 +4332,7 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collections load failed: {error}"))?;
-        for (collection_key, name, context_profile_key, updated_at_micros) in collections {
+        for (collection_key, name, context_profile_key, _updated_at_micros) in collections {
             let collection_key_boxed = collection_key.clone();
             let result = self
                 .ingestion_mut()
@@ -4311,15 +4352,9 @@ impl PostgresStore {
                     );
                 }
             }
-            self.inventory_definition_source_watermarks
-                .collection_definitions = self
-                .inventory_definition_source_watermarks
-                .collection_definitions
-                .max(
-                    u64::try_from(updated_at_micros)
-                        .map_err(|_| "postgres collection updated_at out of range".to_owned())?,
-                );
         }
+        self.inventory_definition_source_watermarks
+            .collection_definitions = self.load_collection_definition_source_watermark().await?;
         Ok(())
     }
 
@@ -4336,7 +4371,7 @@ impl PostgresStore {
             .fetch_all(&self.pool)
             .await
             .map_err(|error| format!("postgres collection sources load failed: {error}"))?;
-        for (collection_key, source_kind, mode, Json(component_keys), updated_at_micros) in sources
+        for (collection_key, source_kind, mode, Json(component_keys), _updated_at_micros) in sources
         {
             let source = parse_collection_source(
                 &source_kind,
@@ -4353,14 +4388,9 @@ impl PostgresStore {
             if result.change == ConfigureCollectionSourceChange::Rejected {
                 return Err("postgres collection sources contain invalid configuration".to_owned());
             }
-            self.inventory_definition_source_watermarks
-                .collection_sources = self
-                .inventory_definition_source_watermarks
-                .collection_sources
-                .max(u64::try_from(updated_at_micros).map_err(|_| {
-                    "postgres collection source updated_at out of range".to_owned()
-                })?);
         }
+        self.inventory_definition_source_watermarks
+            .collection_sources = self.load_collection_source_watermark().await?;
         Ok(())
     }
 
@@ -4387,7 +4417,7 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collection definition targeted load failed: {error}"))?;
-        for (collection_key, name, context_profile_key, updated_at_micros) in collections {
+        for (collection_key, name, context_profile_key, _updated_at_micros) in collections {
             self.ingestion_mut()
                 .inventory_mut()
                 .upsert_collection_registration_for_rebuild(CollectionRegistration::new(
@@ -4405,15 +4435,9 @@ impl PostgresStore {
                     );
                 }
             }
-            self.inventory_definition_source_watermarks
-                .collection_definitions = self
-                .inventory_definition_source_watermarks
-                .collection_definitions
-                .max(
-                    u64::try_from(updated_at_micros)
-                        .map_err(|_| "postgres collection updated_at out of range".to_owned())?,
-                );
         }
+        self.inventory_definition_source_watermarks
+            .collection_definitions = self.load_collection_definition_source_watermark().await?;
         Ok(())
     }
 
@@ -4441,7 +4465,7 @@ impl PostgresStore {
             .fetch_all(&self.pool)
             .await
             .map_err(|error| format!("postgres collection source targeted load failed: {error}"))?;
-        for (collection_key, source_kind, mode, Json(component_keys), updated_at_micros) in sources
+        for (collection_key, source_kind, mode, Json(component_keys), _updated_at_micros) in sources
         {
             let source = parse_collection_source(
                 &source_kind,
@@ -4458,14 +4482,9 @@ impl PostgresStore {
             if result.change == ConfigureCollectionSourceChange::Rejected {
                 return Err("postgres collection sources contain invalid configuration".to_owned());
             }
-            self.inventory_definition_source_watermarks
-                .collection_sources = self
-                .inventory_definition_source_watermarks
-                .collection_sources
-                .max(u64::try_from(updated_at_micros).map_err(|_| {
-                    "postgres collection source updated_at out of range".to_owned()
-                })?);
         }
+        self.inventory_definition_source_watermarks
+            .collection_sources = self.load_collection_source_watermark().await?;
         Ok(())
     }
 
@@ -4505,102 +4524,14 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_changed_collection_definition_keys_after(
-        &self,
-        after_micros: u64,
-    ) -> Result<Vec<Box<str>>, String> {
-        let keys = sqlx::query_scalar::<_, String>(&format!(
-            concat!(
-                "SELECT DISTINCT collection_key FROM {} ",
-                "WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
-                "ORDER BY collection_key"
-            ),
-            self.names.collections
-        ))
-        .bind(
-            i64::try_from(after_micros)
-                .map_err(|_| "postgres collection source cursor out of range".to_owned())?,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            format!("postgres changed collection definition key load failed: {error}")
-        })?;
-        Ok(keys.into_iter().map(String::into_boxed_str).collect())
-    }
-
-    async fn load_changed_collection_source_keys_after(
-        &self,
-        after_micros: u64,
-    ) -> Result<Vec<Box<str>>, String> {
-        let keys = sqlx::query_scalar::<_, String>(&format!(
-            concat!(
-                "SELECT DISTINCT collection_key FROM {} ",
-                "WHERE (EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint > $1 ",
-                "ORDER BY collection_key"
-            ),
-            self.names.collection_sources
-        ))
-        .bind(
-            i64::try_from(after_micros)
-                .map_err(|_| "postgres collection source cursor out of range".to_owned())?,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres changed collection source key load failed: {error}"))?;
-        Ok(keys.into_iter().map(String::into_boxed_str).collect())
-    }
-
-    async fn load_changed_collection_membership_keys_after(
-        &self,
-        after_id: u64,
-    ) -> Result<Vec<Box<str>>, String> {
-        let keys = sqlx::query_scalar::<_, String>(&format!(
-            concat!(
-                "SELECT DISTINCT collection_key FROM {} ",
-                "WHERE id > $1 ORDER BY collection_key"
-            ),
-            self.names.collection_membership_journal
-        ))
-        .bind(
-            i64::try_from(after_id)
-                .map_err(|_| "postgres collection membership cursor out of range".to_owned())?,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            format!("postgres changed collection membership key load failed: {error}")
-        })?;
-        Ok(keys.into_iter().map(String::into_boxed_str).collect())
-    }
-
     async fn load_collection_subgraph_by_changed_keys(
         &mut self,
         base_watermarks: InventoryDefinitionSourceWatermarks,
         lane_mask: i32,
     ) -> Result<(), String> {
-        let definition_keys = if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
-            self.load_changed_collection_definition_keys_after(
-                base_watermarks.collection_definitions,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
-        let source_keys = if lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0 {
-            self.load_changed_collection_source_keys_after(base_watermarks.collection_sources)
-                .await?
-        } else {
-            Vec::new()
-        };
-        let membership_keys = if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
-            self.load_changed_collection_membership_keys_after(
-                base_watermarks.collection_memberships,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
+        let (definition_keys, source_keys, membership_keys) = self
+            .load_changed_collection_keys_by_section(base_watermarks, lane_mask)
+            .await?;
 
         if !definition_keys.is_empty() {
             self.ingestion_mut()
@@ -4649,6 +4580,67 @@ impl PostgresStore {
                 .collection_memberships = base_watermarks.collection_memberships;
         }
         Ok(())
+    }
+
+    async fn load_changed_collection_keys_by_section(
+        &self,
+        base_watermarks: InventoryDefinitionSourceWatermarks,
+        lane_mask: i32,
+    ) -> Result<(Vec<Box<str>>, Vec<Box<str>>, Vec<Box<str>>), String> {
+        let rows = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT DISTINCT section_kind, collection_key FROM {} WHERE ",
+                "(section_kind = $1 AND $2 AND id > $3) OR ",
+                "(section_kind = $4 AND $5 AND id > $6) OR ",
+                "(section_kind = $7 AND $8 AND id > $9) ",
+                "ORDER BY section_kind, collection_key"
+            ),
+            self.names.collection_change_journal
+        ))
+        .bind(COLLECTION_CHANGE_SECTION_DEFINITION)
+        .bind(lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0)
+        .bind(
+            i64::try_from(base_watermarks.collection_definitions)
+                .map_err(|_| "postgres collection definition cursor out of range".to_owned())?,
+        )
+        .bind(COLLECTION_CHANGE_SECTION_SOURCE)
+        .bind(lane_mask & CHANGE_LANE_COLLECTION_SOURCES != 0)
+        .bind(
+            i64::try_from(base_watermarks.collection_sources)
+                .map_err(|_| "postgres collection source cursor out of range".to_owned())?,
+        )
+        .bind(COLLECTION_CHANGE_SECTION_MEMBERSHIP)
+        .bind(lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0)
+        .bind(
+            i64::try_from(base_watermarks.collection_memberships)
+                .map_err(|_| "postgres collection membership cursor out of range".to_owned())?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres changed collection key load failed: {error}"))?;
+
+        let mut definition_keys = Vec::new();
+        let mut source_keys = Vec::new();
+        let mut membership_keys = Vec::new();
+        for (section_kind, collection_key) in rows {
+            match section_kind.as_str() {
+                COLLECTION_CHANGE_SECTION_DEFINITION => {
+                    definition_keys.push(collection_key.into_boxed_str());
+                }
+                COLLECTION_CHANGE_SECTION_SOURCE => {
+                    source_keys.push(collection_key.into_boxed_str());
+                }
+                COLLECTION_CHANGE_SECTION_MEMBERSHIP => {
+                    membership_keys.push(collection_key.into_boxed_str());
+                }
+                other => {
+                    return Err(format!(
+                        "postgres collection change journal contains unknown section kind: {other}"
+                    ));
+                }
+            }
+        }
+        Ok((definition_keys, source_keys, membership_keys))
     }
 
     async fn load_context_profiles(&mut self) -> Result<(), String> {
@@ -5278,26 +5270,27 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_provider_reports(&mut self) -> Result<(), String> {
-        let reports = sqlx::query_as::<
-            _,
-            (
-                i64,
-                String,
-                String,
-                String,
-                String,
-                i64,
-                String,
-                Option<String>,
-                Json<Vec<ReportedFinding>>,
-            ),
-        >(&format!(
+    async fn load_provider_report_snapshots_from_finding_journal(&mut self) -> Result<(), String> {
+        let report_rows = self.load_latest_provider_report_snapshot_rows().await?;
+        let mut findings_by_artifact = self.load_latest_active_findings_by_artifact().await?;
+
+        for row in report_rows {
+            self.apply_provider_report_snapshot_row(row, &mut findings_by_artifact)?;
+        }
+        self.provider_report_row_high_watermark =
+            self.load_provider_report_source_watermark().await?;
+        Ok(())
+    }
+
+    async fn load_latest_provider_report_snapshot_rows(
+        &self,
+    ) -> Result<Vec<ProviderReportSnapshotRow>, String> {
+        sqlx::query_as::<_, ProviderReportSnapshotRow>(&format!(
             concat!(
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings FROM (",
+                "observed_at_micros, freshness, knowledge_revision FROM (",
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, findings, ",
+                "observed_at_micros, freshness, knowledge_revision, ",
                 "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
                 "FROM {}",
                 ") latest WHERE row_rank = 1 ORDER BY id"
@@ -5306,8 +5299,81 @@ impl PostgresStore {
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres provider reports load failed: {error}"))?;
-        for (
+        .map_err(|error| format!("postgres provider report snapshot load failed: {error}"))
+    }
+
+    async fn load_latest_active_findings_by_artifact(
+        &self,
+    ) -> Result<BTreeMap<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>, String> {
+        let finding_rows = sqlx::query_as::<_, ActiveFindingSnapshotRow>(&format!(
+            concat!(
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, severity ",
+                "FROM (",
+                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
+                "package_name, package_version, package_purl, severity, active, ",
+                "ROW_NUMBER() OVER (",
+                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
+                "ORDER BY id DESC",
+                ") AS row_rank ",
+                "FROM {}",
+                ") latest WHERE row_rank = 1 AND active = TRUE ",
+                "ORDER BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl"
+            ),
+            self.names.provider_report_finding_journal
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report finding snapshot load failed: {error}"))?;
+
+        let mut findings_by_artifact = ActiveFindingsByArtifact::new();
+        for row in finding_rows {
+            Self::append_active_finding_snapshot_row(&mut findings_by_artifact, row)?;
+        }
+        Ok(findings_by_artifact)
+    }
+
+    fn append_active_finding_snapshot_row(
+        findings_by_artifact: &mut ActiveFindingsByArtifact,
+        row: ActiveFindingSnapshotRow,
+    ) -> Result<(), String> {
+        let (
+            component_key,
+            artifact_kind,
+            artifact_identity,
+            vulnerability_id,
+            package_name,
+            package_version,
+            package_purl,
+            severity,
+        ) = row;
+        findings_by_artifact
+            .entry((
+                component_key.into_boxed_str(),
+                parse_artifact_kind(&artifact_kind)?,
+                artifact_identity.into_boxed_str(),
+            ))
+            .or_default()
+            .push(
+                ReportedFinding::new(
+                    vulnerability_id,
+                    venom_domain::PackageCoordinate {
+                        name: package_name.into_boxed_str(),
+                        version: package_version.into_boxed_str(),
+                        purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+                    },
+                )
+                .with_severity(parse_severity(&severity)?),
+            );
+        Ok(())
+    }
+
+    fn apply_provider_report_snapshot_row(
+        &mut self,
+        row: ProviderReportSnapshotRow,
+        findings_by_artifact: &mut ActiveFindingsByArtifact,
+    ) -> Result<(), String> {
+        let (
             id,
             provider_key,
             component_key,
@@ -5316,23 +5382,28 @@ impl PostgresStore {
             observed_at_micros,
             freshness,
             knowledge_revision,
+        ) = row;
+        let artifact_kind = parse_artifact_kind(&artifact_kind)?;
+        let artifact_identity = artifact_identity.into_boxed_str();
+        let component_key = component_key.into_boxed_str();
+        let artifact_key = (
+            component_key.clone(),
+            artifact_kind,
+            artifact_identity.clone(),
+        );
+        let findings = findings_by_artifact
+            .remove(&artifact_key)
+            .unwrap_or_default();
+        let report = ProviderScanReport {
+            provider_key: provider_key.into_boxed_str(),
+            component_key,
+            artifact: ArtifactRef::new(artifact_kind, artifact_identity),
+            observed_at: micros_to_system_time(observed_at_micros)?,
+            freshness: parse_freshness(&freshness)?,
+            knowledge_revision: knowledge_revision.map(String::into_boxed_str),
             findings,
-        ) in reports
-        {
-            let report = ProviderScanReport {
-                provider_key: provider_key.into_boxed_str(),
-                component_key: component_key.into_boxed_str(),
-                artifact: ArtifactRef::new(parse_artifact_kind(&artifact_kind)?, artifact_identity),
-                observed_at: micros_to_system_time(observed_at_micros)?,
-                freshness: parse_freshness(&freshness)?,
-                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
-                findings: findings.0,
-            };
-            self.apply_provider_report_row(id, &report)?;
-        }
-        self.provider_report_row_high_watermark =
-            self.load_provider_report_source_watermark().await?;
-        Ok(())
+        };
+        self.apply_provider_report_row(id, &report)
     }
 
     async fn load_provider_reports_after(&mut self, after_id: u64) -> Result<(), String> {
@@ -5570,44 +5641,37 @@ impl PostgresStore {
     }
 
     async fn load_collection_definition_source_watermark(&self) -> Result<u64, String> {
-        let max_updated_at = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            concat!("SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"),
-            self.names.collections
-        ))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection watermark read failed: {error}"))?
-        .unwrap_or_default();
-        u64::try_from(max_updated_at)
-            .map_err(|_| "postgres collection watermark out of range".to_owned())
+        self.load_collection_change_source_watermark(COLLECTION_CHANGE_SECTION_DEFINITION)
+            .await
     }
 
     async fn load_collection_source_watermark(&self) -> Result<u64, String> {
-        let max_updated_at = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            concat!("SELECT MAX((EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint) FROM {}"),
-            self.names.collection_sources
-        ))
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection source watermark read failed: {error}"))?
-        .unwrap_or_default();
-        u64::try_from(max_updated_at)
-            .map_err(|_| "postgres collection source watermark out of range".to_owned())
+        self.load_collection_change_source_watermark(COLLECTION_CHANGE_SECTION_SOURCE)
+            .await
     }
 
     async fn load_collection_membership_source_watermark(&self) -> Result<u64, String> {
+        self.load_collection_change_source_watermark(COLLECTION_CHANGE_SECTION_MEMBERSHIP)
+            .await
+    }
+
+    async fn load_collection_change_source_watermark(
+        &self,
+        section_kind: &str,
+    ) -> Result<u64, String> {
         let max_id = sqlx::query_scalar::<_, Option<i64>>(&format!(
-            "SELECT MAX(id) FROM {}",
-            self.names.collection_membership_journal
+            "SELECT MAX(id) FROM {} WHERE section_kind = $1",
+            self.names.collection_change_journal
         ))
+        .bind(section_kind)
         .fetch_one(&self.pool)
         .await
         .map_err(|error| {
-            format!("postgres collection membership journal watermark read failed: {error}")
+            format!("postgres collection change journal watermark read failed: {error}")
         })?
         .unwrap_or_default();
         u64::try_from(max_id)
-            .map_err(|_| "postgres collection membership journal watermark out of range".to_owned())
+            .map_err(|_| "postgres collection change journal watermark out of range".to_owned())
     }
 
     async fn load_system_event_index_snapshot(
@@ -6034,11 +6098,11 @@ impl PostgresStore {
 
     async fn load_system_events(&mut self) -> Result<(), String> {
         let totals = self.load_system_event_totals().await?;
-        let windows = self.load_recent_system_event_windows().await?;
+        let windows = self.load_recent_system_event_window_cache().await?;
         let cursor = self.load_latest_system_event_cursor().await?;
 
         self.system_event_index_snapshot_cache =
-            Arc::new(SystemEventQueryIndex::from_recent_windows(
+            Arc::new(SystemEventQueryIndex::from_recent_window_cache(
                 SystemEventWindowTotals {
                     total: totals.total,
                     scheduler_total: totals.scheduler_total,
@@ -6081,7 +6145,9 @@ impl PostgresStore {
         Ok(totals)
     }
 
-    async fn load_recent_system_event_windows(&self) -> Result<SystemEventRecentWindows, String> {
+    async fn load_recent_system_event_window_cache(
+        &self,
+    ) -> Result<SystemEventRecentWindowCache, String> {
         let limit = i64::try_from(MAX_SYSTEM_EVENTS_LIMIT).expect("system event limit fits in i64");
         let rows = sqlx::query_as::<_, SystemEventWindowRow>(&format!(
             concat!(
@@ -6169,13 +6235,13 @@ impl PostgresStore {
                 }
             }
         }
-        Ok(SystemEventRecentWindows {
-            recent_events: recent_events.into(),
-            recent_scheduler_events: recent_scheduler_events.into(),
-            recent_command_events: recent_command_events.into(),
-            recent_governance_events: recent_governance_events.into(),
-            recent_publication_events: recent_publication_events.into(),
-        })
+        Ok(SystemEventRecentWindowCache::from_public_windows(
+            &recent_events.into(),
+            &recent_scheduler_events.into(),
+            &recent_command_events.into(),
+            &recent_governance_events.into(),
+            &recent_publication_events.into(),
+        ))
     }
 
     async fn load_latest_system_event_cursor(&self) -> Result<EventSourceCursor, String> {
@@ -6526,37 +6592,6 @@ impl PostgresStore {
         Ok(cursor)
     }
 
-    async fn append_provider_report_identity_journal_in_transaction(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        component_key: &str,
-        artifact_kind: ArtifactKind,
-        artifact_identity: &str,
-        provider_report_id: i64,
-    ) -> Result<u64, String> {
-        sqlx::query_scalar::<_, i64>(&format!(
-            concat!(
-                "INSERT INTO {} ",
-                "(component_key, artifact_kind, artifact_identity, provider_report_id) ",
-                "VALUES ($1, $2, $3, $4) RETURNING id"
-            ),
-            self.names.provider_report_identity_journal
-        ))
-        .bind(component_key)
-        .bind(artifact_kind_name(artifact_kind))
-        .bind(artifact_identity)
-        .bind(provider_report_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| {
-            format!("postgres provider report identity journal insert failed: {error}")
-        })
-        .and_then(|id| {
-            u64::try_from(id)
-                .map_err(|_| "postgres provider report identity journal id out of range".to_owned())
-        })
-    }
-
     async fn append_provider_report_finding_journal_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -6639,29 +6674,32 @@ impl PostgresStore {
         })
     }
 
-    async fn append_collection_membership_journal_in_transaction(
+    async fn append_collection_change_journal_in_transaction(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         collection_key: &str,
-        component_key: &str,
+        section_kind: &str,
+        entity_key: Option<&str>,
         change_kind: &str,
     ) -> Result<u64, String> {
         sqlx::query_scalar::<_, i64>(&format!(
             concat!(
                 "INSERT INTO {} ",
-                "(collection_key, component_key, change_kind) VALUES ($1, $2, $3) RETURNING id"
+                "(collection_key, section_kind, entity_key, change_kind) ",
+                "VALUES ($1, $2, $3, $4) RETURNING id"
             ),
-            self.names.collection_membership_journal
+            self.names.collection_change_journal
         ))
         .bind(collection_key)
-        .bind(component_key)
+        .bind(section_kind)
+        .bind(entity_key)
         .bind(change_kind)
         .fetch_one(&mut **tx)
         .await
-        .map_err(|error| format!("postgres collection membership journal insert failed: {error}"))
+        .map_err(|error| format!("postgres collection change journal insert failed: {error}"))
         .and_then(|id| {
             u64::try_from(id)
-                .map_err(|_| "postgres collection membership journal id out of range".to_owned())
+                .map_err(|_| "postgres collection change journal id out of range".to_owned())
         })
     }
 }
@@ -7295,13 +7333,12 @@ struct TableNames {
     provider_runtime_configs: Box<str>,
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
-    provider_report_identity_journal: Box<str>,
     provider_report_finding_journal: Box<str>,
     finding_risk_acceptances: Box<str>,
     finding_suppressions: Box<str>,
     finding_governance_journal: Box<str>,
     finding_governance_identity_journal: Box<str>,
-    collection_membership_journal: Box<str>,
+    collection_change_journal: Box<str>,
     scan_commands: Box<str>,
     integration_outbox: Box<str>,
     system_events: Box<str>,
@@ -7330,8 +7367,6 @@ impl TableNames {
             integration_runtime_config: format!("{schema}.integration_runtime_config")
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
-            provider_report_identity_journal: format!("{schema}.provider_report_identity_journal")
-                .into_boxed_str(),
             provider_report_finding_journal: format!("{schema}.provider_report_finding_journal")
                 .into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
@@ -7342,7 +7377,7 @@ impl TableNames {
                 "{schema}.finding_governance_identity_journal"
             )
             .into_boxed_str(),
-            collection_membership_journal: format!("{schema}.collection_membership_journal")
+            collection_change_journal: format!("{schema}.collection_change_journal")
                 .into_boxed_str(),
             scan_commands: format!("{schema}.scan_commands").into_boxed_str(),
             integration_outbox: format!("{schema}.integration_outbox").into_boxed_str(),
@@ -8209,6 +8244,75 @@ mod tests {
                 .read_model
                 .active_finding_count("component:payments-api", &artifact()),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_cold_rebuild_restores_empty_latest_provider_snapshot() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("cold_rebuild_empty_report_snapshot");
+        let mut writer = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("writer backend should open");
+        let _ = writer
+            .register_component(ComponentRegistration::new(
+                "component:payments-api",
+                "Payments API",
+            ))
+            .await
+            .expect("registration should persist");
+        let _ = writer
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let first_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-18");
+        let _ = writer
+            .record_scan_report(&first_report)
+            .await
+            .expect("first provider report should persist");
+        let withdrawn_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            Vec::new(),
+        )
+        .with_knowledge_revision("fixture-db:2026-05-19");
+        let _ = writer
+            .record_scan_report(&withdrawn_report)
+            .await
+            .expect("withdrawn provider report should persist");
+
+        let reloaded = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("reloaded backend should open");
+
+        assert_eq!(
+            reloaded
+                .read_model_snapshot_arc()
+                .active_finding_count("component:payments-api", &artifact()),
+            0
+        );
+        assert_eq!(
+            reloaded.read_model_source_watermark(),
+            reloaded
+                .load_provider_report_source_watermark()
+                .await
+                .expect("finding journal watermark should load")
         );
     }
 
