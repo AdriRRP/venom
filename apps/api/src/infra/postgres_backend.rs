@@ -213,6 +213,26 @@ type DueCollectionScanRows = Vec<(Box<str>, venom_domain::CollectionScanSchedule
 type CommandRecordMap = BTreeMap<Box<str>, ScanCommandRecord>;
 type CommandOrder = Vec<Box<str>>;
 type PendingIntegrationEventList = Vec<PendingIntegrationEvent>;
+type ProviderReportSnapshotRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    Option<String>,
+);
+type ActiveFindingSnapshotRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 type SystemEventRow = (
     String,
     i64,
@@ -5250,28 +5270,21 @@ impl PostgresStore {
     }
 
     async fn load_provider_report_snapshots_from_finding_journal(&mut self) -> Result<(), String> {
-        type ProviderReportSnapshotRow = (
-            i64,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            String,
-            Option<String>,
-        );
-        type ActiveFindingSnapshotRow = (
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        );
+        let report_rows = self.load_latest_provider_report_snapshot_rows().await?;
+        let mut findings_by_artifact = self.load_latest_active_findings_by_artifact().await?;
 
-        let report_rows = sqlx::query_as::<_, ProviderReportSnapshotRow>(&format!(
+        for row in report_rows {
+            self.apply_provider_report_snapshot_row(row, &mut findings_by_artifact)?;
+        }
+        self.provider_report_row_high_watermark =
+            self.load_provider_report_source_watermark().await?;
+        Ok(())
+    }
+
+    async fn load_latest_provider_report_snapshot_rows(
+        &self,
+    ) -> Result<Vec<ProviderReportSnapshotRow>, String> {
+        sqlx::query_as::<_, ProviderReportSnapshotRow>(&format!(
             concat!(
                 "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
                 "observed_at_micros, freshness, knowledge_revision FROM (",
@@ -5285,8 +5298,12 @@ impl PostgresStore {
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres provider report snapshot load failed: {error}"))?;
+        .map_err(|error| format!("postgres provider report snapshot load failed: {error}"))
+    }
 
+    async fn load_latest_active_findings_by_artifact(
+        &self,
+    ) -> Result<BTreeMap<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>, String> {
         let finding_rows = sqlx::query_as::<_, ActiveFindingSnapshotRow>(&format!(
             concat!(
                 "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, ",
@@ -5310,7 +5327,21 @@ impl PostgresStore {
 
         let mut findings_by_artifact =
             BTreeMap::<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>::new();
-        for (
+        for row in finding_rows {
+            self.append_active_finding_snapshot_row(&mut findings_by_artifact, row)?;
+        }
+        Ok(findings_by_artifact)
+    }
+
+    fn append_active_finding_snapshot_row(
+        &self,
+        findings_by_artifact: &mut BTreeMap<
+            (Box<str>, ArtifactKind, Box<str>),
+            Vec<ReportedFinding>,
+        >,
+        row: ActiveFindingSnapshotRow,
+    ) -> Result<(), String> {
+        let (
             component_key,
             artifact_kind,
             artifact_identity,
@@ -5319,29 +5350,37 @@ impl PostgresStore {
             package_version,
             package_purl,
             severity,
-        ) in finding_rows
-        {
-            findings_by_artifact
-                .entry((
-                    component_key.clone().into_boxed_str(),
-                    parse_artifact_kind(&artifact_kind)?,
-                    artifact_identity.clone().into_boxed_str(),
-                ))
-                .or_default()
-                .push(
-                    ReportedFinding::new(
-                        vulnerability_id,
-                        venom_domain::PackageCoordinate {
-                            name: package_name.into_boxed_str(),
-                            version: package_version.into_boxed_str(),
-                            purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
-                        },
-                    )
-                    .with_severity(parse_severity(&severity)?),
-                );
-        }
+        ) = row;
+        findings_by_artifact
+            .entry((
+                component_key.clone().into_boxed_str(),
+                parse_artifact_kind(&artifact_kind)?,
+                artifact_identity.clone().into_boxed_str(),
+            ))
+            .or_default()
+            .push(
+                ReportedFinding::new(
+                    vulnerability_id,
+                    venom_domain::PackageCoordinate {
+                        name: package_name.into_boxed_str(),
+                        version: package_version.into_boxed_str(),
+                        purl: (!package_purl.is_empty()).then(|| package_purl.into_boxed_str()),
+                    },
+                )
+                .with_severity(parse_severity(&severity)?),
+            );
+        Ok(())
+    }
 
-        for (
+    fn apply_provider_report_snapshot_row(
+        &mut self,
+        row: ProviderReportSnapshotRow,
+        findings_by_artifact: &mut BTreeMap<
+            (Box<str>, ArtifactKind, Box<str>),
+            Vec<ReportedFinding>,
+        >,
+    ) -> Result<(), String> {
+        let (
             id,
             provider_key,
             component_key,
@@ -5350,32 +5389,27 @@ impl PostgresStore {
             observed_at_micros,
             freshness,
             knowledge_revision,
-        ) in report_rows
-        {
-            let artifact_kind = parse_artifact_kind(&artifact_kind)?;
-            let artifact_identity = artifact_identity.into_boxed_str();
-            let component_key = component_key.into_boxed_str();
-            let findings = findings_by_artifact
-                .remove(&(
-                    component_key.clone(),
-                    artifact_kind,
-                    artifact_identity.clone(),
-                ))
-                .unwrap_or_default();
-            let report = ProviderScanReport {
-                provider_key: provider_key.into_boxed_str(),
-                component_key: component_key.clone(),
-                artifact: ArtifactRef::new(artifact_kind, artifact_identity),
-                observed_at: micros_to_system_time(observed_at_micros)?,
-                freshness: parse_freshness(&freshness)?,
-                knowledge_revision: knowledge_revision.map(String::into_boxed_str),
-                findings,
-            };
-            self.apply_provider_report_row(id, &report)?;
-        }
-        self.provider_report_row_high_watermark =
-            self.load_provider_report_source_watermark().await?;
-        Ok(())
+        ) = row;
+        let artifact_kind = parse_artifact_kind(&artifact_kind)?;
+        let artifact_identity = artifact_identity.into_boxed_str();
+        let component_key = component_key.into_boxed_str();
+        let findings = findings_by_artifact
+            .remove(&(
+                component_key.clone(),
+                artifact_kind,
+                artifact_identity.clone(),
+            ))
+            .unwrap_or_default();
+        let report = ProviderScanReport {
+            provider_key: provider_key.into_boxed_str(),
+            component_key: component_key.clone(),
+            artifact: ArtifactRef::new(artifact_kind, artifact_identity),
+            observed_at: micros_to_system_time(observed_at_micros)?,
+            freshness: parse_freshness(&freshness)?,
+            knowledge_revision: knowledge_revision.map(String::into_boxed_str),
+            findings,
+        };
+        self.apply_provider_report_row(id, &report)
     }
 
     async fn load_provider_reports_after(&mut self, after_id: u64) -> Result<(), String> {
