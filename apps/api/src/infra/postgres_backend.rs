@@ -224,6 +224,15 @@ type ProviderReportSnapshotRow = (
     String,
     Option<String>,
 );
+type CollectionSnapshotRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Json<Vec<String>>>,
+    Json<Vec<String>>,
+);
 type ActiveFindingSnapshotRow = (
     String,
     String,
@@ -3011,8 +3020,9 @@ impl PostgresStore {
                 &report.component_key,
                 report.artifact.kind,
                 &report.artifact.identity,
-                provider_report_id,
             )
+            .await?;
+        self.upsert_provider_report_head_in_transaction(transaction, report, provider_report_id)
             .await?;
         self.append_provider_report_finding_journal_in_transaction(
             transaction,
@@ -3029,24 +3039,57 @@ impl PostgresStore {
         component_key: &str,
         artifact_kind: ArtifactKind,
         artifact_identity: &str,
-        exclude_provider_report_id: i64,
     ) -> Result<Vec<ReportedFinding>, String> {
         sqlx::query_scalar::<_, Json<Vec<ReportedFinding>>>(&format!(
             concat!(
                 "SELECT findings FROM {} ",
-                "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3 AND id <> $4 ",
-                "ORDER BY id DESC LIMIT 1"
+                "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3"
             ),
-            self.names.provider_reports
+            self.names.provider_report_heads
         ))
         .bind(component_key)
         .bind(artifact_kind_name(artifact_kind))
         .bind(artifact_identity)
-        .bind(exclude_provider_report_id)
         .fetch_optional(&mut **transaction)
         .await
-        .map_err(|error| format!("postgres previous provider report load failed: {error}"))
+        .map_err(|error| format!("postgres previous provider report head load failed: {error}"))
         .map(|row| row.map(|Json(findings)| findings).unwrap_or_default())
+    }
+
+    async fn upsert_provider_report_head_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        report: &ProviderScanReport,
+        provider_report_id: i64,
+    ) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} ",
+                "(component_key, artifact_kind, artifact_identity, provider_key, observed_at_micros, freshness, knowledge_revision, findings, provider_report_id) ",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ",
+                "ON CONFLICT (component_key, artifact_kind, artifact_identity) DO UPDATE SET ",
+                "provider_key = EXCLUDED.provider_key, ",
+                "observed_at_micros = EXCLUDED.observed_at_micros, ",
+                "freshness = EXCLUDED.freshness, ",
+                "knowledge_revision = EXCLUDED.knowledge_revision, ",
+                "findings = EXCLUDED.findings, ",
+                "provider_report_id = EXCLUDED.provider_report_id"
+            ),
+            self.names.provider_report_heads
+        ))
+        .bind(report.component_key.as_ref())
+        .bind(artifact_kind_name(report.artifact.kind))
+        .bind(report.artifact.identity.as_ref())
+        .bind(report.provider_key.as_ref())
+        .bind(system_time_to_micros(report.observed_at)?)
+        .bind(freshness_name(report.freshness))
+        .bind(report.knowledge_revision.as_deref())
+        .bind(Json(report.findings.clone()))
+        .bind(provider_report_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| format!("postgres provider report head upsert failed: {error}"))?;
+        Ok(())
     }
 
     async fn insert_pending_integration_events(
@@ -3261,6 +3304,7 @@ impl PostgresStore {
         self.create_provider_runtime_configs_table().await?;
         self.create_integration_runtime_config_table().await?;
         self.create_provider_reports_table().await?;
+        self.create_provider_report_heads_table().await?;
         self.create_provider_report_finding_journal_table().await?;
         self.create_finding_risk_acceptances_table().await?;
         self.create_finding_suppressions_table().await?;
@@ -3749,6 +3793,30 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn create_provider_report_heads_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "component_key TEXT NOT NULL REFERENCES {}(component_key) ON DELETE CASCADE, ",
+                "artifact_kind TEXT NOT NULL, ",
+                "artifact_identity TEXT NOT NULL, ",
+                "provider_key TEXT NOT NULL, ",
+                "observed_at_micros BIGINT NOT NULL, ",
+                "freshness TEXT NOT NULL, ",
+                "knowledge_revision TEXT NULL, ",
+                "findings JSONB NOT NULL, ",
+                "provider_report_id BIGINT NOT NULL REFERENCES {}(id) ON DELETE CASCADE, ",
+                "PRIMARY KEY (component_key, artifact_kind, artifact_identity)",
+                ")"
+            ),
+            self.names.provider_report_heads, self.names.components, self.names.provider_reports
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report heads table create failed: {error}"))?;
+        Ok(())
+    }
+
     async fn create_provider_report_finding_journal_table(&self) -> Result<(), String> {
         sqlx::query(&format!(
             concat!(
@@ -4003,9 +4071,7 @@ impl PostgresStore {
         self.load_component_context_profiles().await?;
         self.load_component_tags().await?;
         self.load_component_tag_memberships().await?;
-        self.load_collections().await?;
-        self.load_collection_sources().await?;
-        self.load_collection_memberships().await?;
+        self.load_collection_snapshots().await?;
         self.load_collection_scan_schedules().await?;
         self.load_artifact_bindings().await?;
         self.load_provider_runtime_configs().await?;
@@ -4320,104 +4386,84 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_collections(&mut self) -> Result<(), String> {
-        let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
-            concat!(
-                "SELECT collection_key, name, context_profile_key, ",
-                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                "FROM {} ORDER BY created_at, collection_key"
-            ),
-            self.names.collections
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collections load failed: {error}"))?;
-        for (collection_key, name, context_profile_key, _updated_at_micros) in collections {
-            let collection_key_boxed = collection_key.clone();
-            let result = self
-                .ingestion_mut()
-                .inventory_mut()
-                .register_collection(CollectionRegistration::new(collection_key, name));
-            if result.change == RegisterCollectionChange::Rejected {
-                return Err("postgres collections contain conflicting registration".to_owned());
-            }
-            if let Some(profile_key) = context_profile_key {
-                let result = self
-                    .ingestion_mut()
-                    .inventory_mut()
-                    .assign_context_profile_for_collection(&collection_key_boxed, &profile_key);
-                if result.change == AssignCollectionContextProfileChange::Rejected {
-                    return Err(
-                        "postgres collections contain invalid context assignment".to_owned()
-                    );
-                }
-            }
-        }
+    async fn load_collection_snapshots(&mut self) -> Result<(), String> {
+        let snapshots = self.load_collection_snapshot_rows(None).await?;
+        self.apply_collection_snapshot_rows(snapshots)?;
         self.inventory_definition_source_watermarks
             .collection_definitions = self.load_collection_definition_source_watermark().await?;
-        Ok(())
-    }
-
-    async fn load_collection_sources(&mut self) -> Result<(), String> {
-        let sources =
-            sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(&format!(
-                concat!(
-                    "SELECT collection_key, source_kind, mode, component_keys, ",
-                    "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                    "FROM {} ORDER BY updated_at, collection_key"
-                ),
-                self.names.collection_sources
-            ))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| format!("postgres collection sources load failed: {error}"))?;
-        for (collection_key, source_kind, mode, Json(component_keys), _updated_at_micros) in sources
-        {
-            let source = parse_collection_source(
-                &source_kind,
-                &mode,
-                component_keys
-                    .into_iter()
-                    .map(String::into_boxed_str)
-                    .collect::<Vec<_>>(),
-            )?;
-            let result = self
-                .ingestion_mut()
-                .inventory_mut()
-                .configure_collection_source(&collection_key, source);
-            if result.change == ConfigureCollectionSourceChange::Rejected {
-                return Err("postgres collection sources contain invalid configuration".to_owned());
-            }
-        }
         self.inventory_definition_source_watermarks
             .collection_sources = self.load_collection_source_watermark().await?;
+        self.inventory_definition_source_watermarks
+            .collection_memberships = self.load_collection_membership_source_watermark().await?;
         Ok(())
     }
 
-    async fn load_collection_definitions_for_keys(
+    async fn load_collection_snapshots_for_keys(
         &mut self,
         collection_keys: &[Box<str>],
     ) -> Result<(), String> {
         if collection_keys.is_empty() {
             return Ok(());
         }
+        let snapshots = self
+            .load_collection_snapshot_rows(Some(collection_keys))
+            .await?;
+        self.apply_collection_snapshot_rows(snapshots)
+    }
+
+    async fn load_collection_snapshot_rows(
+        &self,
+        collection_keys: Option<&[Box<str>]>,
+    ) -> Result<Vec<CollectionSnapshotRow>, String> {
+        let filtered = collection_keys.is_some();
         let collection_keys = collection_keys
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
-        let collections = sqlx::query_as::<_, (String, String, Option<String>, i64)>(&format!(
+            .map(|keys| {
+                keys.iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        sqlx::query_as::<_, CollectionSnapshotRow>(&format!(
             concat!(
-                "SELECT collection_key, name, context_profile_key, ",
-                "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                "FROM {} WHERE collection_key = ANY($1) ORDER BY updated_at, collection_key"
+                "WITH membership_lists AS (",
+                "SELECT collection_key, ",
+                "COALESCE(jsonb_agg(component_key ORDER BY component_key), '[]'::jsonb) AS membership_component_keys ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) GROUP BY collection_key",
+                ") ",
+                "SELECT c.collection_key, c.name, c.context_profile_key, ",
+                "s.source_kind, s.mode, s.component_keys, ",
+                "COALESCE(m.membership_component_keys, '[]'::jsonb) AS membership_component_keys ",
+                "FROM {} c ",
+                "LEFT JOIN {} s ON s.collection_key = c.collection_key ",
+                "LEFT JOIN membership_lists m ON m.collection_key = c.collection_key ",
+                "WHERE NOT $1 OR c.collection_key = ANY($2) ",
+                "ORDER BY c.collection_key"
             ),
-            self.names.collections
+            self.names.collection_memberships,
+            self.names.collections,
+            self.names.collection_sources
         ))
+        .bind(filtered)
         .bind(&collection_keys)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres collection definition targeted load failed: {error}"))?;
-        for (collection_key, name, context_profile_key, _updated_at_micros) in collections {
+        .map_err(|error| format!("postgres collection snapshot load failed: {error}"))
+    }
+
+    fn apply_collection_snapshot_rows(
+        &mut self,
+        snapshots: Vec<CollectionSnapshotRow>,
+    ) -> Result<(), String> {
+        for (
+            collection_key,
+            name,
+            context_profile_key,
+            source_kind,
+            mode,
+            source_component_keys,
+            Json(member_component_keys),
+        ) in snapshots
+        {
             self.ingestion_mut()
                 .inventory_mut()
                 .upsert_collection_registration_for_rebuild(CollectionRegistration::new(
@@ -4435,92 +4481,39 @@ impl PostgresStore {
                     );
                 }
             }
-        }
-        self.inventory_definition_source_watermarks
-            .collection_definitions = self.load_collection_definition_source_watermark().await?;
-        Ok(())
-    }
-
-    async fn load_collection_sources_for_keys(
-        &mut self,
-        collection_keys: &[Box<str>],
-    ) -> Result<(), String> {
-        if collection_keys.is_empty() {
-            return Ok(());
-        }
-        let collection_keys = collection_keys
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
-        let sources =
-            sqlx::query_as::<_, (String, String, String, Json<Vec<String>>, i64)>(&format!(
-                concat!(
-                    "SELECT collection_key, source_kind, mode, component_keys, ",
-                    "(EXTRACT(EPOCH FROM updated_at) * 1000000)::bigint AS updated_at_micros ",
-                    "FROM {} WHERE collection_key = ANY($1) ORDER BY updated_at, collection_key"
-                ),
-                self.names.collection_sources
-            ))
-            .bind(&collection_keys)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| format!("postgres collection source targeted load failed: {error}"))?;
-        for (collection_key, source_kind, mode, Json(component_keys), _updated_at_micros) in sources
-        {
-            let source = parse_collection_source(
-                &source_kind,
-                &mode,
-                component_keys
-                    .into_iter()
-                    .map(String::into_boxed_str)
-                    .collect::<Vec<_>>(),
-            )?;
-            let result = self
-                .ingestion_mut()
-                .inventory_mut()
-                .configure_collection_source(&collection_key, source);
-            if result.change == ConfigureCollectionSourceChange::Rejected {
-                return Err("postgres collection sources contain invalid configuration".to_owned());
+            if let (Some(source_kind), Some(mode), Some(Json(component_keys))) =
+                (source_kind, mode, source_component_keys)
+            {
+                let source = parse_collection_source(
+                    &source_kind,
+                    &mode,
+                    component_keys
+                        .into_iter()
+                        .map(String::into_boxed_str)
+                        .collect::<Vec<_>>(),
+                )?;
+                let result = self
+                    .ingestion_mut()
+                    .inventory_mut()
+                    .configure_collection_source(&collection_key, source);
+                if result.change == ConfigureCollectionSourceChange::Rejected {
+                    return Err(
+                        "postgres collection sources contain invalid configuration".to_owned()
+                    );
+                }
+            }
+            for component_key in member_component_keys {
+                let result = self
+                    .ingestion_mut()
+                    .inventory_mut()
+                    .add_component_to_collection(&collection_key, &component_key);
+                if result.change == venom_domain::AddCollectionComponentChange::Rejected {
+                    return Err(
+                        "postgres collection memberships contain invalid ownership".to_owned()
+                    );
+                }
             }
         }
-        self.inventory_definition_source_watermarks
-            .collection_sources = self.load_collection_source_watermark().await?;
-        Ok(())
-    }
-
-    async fn load_collection_memberships_for_keys(
-        &mut self,
-        collection_keys: &[Box<str>],
-    ) -> Result<(), String> {
-        if collection_keys.is_empty() {
-            return Ok(());
-        }
-        let collection_keys = collection_keys
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
-        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
-            concat!(
-                "SELECT collection_key, component_key FROM {} ",
-                "WHERE collection_key = ANY($1) ORDER BY collection_key, component_key"
-            ),
-            self.names.collection_memberships
-        ))
-        .bind(&collection_keys)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection membership targeted load failed: {error}"))?;
-        for (collection_key, component_key) in memberships {
-            let result = self
-                .ingestion_mut()
-                .inventory_mut()
-                .add_component_to_collection(&collection_key, &component_key);
-            if result.change == venom_domain::AddCollectionComponentChange::Rejected {
-                return Err("postgres collection memberships contain invalid ownership".to_owned());
-            }
-        }
-        self.inventory_definition_source_watermarks
-            .collection_memberships = self.load_collection_membership_source_watermark().await?;
         Ok(())
     }
 
@@ -4529,34 +4522,27 @@ impl PostgresStore {
         base_watermarks: InventoryDefinitionSourceWatermarks,
         lane_mask: i32,
     ) -> Result<(), String> {
-        let (definition_keys, source_keys, membership_keys) = self
-            .load_changed_collection_keys_by_section(base_watermarks, lane_mask)
+        let changed_keys = self
+            .load_changed_collection_keys(base_watermarks, lane_mask)
             .await?;
 
-        if !definition_keys.is_empty() {
+        if !changed_keys.is_empty() {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_context_profiles_for_rebuild_keys(
-                    definition_keys.iter().map(std::convert::AsRef::as_ref),
+                    changed_keys.iter().map(std::convert::AsRef::as_ref),
                 );
-            self.load_collection_definitions_for_keys(&definition_keys)
-                .await?;
-        }
-        if !source_keys.is_empty() {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_sources_for_rebuild_keys(
-                    source_keys.iter().map(std::convert::AsRef::as_ref),
+                    changed_keys.iter().map(std::convert::AsRef::as_ref),
                 );
-            self.load_collection_sources_for_keys(&source_keys).await?;
-        }
-        if !membership_keys.is_empty() {
             self.ingestion_mut()
                 .inventory_mut()
                 .reset_collection_memberships_for_rebuild_keys(
-                    membership_keys.iter().map(std::convert::AsRef::as_ref),
+                    changed_keys.iter().map(std::convert::AsRef::as_ref),
                 );
-            self.load_collection_memberships_for_keys(&membership_keys)
+            self.load_collection_snapshots_for_keys(&changed_keys)
                 .await?;
         }
 
@@ -4575,25 +4561,29 @@ impl PostgresStore {
             self.inventory_definition_source_watermarks
                 .collection_sources = base_watermarks.collection_sources;
         }
-        if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS == 0 {
+        if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
+            self.inventory_definition_source_watermarks
+                .collection_memberships =
+                self.load_collection_membership_source_watermark().await?;
+        } else {
             self.inventory_definition_source_watermarks
                 .collection_memberships = base_watermarks.collection_memberships;
         }
         Ok(())
     }
 
-    async fn load_changed_collection_keys_by_section(
+    async fn load_changed_collection_keys(
         &self,
         base_watermarks: InventoryDefinitionSourceWatermarks,
         lane_mask: i32,
-    ) -> Result<(Vec<Box<str>>, Vec<Box<str>>, Vec<Box<str>>), String> {
-        let rows = sqlx::query_as::<_, (String, String)>(&format!(
+    ) -> Result<Vec<Box<str>>, String> {
+        let rows = sqlx::query_scalar::<_, String>(&format!(
             concat!(
-                "SELECT DISTINCT section_kind, collection_key FROM {} WHERE ",
+                "SELECT DISTINCT collection_key FROM {} WHERE ",
                 "(section_kind = $1 AND $2 AND id > $3) OR ",
                 "(section_kind = $4 AND $5 AND id > $6) OR ",
                 "(section_kind = $7 AND $8 AND id > $9) ",
-                "ORDER BY section_kind, collection_key"
+                "ORDER BY collection_key"
             ),
             self.names.collection_change_journal
         ))
@@ -4618,29 +4608,7 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres changed collection key load failed: {error}"))?;
-
-        let mut definition_keys = Vec::new();
-        let mut source_keys = Vec::new();
-        let mut membership_keys = Vec::new();
-        for (section_kind, collection_key) in rows {
-            match section_kind.as_str() {
-                COLLECTION_CHANGE_SECTION_DEFINITION => {
-                    definition_keys.push(collection_key.into_boxed_str());
-                }
-                COLLECTION_CHANGE_SECTION_SOURCE => {
-                    source_keys.push(collection_key.into_boxed_str());
-                }
-                COLLECTION_CHANGE_SECTION_MEMBERSHIP => {
-                    membership_keys.push(collection_key.into_boxed_str());
-                }
-                other => {
-                    return Err(format!(
-                        "postgres collection change journal contains unknown section kind: {other}"
-                    ));
-                }
-            }
-        }
-        Ok((definition_keys, source_keys, membership_keys))
+        Ok(rows.into_iter().map(String::into_boxed_str).collect())
     }
 
     async fn load_context_profiles(&mut self) -> Result<(), String> {
@@ -5024,31 +4992,6 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_collection_memberships(&mut self) -> Result<(), String> {
-        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
-            concat!(
-                "SELECT collection_key, component_key FROM {} ",
-                "ORDER BY created_at, collection_key, component_key"
-            ),
-            self.names.collection_memberships
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection memberships load failed: {error}"))?;
-        for (collection_key, component_key) in memberships {
-            let result = self
-                .ingestion_mut()
-                .inventory_mut()
-                .add_component_to_collection(&collection_key, &component_key);
-            if result.change == venom_domain::AddCollectionComponentChange::Rejected {
-                return Err("postgres collection memberships contain invalid ownership".to_owned());
-            }
-        }
-        self.inventory_definition_source_watermarks
-            .collection_memberships = self.load_collection_membership_source_watermark().await?;
-        Ok(())
-    }
-
     async fn load_collection_scan_schedules(&mut self) -> Result<(), String> {
         let schedules = sqlx::query_as::<_, (String, i32, String, i64, Option<i64>, Option<i32>, i64)>(&format!(
             concat!(
@@ -5287,19 +5230,15 @@ impl PostgresStore {
     ) -> Result<Vec<ProviderReportSnapshotRow>, String> {
         sqlx::query_as::<_, ProviderReportSnapshotRow>(&format!(
             concat!(
-                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision FROM (",
-                "SELECT id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision, ",
-                "ROW_NUMBER() OVER (PARTITION BY component_key, artifact_kind, artifact_identity ORDER BY id DESC) AS row_rank ",
-                "FROM {}",
-                ") latest WHERE row_rank = 1 ORDER BY id"
+                "SELECT provider_report_id, provider_key, component_key, artifact_kind, artifact_identity, ",
+                "observed_at_micros, freshness, knowledge_revision ",
+                "FROM {} ORDER BY provider_report_id"
             ),
-            self.names.provider_reports
+            self.names.provider_report_heads
         ))
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres provider report snapshot load failed: {error}"))
+        .map_err(|error| format!("postgres provider report head snapshot load failed: {error}"))
     }
 
     async fn load_latest_active_findings_by_artifact(
@@ -6235,12 +6174,12 @@ impl PostgresStore {
                 }
             }
         }
-        Ok(SystemEventRecentWindowCache::from_public_windows(
-            &recent_events.into(),
-            &recent_scheduler_events.into(),
-            &recent_command_events.into(),
-            &recent_governance_events.into(),
-            &recent_publication_events.into(),
+        Ok(SystemEventRecentWindowCache::from_recent_event_vecs(
+            recent_events,
+            recent_scheduler_events,
+            recent_command_events,
+            recent_governance_events,
+            recent_publication_events,
         ))
     }
 
@@ -7333,6 +7272,7 @@ struct TableNames {
     provider_runtime_configs: Box<str>,
     integration_runtime_config: Box<str>,
     provider_reports: Box<str>,
+    provider_report_heads: Box<str>,
     provider_report_finding_journal: Box<str>,
     finding_risk_acceptances: Box<str>,
     finding_suppressions: Box<str>,
@@ -7367,6 +7307,7 @@ impl TableNames {
             integration_runtime_config: format!("{schema}.integration_runtime_config")
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
+            provider_report_heads: format!("{schema}.provider_report_heads").into_boxed_str(),
             provider_report_finding_journal: format!("{schema}.provider_report_finding_journal")
                 .into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
@@ -7765,7 +7706,9 @@ mod tests {
     use super::PostgresReadSnapshotBase;
     use super::PostgresReadSnapshotSources;
     use super::PostgresStore;
+    use super::artifact_kind_name;
     use super::change_journal_gap_requires_full_refresh;
+    use sqlx::types::Json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8314,6 +8257,83 @@ mod tests {
                 .await
                 .expect("finding journal watermark should load")
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_provider_report_heads_track_latest_report_snapshot_state() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("provider_report_heads_latest_snapshot");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+
+        let first_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-20");
+        let _ = backend
+            .record_scan_report(&first_report)
+            .await
+            .expect("first provider report should persist");
+
+        let second_report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-21");
+        let _ = backend
+            .record_scan_report(&second_report)
+            .await
+            .expect("second provider report should persist");
+
+        let (provider_report_id, knowledge_revision, Json(findings)) =
+            sqlx::query_as::<_, (i64, Option<String>, Json<Vec<ReportedFinding>>)>(&format!(
+                concat!(
+                    "SELECT provider_report_id, knowledge_revision, findings FROM {} ",
+                    "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3"
+                ),
+                backend.names.provider_report_heads
+            ))
+            .bind("component:payments-api")
+            .bind(artifact_kind_name(artifact().kind))
+            .bind(artifact().identity.as_ref())
+            .fetch_one(&backend.pool)
+            .await
+            .expect("provider report head should load");
+
+        let latest_report_id = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT MAX(id) FROM {}",
+            backend.names.provider_reports
+        ))
+        .fetch_one(&backend.pool)
+        .await
+        .expect("latest provider report id should load");
+
+        assert_eq!(provider_report_id, latest_report_id);
+        assert_eq!(knowledge_revision.as_deref(), Some("fixture-db:2026-05-21"));
+        assert_eq!(findings, second_report.findings);
     }
 
     #[tokio::test]

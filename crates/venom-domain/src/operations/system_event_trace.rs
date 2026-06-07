@@ -212,6 +212,23 @@ impl SystemEventRecentWindowCache {
     }
 
     #[must_use]
+    pub fn from_recent_event_vecs(
+        recent_events: Vec<Arc<SystemEvent>>,
+        recent_scheduler_events: Vec<Arc<SystemEvent>>,
+        recent_command_events: Vec<Arc<SystemEvent>>,
+        recent_governance_events: Vec<Arc<SystemEvent>>,
+        recent_publication_events: Vec<Arc<SystemEvent>>,
+    ) -> Self {
+        Self {
+            all_events: recent_events.into(),
+            scheduler_events: recent_scheduler_events.into(),
+            command_events: recent_command_events.into(),
+            governance_events: recent_governance_events.into(),
+            publication_events: recent_publication_events.into(),
+        }
+    }
+
+    #[must_use]
     pub fn from_public_windows(
         recent_events: &Arc<[Arc<SystemEvent>]>,
         recent_scheduler_events: &Arc<[Arc<SystemEvent>]>,
