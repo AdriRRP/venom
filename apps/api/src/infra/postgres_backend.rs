@@ -4221,8 +4221,7 @@ impl PostgresStore {
                 "membership_component_keys JSONB NOT NULL DEFAULT '[]'::jsonb",
                 ")"
             ),
-            self.names.collection_snapshot_heads,
-            self.names.collections
+            self.names.collection_snapshot_heads, self.names.collections
         ))
         .execute(&self.pool)
         .await
@@ -4729,8 +4728,7 @@ impl PostgresStore {
                     );
                 }
             }
-            if let (Some(source_kind), Some(mode)) = (source_kind, mode)
-            {
+            if let (Some(source_kind), Some(mode)) = (source_kind, mode) {
                 let source = parse_collection_source(
                     &source_kind,
                     &mode,
@@ -6866,20 +6864,21 @@ impl PostgresStore {
             .ok_or_else(|| {
                 format!("postgres collection snapshot head missing collection: {collection_key}")
             })?;
-        let (source_kind, mode, source_component_keys) = collection
-            .source
-            .as_ref()
-            .map_or((None, None, Vec::new()), |source| {
-                (
-                    Some(collection_source_kind_name(source)),
-                    Some(collection_source_mode_name(source.mode())),
-                    source
-                        .component_keys()
-                        .iter()
-                        .map(std::string::ToString::to_string)
-                        .collect::<Vec<_>>(),
-                )
-            });
+        let (source_kind, mode, source_component_keys) =
+            collection
+                .source
+                .as_ref()
+                .map_or((None, None, Vec::new()), |source| {
+                    (
+                        Some(collection_source_kind_name(source)),
+                        Some(collection_source_mode_name(source.mode())),
+                        source
+                            .component_keys()
+                            .iter()
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>(),
+                    )
+                });
         let membership_component_keys = collection
             .component_keys
             .iter()
@@ -7610,10 +7609,8 @@ impl TableNames {
                 .into_boxed_str(),
             provider_reports: format!("{schema}.provider_reports").into_boxed_str(),
             provider_report_heads: format!("{schema}.provider_report_heads").into_boxed_str(),
-            provider_report_active_findings: format!(
-                "{schema}.provider_report_active_findings"
-            )
-            .into_boxed_str(),
+            provider_report_active_findings: format!("{schema}.provider_report_active_findings")
+                .into_boxed_str(),
             provider_report_finding_journal: format!("{schema}.provider_report_finding_journal")
                 .into_boxed_str(),
             finding_risk_acceptances: format!("{schema}.finding_risk_acceptances").into_boxed_str(),
@@ -8703,10 +8700,13 @@ mod tests {
         .execute(&backend.pool)
         .await
         .expect("active finding heads should clear");
-        sqlx::query(&format!("DELETE FROM {}", backend.names.provider_report_heads))
-            .execute(&backend.pool)
-            .await
-            .expect("provider report heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report heads should clear");
         sqlx::query(&format!(
             "DELETE FROM {}",
             backend.names.collection_snapshot_heads
