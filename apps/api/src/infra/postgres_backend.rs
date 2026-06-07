@@ -3809,9 +3809,7 @@ impl PostgresStore {
                 "PRIMARY KEY (component_key, artifact_kind, artifact_identity)",
                 ")"
             ),
-            self.names.provider_report_heads,
-            self.names.components,
-            self.names.provider_reports
+            self.names.provider_report_heads, self.names.components, self.names.provider_reports
         ))
         .execute(&self.pool)
         .await
@@ -4544,7 +4542,8 @@ impl PostgresStore {
                 .reset_collection_memberships_for_rebuild_keys(
                     changed_keys.iter().map(std::convert::AsRef::as_ref),
                 );
-            self.load_collection_snapshots_for_keys(&changed_keys).await?;
+            self.load_collection_snapshots_for_keys(&changed_keys)
+                .await?;
         }
 
         if lane_mask & CHANGE_LANE_COLLECTION_DEFINITIONS != 0 {
@@ -4564,7 +4563,8 @@ impl PostgresStore {
         }
         if lane_mask & CHANGE_LANE_COLLECTION_MEMBERSHIPS != 0 {
             self.inventory_definition_source_watermarks
-                .collection_memberships = self.load_collection_membership_source_watermark().await?;
+                .collection_memberships =
+                self.load_collection_membership_source_watermark().await?;
         } else {
             self.inventory_definition_source_watermarks
                 .collection_memberships = base_watermarks.collection_memberships;
@@ -8309,15 +8309,13 @@ mod tests {
             .expect("second provider report should persist");
 
         let (provider_report_id, knowledge_revision, Json(findings)) =
-            sqlx::query_as::<_, (i64, Option<String>, Json<Vec<ReportedFinding>>)>(
-                &format!(
-                    concat!(
-                        "SELECT provider_report_id, knowledge_revision, findings FROM {} ",
-                        "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3"
-                    ),
-                    backend.names.provider_report_heads
+            sqlx::query_as::<_, (i64, Option<String>, Json<Vec<ReportedFinding>>)>(&format!(
+                concat!(
+                    "SELECT provider_report_id, knowledge_revision, findings FROM {} ",
+                    "WHERE component_key = $1 AND artifact_kind = $2 AND artifact_identity = $3"
                 ),
-            )
+                backend.names.provider_report_heads
+            ))
             .bind("component:payments-api")
             .bind(artifact_kind_name(artifact().kind))
             .bind(artifact().identity.as_ref())
