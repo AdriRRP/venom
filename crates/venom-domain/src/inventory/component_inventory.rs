@@ -1088,11 +1088,70 @@ impl ComponentInventory {
         }
     }
 
+    /// Clear collection source state only for the targeted collection keys.
+    pub fn reset_collection_sources_for_rebuild_keys<'a>(
+        &mut self,
+        collection_keys: impl IntoIterator<Item = &'a str>,
+    ) {
+        for collection_key in collection_keys {
+            if let Some(collection) = self.collections.get_mut(collection_key) {
+                collection.source = None;
+            }
+        }
+    }
+
     /// Clear only collection membership state before one membership-table rebuild.
     pub fn reset_collection_memberships_for_rebuild(&mut self) {
         for collection in self.collections.values_mut() {
             collection.component_keys.clear();
         }
+    }
+
+    /// Clear collection membership state only for the targeted collection keys.
+    pub fn reset_collection_memberships_for_rebuild_keys<'a>(
+        &mut self,
+        collection_keys: impl IntoIterator<Item = &'a str>,
+    ) {
+        for collection_key in collection_keys {
+            if let Some(collection) = self.collections.get_mut(collection_key) {
+                collection.component_keys.clear();
+            }
+        }
+    }
+
+    /// Clear collection-local context assignment only for targeted collection keys.
+    pub fn reset_collection_context_profiles_for_rebuild_keys<'a>(
+        &mut self,
+        collection_keys: impl IntoIterator<Item = &'a str>,
+    ) {
+        for collection_key in collection_keys {
+            if let Some(collection) = self.collections.get_mut(collection_key) {
+                collection.context_profile_key = None;
+            }
+        }
+    }
+
+    /// Replace one collection registration during authoritative rebuild while
+    /// preserving the rest of the already-loaded collection-local state.
+    pub fn upsert_collection_registration_for_rebuild(
+        &mut self,
+        registration: CollectionRegistration,
+    ) {
+        let collection_key = registration.collection_key.clone();
+        if let Some(collection) = self.collections.get_mut(collection_key.as_ref()) {
+            collection.registration = registration;
+            return;
+        }
+        self.collections.insert(
+            collection_key,
+            CollectionRecord {
+                registration,
+                component_keys: BTreeSet::new(),
+                context_profile_key: None,
+                source: None,
+                scan_schedule: None,
+            },
+        );
     }
 
     /// Register one component under management.

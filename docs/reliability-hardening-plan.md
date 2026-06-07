@@ -247,6 +247,10 @@ Completed:
     read-model refresh onto durable finding-level deltas, refreshing
     collection definitions and sources from latest changed entities only, and
     tightening the public `system events` edge onto shared immutable shapes.
+81. `W230-durable-snapshot-contract-closure`
+    Unify detached and live durable cursors, refresh Postgres collections from
+    changed collection keys against current authoritative rows, and remove the
+    last avoidable `system events` edge materialization churn.
 74. `W208-http-volatile-lane-splitting`
     Split `runtime` and `publication` into independent live HTTP lanes so
     publication work no longer waits behind runtime drains.

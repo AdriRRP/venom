@@ -213,31 +213,27 @@ impl SystemEventRecentWindowCache {
 
     fn to_public(&self) -> SystemEventRecentWindows {
         SystemEventRecentWindows {
-            recent_events: self.all_events.iter().cloned().collect::<Vec<_>>().into(),
+            recent_events: self.all_events.iter().cloned().collect::<Arc<[_]>>(),
             recent_scheduler_events: self
                 .scheduler_events
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>()
-                .into(),
+                .collect::<Arc<[_]>>(),
             recent_command_events: self
                 .command_events
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>()
-                .into(),
+                .collect::<Arc<[_]>>(),
             recent_governance_events: self
                 .governance_events
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>()
-                .into(),
+                .collect::<Arc<[_]>>(),
             recent_publication_events: self
                 .publication_events
                 .iter()
                 .cloned()
-                .collect::<Vec<_>>()
-                .into(),
+                .collect::<Arc<[_]>>(),
         }
     }
 
@@ -501,7 +497,7 @@ impl SystemEventQueryIndex {
                     .iter()
                     .take(limit)
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect::<Arc<[_]>>()
             },
             |category| {
                 let window = match category {
@@ -510,14 +506,14 @@ impl SystemEventQueryIndex {
                     SystemEventCategory::Governance => &self.recent_windows.governance_events,
                     SystemEventCategory::Publication => &self.recent_windows.publication_events,
                 };
-                window.iter().take(limit).cloned().collect::<Vec<_>>()
+                window.iter().take(limit).cloned().collect::<Arc<[_]>>()
             },
         );
         SystemEventsPage {
             total,
             returned: events.len(),
             limit,
-            events: events.into(),
+            events,
         }
     }
 }
