@@ -385,6 +385,7 @@ impl PostgresStore {
             command_status_source_cursor: RowSourceCursor::default(),
         };
         backend.init_schema().await?;
+        backend.seed_legacy_repair_state_if_needed().await?;
         backend.normalize_authoritative_repair_state().await?;
         backend.rebuild().await?;
         Ok(backend)
@@ -3469,23 +3470,68 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn seed_legacy_repair_state_if_needed(&self) -> Result<(), String> {
+        self.seed_provider_report_head_repair_state_from_legacy_source_if_needed()
+            .await?;
+        self.seed_collection_snapshot_repair_state_from_legacy_source_if_needed()
+            .await?;
+        Ok(())
+    }
+
+    async fn seed_provider_report_head_repair_state_from_legacy_source_if_needed(
+        &self,
+    ) -> Result<(), String> {
+        let report_rows = self.load_latest_provider_report_head_rows().await?;
+        let journal_rows = self
+            .load_latest_provider_report_head_rows_from_journal()
+            .await?;
+        if !report_rows.is_empty() || !journal_rows.is_empty() {
+            return Ok(());
+        }
+        self.rebuild_provider_report_heads_from_source().await?;
+        if !self
+            .load_latest_provider_report_head_rows()
+            .await?
+            .is_empty()
+        {
+            self.backfill_provider_report_head_journal_from_heads()
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn seed_collection_snapshot_repair_state_from_legacy_source_if_needed(
+        &self,
+    ) -> Result<(), String> {
+        let snapshots = self.load_collection_snapshot_rows(None).await?;
+        let journal_rows = self
+            .load_collection_snapshot_rows_from_journal(None)
+            .await?;
+        if !snapshots.is_empty() || !journal_rows.is_empty() {
+            return Ok(());
+        }
+        let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
+        if source_snapshots.is_empty() {
+            return Ok(());
+        }
+        let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
+        repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
+        repair_backend
+            .rebuild_collection_snapshot_heads_from_inventory(None)
+            .await?;
+        repair_backend
+            .backfill_collection_snapshot_journal_from_heads(None)
+            .await?;
+        Ok(())
+    }
+
     async fn normalize_provider_report_head_repair_state(&self) -> Result<(), String> {
         let report_rows = self.load_latest_provider_report_head_rows().await?;
         let journal_rows = self
             .load_latest_provider_report_head_rows_from_journal()
             .await?;
         if report_rows.is_empty() {
-            if journal_rows.is_empty() {
-                self.rebuild_provider_report_heads_from_source().await?;
-                if !self
-                    .load_latest_provider_report_head_rows()
-                    .await?
-                    .is_empty()
-                {
-                    self.backfill_provider_report_head_journal_from_heads()
-                        .await?;
-                }
-            } else {
+            if !journal_rows.is_empty() {
                 self.rebuild_provider_report_heads_from_journal().await?;
             }
         } else if journal_rows.is_empty() {
@@ -3501,20 +3547,7 @@ impl PostgresStore {
             .load_collection_snapshot_rows_from_journal(None)
             .await?;
         if snapshots.is_empty() {
-            if journal_rows.is_empty() {
-                let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
-                if source_snapshots.is_empty() {
-                    return Ok(());
-                }
-                let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
-                repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
-                repair_backend
-                    .rebuild_collection_snapshot_heads_from_inventory(None)
-                    .await?;
-                repair_backend
-                    .backfill_collection_snapshot_journal_from_heads(None)
-                    .await?;
-            } else {
+            if !journal_rows.is_empty() {
                 let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
                 repair_backend.apply_collection_snapshot_rows(journal_rows)?;
                 repair_backend
