@@ -504,6 +504,11 @@ impl SystemEventQueryIndex {
     }
 
     #[must_use]
+    pub const fn recent_window_cache_ref(&self) -> &SystemEventRecentWindowCache {
+        &self.recent_windows
+    }
+
+    #[must_use]
     pub fn recent_window_cache(&self) -> SystemEventRecentWindowCache {
         self.recent_windows.clone()
     }
@@ -533,6 +538,20 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
+        let (total, returned, limit, events) = self.map_query_events(query, Arc::clone);
+        SystemEventsPage {
+            total,
+            returned,
+            limit,
+            events: events.into(),
+        }
+    }
+
+    pub fn map_query_events<T>(
+        &self,
+        query: &SystemEventsQuery,
+        mut map: impl FnMut(&Arc<SystemEvent>) -> T,
+    ) -> (usize, usize, usize, Vec<T>) {
         let limit = query.normalized_limit();
         let total = match query.category {
             None => self.total,
@@ -541,32 +560,16 @@ impl SystemEventQueryIndex {
             Some(SystemEventCategory::Governance) => self.governance_total,
             Some(SystemEventCategory::Publication) => self.publication_total,
         };
-
-        let events = query.category.map_or_else(
-            || {
-                self.recent_windows
-                    .all_events
-                    .iter()
-                    .take(limit)
-                    .cloned()
-                    .collect::<Arc<[_]>>()
-            },
-            |category| {
-                let window = match category {
-                    SystemEventCategory::Scheduler => &self.recent_windows.scheduler_events,
-                    SystemEventCategory::Command => &self.recent_windows.command_events,
-                    SystemEventCategory::Governance => &self.recent_windows.governance_events,
-                    SystemEventCategory::Publication => &self.recent_windows.publication_events,
-                };
-                window.iter().take(limit).cloned().collect::<Arc<[_]>>()
-            },
-        );
-        SystemEventsPage {
-            total,
-            returned: events.len(),
-            limit,
-            events,
-        }
+        let window = match query.category {
+            None => &self.recent_windows.all_events,
+            Some(SystemEventCategory::Scheduler) => &self.recent_windows.scheduler_events,
+            Some(SystemEventCategory::Command) => &self.recent_windows.command_events,
+            Some(SystemEventCategory::Governance) => &self.recent_windows.governance_events,
+            Some(SystemEventCategory::Publication) => &self.recent_windows.publication_events,
+        };
+        let events = window.iter().take(limit).map(&mut map).collect::<Vec<_>>();
+        let returned = events.len();
+        (total, returned, limit, events)
     }
 }
 

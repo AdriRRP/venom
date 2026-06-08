@@ -517,6 +517,10 @@ Completed:
      Remove parallel cold-path rebuild logic for active findings and
      collections, and consolidate retained `system events` ref-state into the
      canonical recent-window cache shape.
+105. `W235-residual-cold-path-and-event-edge-closure`
+     Remove the last eager cold rebuilds, collapse collections cold fallback
+     onto one compact canonical loader, and tighten `system events` query edges
+     around cache-native contracts.
 
 ## Exit condition
 
