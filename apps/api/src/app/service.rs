@@ -37,9 +37,7 @@ use venom_domain::inventory::{
     ManagedComponentTag, ManagedContextProfile,
 };
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
-use venom_domain::operations::{
-    SystemEvent, SystemEventCategory, SystemEventsPage, SystemEventsQuery,
-};
+use venom_domain::operations::{SystemEvent, SystemEventCategory, SystemEventsQuery};
 use venom_domain::scanning::{
     CollectionScanScheduler, RunNextScanResult, ScanCommandQueue, ScanCommandStatus, ScanPlanner,
 };
@@ -228,8 +226,16 @@ impl ApiReadSnapshot {
     ) -> Result<ListSystemEventsResponse, ApiApplicationError> {
         let query = build_system_events_query(request)?;
         let category = query.category.map(|value| value.as_str().to_owned());
-        let mut response =
-            ListSystemEventsResponse::from_page(&self.system_event_index.query(&query));
+        let (total, returned, limit, events) = self
+            .system_event_index
+            .map_query_events(&query, |event| SystemEventItem::from(event.as_ref()));
+        let mut response = ListSystemEventsResponse {
+            category: None,
+            total,
+            returned,
+            limit,
+            events,
+        };
         response.category = category;
         Ok(response)
     }
@@ -625,6 +631,23 @@ impl LocalStore {
                     state_windows,
                     runtime_windows: snapshot.runtime_windows.clone(),
                     merged_windows,
+                    merged: Arc::clone(&merged),
+                });
+                return merged;
+            }
+            Some(snapshot)
+                if state.window_totals() == snapshot.state.window_totals()
+                    && runtime.window_totals() == snapshot.runtime.window_totals()
+                    && state.recent_window_cache_ref() == &snapshot.state_windows
+                    && runtime.recent_window_cache_ref() == &snapshot.runtime_windows =>
+            {
+                let merged = Arc::clone(&snapshot.merged);
+                *cache = Some(MergedSystemEventSnapshot {
+                    state,
+                    runtime,
+                    state_windows: snapshot.state_windows.clone(),
+                    runtime_windows: snapshot.runtime_windows.clone(),
+                    merged_windows: snapshot.merged_windows.clone(),
                     merged: Arc::clone(&merged),
                 });
                 return merged;
@@ -3042,22 +3065,6 @@ pub struct ListSystemEventsResponse {
     pub returned: usize,
     pub limit: usize,
     pub events: Vec<SystemEventItem>,
-}
-
-impl ListSystemEventsResponse {
-    fn from_page(page: &SystemEventsPage) -> Self {
-        Self {
-            category: None,
-            total: page.total,
-            returned: page.returned,
-            limit: page.limit,
-            events: page
-                .events
-                .iter()
-                .map(|event| SystemEventItem::from(event.as_ref()))
-                .collect(),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]

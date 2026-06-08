@@ -3420,7 +3420,6 @@ impl PostgresStore {
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
-        self.rebuild_provider_report_heads_from_source().await?;
         self.install_change_watermark_triggers().await?;
 
         Ok(())
@@ -4787,101 +4786,31 @@ impl PostgresStore {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let definitions = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
+        sqlx::query_as::<_, CollectionSnapshotRow>(&format!(
             concat!(
-                "SELECT collection_key, name, context_profile_key ",
-                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ORDER BY collection_key"
+                "WITH membership_heads AS (",
+                "SELECT collection_key, to_jsonb(array_agg(component_key ORDER BY component_key)) AS membership_component_keys ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) GROUP BY collection_key",
+                ") ",
+                "SELECT collections.collection_key, collections.name, collections.context_profile_key, ",
+                "sources.source_kind, sources.mode, ",
+                "COALESCE(sources.component_keys, '[]'::jsonb) AS source_component_keys, ",
+                "COALESCE(membership_heads.membership_component_keys, '[]'::jsonb) AS membership_component_keys ",
+                "FROM {} collections ",
+                "LEFT JOIN {} sources ON sources.collection_key = collections.collection_key ",
+                "LEFT JOIN membership_heads ON membership_heads.collection_key = collections.collection_key ",
+                "WHERE NOT $1 OR collections.collection_key = ANY($2) ",
+                "ORDER BY collections.collection_key"
             ),
-            self.names.collections
-        ))
-        .bind(filtered)
-        .bind(&collection_keys)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection source definition load failed: {error}"))?;
-        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>)>(&format!(
-            concat!(
-                "SELECT collection_key, source_kind, mode, component_keys ",
-                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ORDER BY collection_key"
-            ),
+            self.names.collection_memberships,
+            self.names.collections,
             self.names.collection_sources
         ))
         .bind(filtered)
         .bind(&collection_keys)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("postgres collection source source load failed: {error}"))?;
-        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
-            concat!(
-                "SELECT collection_key, component_key ",
-                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ",
-                "ORDER BY collection_key, component_key"
-            ),
-            self.names.collection_memberships
-        ))
-        .bind(filtered)
-        .bind(&collection_keys)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection source membership load failed: {error}"))?;
-
-        let mut rows = definitions
-            .into_iter()
-            .map(|(collection_key, name, context_profile_key)| {
-                (
-                    collection_key,
-                    (
-                        name,
-                        context_profile_key,
-                        None,
-                        None,
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for (collection_key, source_kind, mode, Json(source_component_keys)) in sources {
-            if let Some((_, _, stored_source_kind, stored_mode, stored_keys, _)) =
-                rows.get_mut(&collection_key)
-            {
-                *stored_source_kind = Some(source_kind);
-                *stored_mode = Some(mode);
-                *stored_keys = source_component_keys;
-            }
-        }
-        for (collection_key, component_key) in memberships {
-            if let Some((_, _, _, _, _, member_keys)) = rows.get_mut(&collection_key) {
-                member_keys.push(component_key);
-            }
-        }
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    collection_key,
-                    (
-                        name,
-                        context_profile_key,
-                        source_kind,
-                        mode,
-                        source_component_keys,
-                        membership_component_keys,
-                    ),
-                )| {
-                    (
-                        collection_key,
-                        name,
-                        context_profile_key,
-                        source_kind,
-                        mode,
-                        Json(source_component_keys),
-                        Json(membership_component_keys),
-                    )
-                },
-            )
-            .collect())
+        .map_err(|error| format!("postgres collection source snapshot load failed: {error}"))
     }
 
     fn apply_collection_snapshot_rows(
@@ -5646,7 +5575,14 @@ impl PostgresStore {
     }
 
     async fn load_provider_report_snapshots_from_finding_journal(&mut self) -> Result<(), String> {
-        let report_rows = self.load_latest_provider_report_head_rows().await?;
+        let mut report_rows = self.load_latest_provider_report_head_rows().await?;
+        let rebuilt_heads_from_source = if report_rows.is_empty() {
+            self.rebuild_provider_report_heads_from_source().await?;
+            report_rows = self.load_latest_provider_report_head_rows().await?;
+            !report_rows.is_empty()
+        } else {
+            false
+        };
         let mut findings_by_artifact = self.load_latest_active_findings_by_artifact().await?;
         let rebuilt_from_heads = if findings_by_artifact.is_empty() && !report_rows.is_empty() {
             findings_by_artifact = active_findings_by_artifact_from_report_heads(&report_rows)?;
@@ -5654,7 +5590,7 @@ impl PostgresStore {
         } else {
             false
         };
-        if rebuilt_from_heads {
+        if rebuilt_heads_from_source || rebuilt_from_heads {
             self.rebuild_provider_report_active_findings_from_heads()
                 .await?;
         }
