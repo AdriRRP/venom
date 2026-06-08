@@ -175,6 +175,19 @@ pub struct SystemEventWindowTotals {
     pub publication_total: usize,
 }
 
+impl SystemEventWindowTotals {
+    #[must_use]
+    pub const fn merged(left: &Self, right: &Self) -> Self {
+        Self {
+            total: left.total + right.total,
+            scheduler_total: left.scheduler_total + right.scheduler_total,
+            command_total: left.command_total + right.command_total,
+            governance_total: left.governance_total + right.governance_total,
+            publication_total: left.publication_total + right.publication_total,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SystemEventRecentWindows {
     pub recent_events: Arc<[Arc<SystemEvent>]>,
@@ -425,7 +438,7 @@ impl SystemEventQueryIndex {
     ) -> (Self, SystemEventRecentWindowCache) {
         let windows = merge_recent_window_caches(left_windows, right_windows);
         let index = Self::from_recent_window_cache(
-            merge_window_totals(&left_totals, &right_totals),
+            SystemEventWindowTotals::merged(&left_totals, &right_totals),
             windows.clone(),
         );
         (index, windows)
@@ -538,12 +551,28 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        let (total, returned, limit, events) = self.map_query_events(query, Arc::clone);
+        let limit = query.normalized_limit();
+        let total = match query.category {
+            None => self.total,
+            Some(SystemEventCategory::Scheduler) => self.scheduler_total,
+            Some(SystemEventCategory::Command) => self.command_total,
+            Some(SystemEventCategory::Governance) => self.governance_total,
+            Some(SystemEventCategory::Publication) => self.publication_total,
+        };
+        let window = match query.category {
+            None => &self.recent_windows.all_events,
+            Some(SystemEventCategory::Scheduler) => &self.recent_windows.scheduler_events,
+            Some(SystemEventCategory::Command) => &self.recent_windows.command_events,
+            Some(SystemEventCategory::Governance) => &self.recent_windows.governance_events,
+            Some(SystemEventCategory::Publication) => &self.recent_windows.publication_events,
+        };
+        let events = window.iter().take(limit).cloned().collect::<Arc<[_]>>();
+        let returned = events.len();
         SystemEventsPage {
             total,
             returned,
             limit,
-            events: events.into(),
+            events,
         }
     }
 
@@ -631,19 +660,6 @@ fn newer_prefix_since_deque(
         }
     }
     Some(current.iter().take(suffix_start).cloned().collect())
-}
-
-const fn merge_window_totals(
-    left: &SystemEventWindowTotals,
-    right: &SystemEventWindowTotals,
-) -> SystemEventWindowTotals {
-    SystemEventWindowTotals {
-        total: left.total + right.total,
-        scheduler_total: left.scheduler_total + right.scheduler_total,
-        command_total: left.command_total + right.command_total,
-        governance_total: left.governance_total + right.governance_total,
-        publication_total: left.publication_total + right.publication_total,
-    }
 }
 
 fn stitch_recent_append_deque(
