@@ -499,6 +499,7 @@ pub struct ApiApplication {
     backend: ApiStore,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ApiStore {
     Local(LocalStore),
     Postgres(PostgresStore),
