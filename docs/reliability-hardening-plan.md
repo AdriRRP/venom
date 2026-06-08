@@ -529,6 +529,10 @@ Completed:
      Move residual provider-report and collection compatibility repair into one
      canonical Postgres bootstrap path, and tighten the last generic/local
      `system events` fallback edges around cache-native contracts.
+108. `W238-legacy-bootstrap-tail-closure`
+     Move the final provider-report and collection source-table compatibility
+     into explicit legacy bootstrap seeding so canonical reopen and repair
+     loaders stay journal/head-only in steady state.
 
 ## Exit condition
 
