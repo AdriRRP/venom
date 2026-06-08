@@ -185,6 +185,8 @@ const CHANGE_LANE_INVENTORY_CORE: i32 =
 const CHANGE_LANE_COLLECTIONS: i32 = CHANGE_LANE_COLLECTION_DEFINITIONS
     | CHANGE_LANE_COLLECTION_SOURCES
     | CHANGE_LANE_COLLECTION_MEMBERSHIPS;
+const REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS: &str = "provider-report-heads-v1";
+const REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS: &str = "collection-snapshots-v1";
 const POSTGRES_POOL_MAX_CONNECTIONS: u32 = 1;
 const CHANGE_LANE_ALL: i32 = CHANGE_LANE_INVENTORY_CORE
     | CHANGE_LANE_COMPONENT_BINDINGS
@@ -3431,6 +3433,7 @@ impl PostgresStore {
 
         self.create_change_watermark_table().await?;
         self.create_change_journal_table().await?;
+        self.create_repair_bootstrap_state_table().await?;
         self.create_components_table().await?;
         self.create_context_profiles_table().await?;
         self.create_component_context_profiles_table().await?;
@@ -3481,48 +3484,138 @@ impl PostgresStore {
     async fn seed_provider_report_head_repair_state_from_legacy_source_if_needed(
         &self,
     ) -> Result<(), String> {
+        let completed = self
+            .repair_bootstrap_completed(REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS)
+            .await?;
         let report_rows = self.load_latest_provider_report_head_rows().await?;
         let journal_rows = self
             .load_latest_provider_report_head_rows_from_journal()
             .await?;
         if !report_rows.is_empty() || !journal_rows.is_empty() {
+            if !completed {
+                self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS)
+                    .await?;
+            }
             return Ok(());
         }
-        self.rebuild_provider_report_heads_from_source().await?;
-        if !self
-            .load_latest_provider_report_head_rows()
-            .await?
-            .is_empty()
-        {
-            self.backfill_provider_report_head_journal_from_heads()
-                .await?;
+        let source_has_rows = self.provider_report_source_has_rows().await?;
+        if completed {
+            if source_has_rows {
+                return Err(
+                    "postgres provider report repair state missing after bootstrap completion"
+                        .to_owned(),
+                );
+            }
+            return Ok(());
         }
+        if source_has_rows {
+            self.rebuild_provider_report_heads_from_source().await?;
+            if !self
+                .load_latest_provider_report_head_rows()
+                .await?
+                .is_empty()
+            {
+                self.backfill_provider_report_head_journal_from_heads()
+                    .await?;
+            }
+        }
+        self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS)
+            .await?;
         Ok(())
     }
 
     async fn seed_collection_snapshot_repair_state_from_legacy_source_if_needed(
         &self,
     ) -> Result<(), String> {
+        let completed = self
+            .repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
+            .await?;
         let snapshots = self.load_collection_snapshot_rows(None).await?;
         let journal_rows = self
             .load_collection_snapshot_rows_from_journal(None)
             .await?;
         if !snapshots.is_empty() || !journal_rows.is_empty() {
+            if !completed {
+                self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
+                    .await?;
+            }
+            return Ok(());
+        }
+        let source_has_rows = self.collection_source_has_rows().await?;
+        if completed {
+            if source_has_rows {
+                return Err(
+                    "postgres collection snapshot repair state missing after bootstrap completion"
+                        .to_owned(),
+                );
+            }
+            return Ok(());
+        }
+        if !source_has_rows {
+            self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
+                .await?;
             return Ok(());
         }
         let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
-        if source_snapshots.is_empty() {
-            return Ok(());
+        if !source_snapshots.is_empty() {
+            let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
+            repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
+            repair_backend
+                .rebuild_collection_snapshot_heads_from_inventory(None)
+                .await?;
+            repair_backend
+                .backfill_collection_snapshot_journal_from_heads(None)
+                .await?;
         }
-        let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
-        repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
-        repair_backend
-            .rebuild_collection_snapshot_heads_from_inventory(None)
-            .await?;
-        repair_backend
-            .backfill_collection_snapshot_journal_from_heads(None)
+        self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
             .await?;
         Ok(())
+    }
+
+    async fn repair_bootstrap_completed(&self, repair_key: &str) -> Result<bool, String> {
+        sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {} WHERE repair_key = $1)",
+            self.names.repair_bootstrap_state
+        ))
+        .bind(repair_key)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres repair bootstrap state load failed: {error}"))
+    }
+
+    async fn mark_repair_bootstrap_completed(&self, repair_key: &str) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "INSERT INTO {} (repair_key) VALUES ($1) ",
+                "ON CONFLICT (repair_key) DO NOTHING"
+            ),
+            self.names.repair_bootstrap_state
+        ))
+        .bind(repair_key)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres repair bootstrap state persist failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn provider_report_source_has_rows(&self) -> Result<bool, String> {
+        sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {} LIMIT 1)",
+            self.names.provider_reports
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres provider report source presence load failed: {error}"))
+    }
+
+    async fn collection_source_has_rows(&self) -> Result<bool, String> {
+        sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT EXISTS(SELECT 1 FROM {} LIMIT 1)",
+            self.names.collections
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection source presence load failed: {error}"))
     }
 
     async fn normalize_provider_report_head_repair_state(&self) -> Result<(), String> {
@@ -3916,6 +4009,22 @@ impl PostgresStore {
         .execute(&self.pool)
         .await
         .map_err(|error| format!("postgres change journal table create failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn create_repair_bootstrap_state_table(&self) -> Result<(), String> {
+        sqlx::query(&format!(
+            concat!(
+                "CREATE TABLE IF NOT EXISTS {} (",
+                "repair_key TEXT PRIMARY KEY, ",
+                "completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+                ")"
+            ),
+            self.names.repair_bootstrap_state
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("postgres repair bootstrap state table create failed: {error}"))?;
         Ok(())
     }
 
@@ -8061,6 +8170,7 @@ struct TableNames {
     schema: Box<str>,
     change_watermark: Box<str>,
     change_journal: Box<str>,
+    repair_bootstrap_state: Box<str>,
     components: Box<str>,
     context_profiles: Box<str>,
     component_context_profiles: Box<str>,
@@ -8096,6 +8206,7 @@ impl TableNames {
         Ok(Self {
             change_watermark: format!("{schema}.change_watermark").into_boxed_str(),
             change_journal: format!("{schema}.change_journal").into_boxed_str(),
+            repair_bootstrap_state: format!("{schema}.repair_bootstrap_state").into_boxed_str(),
             components: format!("{schema}.components").into_boxed_str(),
             context_profiles: format!("{schema}.context_profiles").into_boxed_str(),
             component_context_profiles: format!("{schema}.component_context_profiles")
@@ -9267,6 +9378,13 @@ mod tests {
         .execute(&backend.pool)
         .await
         .expect("collection snapshot journal should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.repair_bootstrap_state
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("repair bootstrap state should clear");
 
         let reopened = PostgresStore::open(&database_url, &schema)
             .await
@@ -9305,6 +9423,113 @@ mod tests {
         .expect("collection snapshot journal count should load");
         assert!(provider_report_journal_rows > 0);
         assert!(collection_snapshot_journal_rows > 0);
+    }
+
+    #[tokio::test]
+    async fn postgres_reopen_rejects_missing_provider_report_repair_state_after_bootstrap_completion()
+     {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("provider_report_repair_state_corruption");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-24");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_head_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report head journal should clear");
+
+        let error = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect_err("postgres reopen should fail explicitly");
+        assert!(error.contains("provider report repair state missing"));
+    }
+
+    #[tokio::test]
+    async fn postgres_reopen_rejects_missing_collection_snapshot_repair_state_after_bootstrap_completion()
+     {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_snapshot_repair_state_corruption");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .configure_collection_source(
+                "release:2026.05",
+                CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                    CollectionSourceMode::Replace,
+                    vec![Box::<str>::from("component:payments-api")],
+                )),
+            )
+            .await
+            .expect("collection source should persist");
+        let _ = backend
+            .materialize_collection_source("release:2026.05")
+            .await
+            .expect("collection materialization should persist");
+
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot journal should clear");
+
+        let error = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect_err("postgres reopen should fail explicitly");
+        assert!(error.contains("collection snapshot repair state missing"));
     }
 
     #[tokio::test]
