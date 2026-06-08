@@ -1,6 +1,6 @@
 # W237 Canonical Tail Closure
 
-Status: done
+Status: `done`
 
 ## Why
 
@@ -31,7 +31,7 @@ system-event edge contract.
 
 ### W237-S01 canonical bootstrap and event-tail closure
 
-Status: done
+Status: `done`
 
 Goals:
 
