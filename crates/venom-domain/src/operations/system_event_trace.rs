@@ -288,7 +288,7 @@ impl SystemEventRecentWindowCache {
         }
     }
 
-    fn retained_event_refs(&self) -> &HashMap<Box<str>, usize> {
+    const fn retained_event_refs(&self) -> &HashMap<Box<str>, usize> {
         &self.retained_event_refs
     }
 
