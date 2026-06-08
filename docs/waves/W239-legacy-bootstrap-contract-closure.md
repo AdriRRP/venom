@@ -1,4 +1,4 @@
-# W238-legacy-bootstrap-tail-closure
+# W239-legacy-bootstrap-contract-closure
 
 Status: `done`
 
@@ -33,7 +33,7 @@ repair and reopen logic stay aligned on one durable contract.
 
 ## Slices
 
-1. `W238-S01` move provider-report and collection source fallback into explicit
+1. `W239-S01` move provider-report and collection source fallback into explicit
    legacy bootstrap seeding during open
 
 ## Verification
@@ -41,7 +41,7 @@ repair and reopen logic stay aligned on one durable contract.
 - targeted `venom-api` reopen tests for provider-report and collection repair
   state
 - `cargo check -p venom-api --all-features --offline`
-- `./scripts/check-wave.sh --wave W238-legacy-bootstrap-tail-closure`
+- `./scripts/check-wave.sh --wave W239-legacy-bootstrap-contract-closure`
 
 ## Completion checks
 
