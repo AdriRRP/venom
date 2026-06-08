@@ -538,8 +538,7 @@ impl SystemEventQueryIndex {
 
     #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        let (total, returned, limit, events) =
-            self.map_query_events(query, |event| Arc::clone(event));
+        let (total, returned, limit, events) = self.map_query_events(query, Arc::clone);
         SystemEventsPage {
             total,
             returned,
