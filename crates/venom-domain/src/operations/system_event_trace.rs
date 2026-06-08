@@ -163,7 +163,6 @@ pub struct SystemEventQueryIndex {
     command_total: usize,
     governance_total: usize,
     publication_total: usize,
-    retained_event_refs: HashMap<Box<str>, usize>,
     recent_windows: SystemEventRecentWindowCache,
 }
 
@@ -193,6 +192,7 @@ pub struct SystemEventRecentWindowCache {
     command_events: VecDeque<Arc<SystemEvent>>,
     governance_events: VecDeque<Arc<SystemEvent>>,
     publication_events: VecDeque<Arc<SystemEvent>>,
+    retained_event_refs: HashMap<Box<str>, usize>,
 }
 
 #[allow(clippy::struct_field_names)]
@@ -206,6 +206,25 @@ struct RecentEventDequeWindowRefs<'a> {
 }
 
 impl SystemEventRecentWindowCache {
+    fn with_deques(
+        all_events: VecDeque<Arc<SystemEvent>>,
+        scheduler_events: VecDeque<Arc<SystemEvent>>,
+        command_events: VecDeque<Arc<SystemEvent>>,
+        governance_events: VecDeque<Arc<SystemEvent>>,
+        publication_events: VecDeque<Arc<SystemEvent>>,
+    ) -> Self {
+        let mut cache = Self {
+            all_events,
+            scheduler_events,
+            command_events,
+            governance_events,
+            publication_events,
+            retained_event_refs: HashMap::new(),
+        };
+        cache.retained_event_refs = retained_event_refs_from_deque_windows(&cache);
+        cache
+    }
+
     #[must_use]
     pub fn recent_event_count(&self) -> usize {
         self.all_events.len()
@@ -219,13 +238,13 @@ impl SystemEventRecentWindowCache {
         recent_governance_events: Vec<Arc<SystemEvent>>,
         recent_publication_events: Vec<Arc<SystemEvent>>,
     ) -> Self {
-        Self {
-            all_events: recent_events.into(),
-            scheduler_events: recent_scheduler_events.into(),
-            command_events: recent_command_events.into(),
-            governance_events: recent_governance_events.into(),
-            publication_events: recent_publication_events.into(),
-        }
+        Self::with_deques(
+            recent_events.into(),
+            recent_scheduler_events.into(),
+            recent_command_events.into(),
+            recent_governance_events.into(),
+            recent_publication_events.into(),
+        )
     }
 
     #[must_use]
@@ -236,13 +255,13 @@ impl SystemEventRecentWindowCache {
         recent_governance_events: &Arc<[Arc<SystemEvent>]>,
         recent_publication_events: &Arc<[Arc<SystemEvent>]>,
     ) -> Self {
-        Self {
-            all_events: recent_events.iter().cloned().collect(),
-            scheduler_events: recent_scheduler_events.iter().cloned().collect(),
-            command_events: recent_command_events.iter().cloned().collect(),
-            governance_events: recent_governance_events.iter().cloned().collect(),
-            publication_events: recent_publication_events.iter().cloned().collect(),
-        }
+        Self::with_deques(
+            recent_events.iter().cloned().collect(),
+            recent_scheduler_events.iter().cloned().collect(),
+            recent_command_events.iter().cloned().collect(),
+            recent_governance_events.iter().cloned().collect(),
+            recent_publication_events.iter().cloned().collect(),
+        )
     }
 
     fn to_public(&self) -> SystemEventRecentWindows {
@@ -266,6 +285,29 @@ impl SystemEventRecentWindowCache {
             command_events: &self.command_events,
             governance_events: &self.governance_events,
             publication_events: &self.publication_events,
+        }
+    }
+
+    fn retained_event_refs(&self) -> &HashMap<Box<str>, usize> {
+        &self.retained_event_refs
+    }
+
+    fn push_newest_shared(&mut self, event: &Arc<SystemEvent>) {
+        let retained_event_refs = &mut self.retained_event_refs;
+        push_recent_window_event(&mut self.all_events, event, retained_event_refs);
+        match event.category() {
+            SystemEventCategory::Scheduler => {
+                push_recent_window_event(&mut self.scheduler_events, event, retained_event_refs);
+            }
+            SystemEventCategory::Command => {
+                push_recent_window_event(&mut self.command_events, event, retained_event_refs);
+            }
+            SystemEventCategory::Governance => {
+                push_recent_window_event(&mut self.governance_events, event, retained_event_refs);
+            }
+            SystemEventCategory::Publication => {
+                push_recent_window_event(&mut self.publication_events, event, retained_event_refs);
+            }
         }
     }
 
@@ -302,7 +344,6 @@ impl SystemEventQueryIndex {
             command_total: 0,
             governance_total: 0,
             publication_total: 0,
-            retained_event_refs: HashMap::new(),
             recent_windows: SystemEventRecentWindowCache::default(),
         }
     }
@@ -324,7 +365,8 @@ impl SystemEventQueryIndex {
 
     fn push_newest_shared(&mut self, event: &Arc<SystemEvent>) {
         if self
-            .retained_event_refs
+            .recent_windows
+            .retained_event_refs()
             .contains_key(event.event_id.as_ref())
         {
             return;
@@ -344,18 +386,7 @@ impl SystemEventQueryIndex {
                 self.publication_total += 1;
             }
         }
-        push_recent_window_event(
-            &mut self.recent_windows.all_events,
-            event,
-            &mut self.retained_event_refs,
-        );
-        let category_window = match event.category() {
-            SystemEventCategory::Scheduler => &mut self.recent_windows.scheduler_events,
-            SystemEventCategory::Command => &mut self.recent_windows.command_events,
-            SystemEventCategory::Governance => &mut self.recent_windows.governance_events,
-            SystemEventCategory::Publication => &mut self.recent_windows.publication_events,
-        };
-        push_recent_window_event(category_window, event, &mut self.retained_event_refs);
+        self.recent_windows.push_newest_shared(event);
     }
 
     #[must_use]
@@ -433,30 +464,16 @@ impl SystemEventQueryIndex {
 
         let windows = self.recent_windows.refs();
         let base_windows = base.recent_windows.refs();
-        let delta_windows = SystemEventRecentWindowCache {
-            all_events: newer_prefix_since_deque(windows.all_events, base_windows.all_events)?
+        let delta_windows = SystemEventRecentWindowCache::with_deques(
+            newer_prefix_since_deque(windows.all_events, base_windows.all_events)?.into(),
+            newer_prefix_since_deque(windows.scheduler_events, base_windows.scheduler_events)?
                 .into(),
-            scheduler_events: newer_prefix_since_deque(
-                windows.scheduler_events,
-                base_windows.scheduler_events,
-            )?
-            .into(),
-            command_events: newer_prefix_since_deque(
-                windows.command_events,
-                base_windows.command_events,
-            )?
-            .into(),
-            governance_events: newer_prefix_since_deque(
-                windows.governance_events,
-                base_windows.governance_events,
-            )?
-            .into(),
-            publication_events: newer_prefix_since_deque(
-                windows.publication_events,
-                base_windows.publication_events,
-            )?
-            .into(),
-        };
+            newer_prefix_since_deque(windows.command_events, base_windows.command_events)?.into(),
+            newer_prefix_since_deque(windows.governance_events, base_windows.governance_events)?
+                .into(),
+            newer_prefix_since_deque(windows.publication_events, base_windows.publication_events)?
+                .into(),
+        );
         let index = Self::from_recent_window_cache(
             SystemEventWindowTotals {
                 total: totals.total - base_totals.total,
@@ -504,7 +521,6 @@ impl SystemEventQueryIndex {
         totals: SystemEventWindowTotals,
         recent_windows: SystemEventRecentWindowCache,
     ) -> Self {
-        let retained_event_refs = retained_event_refs_from_deque_windows(&recent_windows);
         let mut index = Self::new();
         index.total = totals.total;
         index.scheduler_total = totals.scheduler_total;
@@ -512,7 +528,6 @@ impl SystemEventQueryIndex {
         index.governance_total = totals.governance_total;
         index.publication_total = totals.publication_total;
         index.recent_windows = recent_windows;
-        index.retained_event_refs = retained_event_refs;
         index
     }
 
@@ -643,26 +658,13 @@ fn merge_recent_deque_window_refs(
     left: &RecentEventDequeWindowRefs<'_>,
     right: &RecentEventDequeWindowRefs<'_>,
 ) -> SystemEventRecentWindowCache {
-    SystemEventRecentWindowCache {
-        all_events: merge_recent_arc_event_deques(left.all_events, right.all_events).into(),
-        scheduler_events: merge_recent_arc_event_deques(
-            left.scheduler_events,
-            right.scheduler_events,
-        )
-        .into(),
-        command_events: merge_recent_arc_event_deques(left.command_events, right.command_events)
-            .into(),
-        governance_events: merge_recent_arc_event_deques(
-            left.governance_events,
-            right.governance_events,
-        )
-        .into(),
-        publication_events: merge_recent_arc_event_deques(
-            left.publication_events,
-            right.publication_events,
-        )
-        .into(),
-    }
+    SystemEventRecentWindowCache::with_deques(
+        merge_recent_arc_event_deques(left.all_events, right.all_events).into(),
+        merge_recent_arc_event_deques(left.scheduler_events, right.scheduler_events).into(),
+        merge_recent_arc_event_deques(left.command_events, right.command_events).into(),
+        merge_recent_arc_event_deques(left.governance_events, right.governance_events).into(),
+        merge_recent_arc_event_deques(left.publication_events, right.publication_events).into(),
+    )
 }
 
 fn merge_recent_window_caches(
