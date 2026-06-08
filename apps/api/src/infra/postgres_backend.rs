@@ -5843,16 +5843,16 @@ impl PostgresStore {
             .load_latest_provider_report_head_rows_from_journal()
             .await?;
         if report_rows.is_empty() {
-            if !journal_rows.is_empty() {
-                self.rebuild_provider_report_heads_from_journal().await?;
-                report_rows = self.load_latest_provider_report_head_rows().await?;
-            } else {
+            if journal_rows.is_empty() {
                 self.rebuild_provider_report_heads_from_source().await?;
                 report_rows = self.load_latest_provider_report_head_rows().await?;
                 if !report_rows.is_empty() {
                     self.backfill_provider_report_head_journal_from_heads()
                         .await?;
                 }
+            } else {
+                self.rebuild_provider_report_heads_from_journal().await?;
+                report_rows = self.load_latest_provider_report_head_rows().await?;
             }
         } else if journal_rows.is_empty() {
             self.backfill_provider_report_head_journal_from_heads()
@@ -9126,6 +9126,7 @@ mod tests {
         assert_eq!(findings, second_report.findings);
     }
 
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn postgres_reopen_backfills_authoritative_snapshot_tables_when_they_are_empty() {
         let Some(database_url) = postgres_test_url() else {
