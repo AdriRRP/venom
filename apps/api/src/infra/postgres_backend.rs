@@ -4774,6 +4774,7 @@ impl PostgresStore {
         .map_err(|error| format!("postgres collection snapshot load failed: {error}"))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn load_collection_snapshot_rows_from_source(
         &self,
         collection_keys: Option<&[Box<str>]>,
