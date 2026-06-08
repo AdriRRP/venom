@@ -3463,7 +3463,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn normalize_authoritative_repair_state(&mut self) -> Result<(), String> {
+    async fn normalize_authoritative_repair_state(&self) -> Result<(), String> {
         self.normalize_provider_report_head_repair_state().await?;
         self.normalize_collection_snapshot_repair_state().await?;
         Ok(())
