@@ -525,6 +525,10 @@ Completed:
      Introduce canonical durable repair journals for provider-report heads and
      collection snapshots so cold recovery stops depending on source-wide
      fallback shapes.
+107. `W237-canonical-tail-closure`
+     Move residual provider-report and collection compatibility repair into one
+     canonical Postgres bootstrap path, and tighten the last generic/local
+     `system events` fallback edges around cache-native contracts.
 
 ## Exit condition
 

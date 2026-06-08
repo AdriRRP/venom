@@ -36,6 +36,7 @@ use venom_domain::inventory::{
     ComponentRegistration, ComponentTagRegistration, ContextProfileRegistration,
     ManagedComponentTag, ManagedContextProfile,
 };
+use venom_domain::operations::SystemEventWindowTotals;
 use venom_domain::operations::system_event_trace::SystemEventQueryIndex;
 use venom_domain::operations::{SystemEvent, SystemEventCategory, SystemEventsQuery};
 use venom_domain::scanning::{
@@ -572,6 +573,24 @@ impl LocalStore {
                     return merged;
                 }
                 let runtime_windows = runtime.recent_window_cache();
+                if runtime_windows == snapshot.runtime_windows {
+                    let merged = Arc::new(SystemEventQueryIndex::from_recent_window_cache(
+                        SystemEventWindowTotals::merged(
+                            &state.window_totals(),
+                            &runtime.window_totals(),
+                        ),
+                        snapshot.merged_windows.clone(),
+                    ));
+                    *cache = Some(MergedSystemEventSnapshot {
+                        state,
+                        runtime,
+                        state_windows: snapshot.state_windows.clone(),
+                        runtime_windows,
+                        merged_windows: snapshot.merged_windows.clone(),
+                        merged: Arc::clone(&merged),
+                    });
+                    return merged;
+                }
                 let (merged_index, merged_windows) =
                     SystemEventQueryIndex::merged_from_window_caches(
                         state.window_totals(),
@@ -617,6 +636,24 @@ impl LocalStore {
                     return merged;
                 }
                 let state_windows = state.recent_window_cache();
+                if state_windows == snapshot.state_windows {
+                    let merged = Arc::new(SystemEventQueryIndex::from_recent_window_cache(
+                        SystemEventWindowTotals::merged(
+                            &state.window_totals(),
+                            &runtime.window_totals(),
+                        ),
+                        snapshot.merged_windows.clone(),
+                    ));
+                    *cache = Some(MergedSystemEventSnapshot {
+                        state,
+                        runtime,
+                        state_windows,
+                        runtime_windows: snapshot.runtime_windows.clone(),
+                        merged_windows: snapshot.merged_windows.clone(),
+                        merged: Arc::clone(&merged),
+                    });
+                    return merged;
+                }
                 let (merged_index, merged_windows) =
                     SystemEventQueryIndex::merged_from_window_caches(
                         state.window_totals(),
@@ -654,6 +691,24 @@ impl LocalStore {
             }
             _ => (state.recent_window_cache(), runtime.recent_window_cache()),
         };
+        if let Some(snapshot) = cache.as_ref()
+            && state_windows == snapshot.state_windows
+            && runtime_windows == snapshot.runtime_windows
+        {
+            let merged = Arc::new(SystemEventQueryIndex::from_recent_window_cache(
+                SystemEventWindowTotals::merged(&state.window_totals(), &runtime.window_totals()),
+                snapshot.merged_windows.clone(),
+            ));
+            *cache = Some(MergedSystemEventSnapshot {
+                state,
+                runtime,
+                state_windows,
+                runtime_windows,
+                merged_windows: snapshot.merged_windows.clone(),
+                merged: Arc::clone(&merged),
+            });
+            return merged;
+        }
         let (merged_index, merged_windows) = SystemEventQueryIndex::merged_from_window_caches(
             state.window_totals(),
             runtime.window_totals(),

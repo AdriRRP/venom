@@ -385,6 +385,7 @@ impl PostgresStore {
             command_status_source_cursor: RowSourceCursor::default(),
         };
         backend.init_schema().await?;
+        backend.normalize_authoritative_repair_state().await?;
         backend.rebuild().await?;
         Ok(backend)
     }
@@ -3462,6 +3463,71 @@ impl PostgresStore {
         Ok(())
     }
 
+    async fn normalize_authoritative_repair_state(&mut self) -> Result<(), String> {
+        self.normalize_provider_report_head_repair_state().await?;
+        self.normalize_collection_snapshot_repair_state().await?;
+        Ok(())
+    }
+
+    async fn normalize_provider_report_head_repair_state(&self) -> Result<(), String> {
+        let report_rows = self.load_latest_provider_report_head_rows().await?;
+        let journal_rows = self
+            .load_latest_provider_report_head_rows_from_journal()
+            .await?;
+        if report_rows.is_empty() {
+            if journal_rows.is_empty() {
+                self.rebuild_provider_report_heads_from_source().await?;
+                if !self
+                    .load_latest_provider_report_head_rows()
+                    .await?
+                    .is_empty()
+                {
+                    self.backfill_provider_report_head_journal_from_heads()
+                        .await?;
+                }
+            } else {
+                self.rebuild_provider_report_heads_from_journal().await?;
+            }
+        } else if journal_rows.is_empty() {
+            self.backfill_provider_report_head_journal_from_heads()
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn normalize_collection_snapshot_repair_state(&self) -> Result<(), String> {
+        let snapshots = self.load_collection_snapshot_rows(None).await?;
+        let journal_rows = self
+            .load_collection_snapshot_rows_from_journal(None)
+            .await?;
+        if snapshots.is_empty() {
+            if journal_rows.is_empty() {
+                let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
+                if source_snapshots.is_empty() {
+                    return Ok(());
+                }
+                let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
+                repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
+                repair_backend
+                    .rebuild_collection_snapshot_heads_from_inventory(None)
+                    .await?;
+                repair_backend
+                    .backfill_collection_snapshot_journal_from_heads(None)
+                    .await?;
+            } else {
+                let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
+                repair_backend.apply_collection_snapshot_rows(journal_rows)?;
+                repair_backend
+                    .rebuild_collection_snapshot_heads_from_inventory(None)
+                    .await?;
+            }
+        } else if journal_rows.is_empty() {
+            self.backfill_collection_snapshot_journal_from_heads(None)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn rebuild_provider_report_heads_from_source(&self) -> Result<(), String> {
         sqlx::query(&format!("DELETE FROM {}", self.names.provider_report_heads))
             .execute(&self.pool)
@@ -4915,34 +4981,18 @@ impl PostgresStore {
         let journal_rows = self
             .load_collection_snapshot_rows_from_journal(None)
             .await?;
-        let has_journal_rows = !journal_rows.is_empty();
-        let rebuilt_from_journal = if snapshots.is_empty() && has_journal_rows {
+        let rebuilt_from_journal = if snapshots.is_empty() && !journal_rows.is_empty() {
             snapshots = journal_rows.clone();
             true
         } else {
             false
         };
-        let rebuilt_from_source = if snapshots.is_empty() {
-            let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
-            if source_snapshots.is_empty() {
-                false
-            } else {
-                snapshots = source_snapshots;
-                true
-            }
-        } else {
-            false
-        };
         self.apply_collection_snapshot_rows(snapshots)?;
-        if !has_journal_rows && !self.load_collection_snapshot_rows(None).await?.is_empty() {
-            self.backfill_collection_snapshot_journal_from_heads(None)
-                .await?;
-        }
-        if rebuilt_from_journal || rebuilt_from_source {
+        if rebuilt_from_journal {
             self.rebuild_collection_snapshot_heads_from_inventory(None)
                 .await?;
         }
-        if rebuilt_from_source {
+        if journal_rows.is_empty() && !self.load_collection_snapshot_rows(None).await?.is_empty() {
             self.backfill_collection_snapshot_journal_from_heads(None)
                 .await?;
         }
@@ -4968,41 +5018,23 @@ impl PostgresStore {
         let journal_rows = self
             .load_collection_snapshot_rows_from_journal(Some(collection_keys))
             .await?;
-        let has_journal_rows = !journal_rows.is_empty();
-        let rebuilt_from_journal = if snapshots.is_empty() && has_journal_rows {
+        let rebuilt_from_journal = if snapshots.is_empty() && !journal_rows.is_empty() {
             snapshots = journal_rows.clone();
             true
         } else {
             false
         };
-        let rebuilt_from_source = if snapshots.is_empty() {
-            let source_snapshots = self
-                .load_collection_snapshot_rows_from_source(Some(collection_keys))
-                .await?;
-            if source_snapshots.is_empty() {
-                false
-            } else {
-                snapshots = source_snapshots;
-                true
-            }
-        } else {
-            false
-        };
         self.apply_collection_snapshot_rows(snapshots)?;
-        if !has_journal_rows
+        if rebuilt_from_journal {
+            self.rebuild_collection_snapshot_heads_from_inventory(Some(collection_keys))
+                .await?;
+        }
+        if journal_rows.is_empty()
             && !self
                 .load_collection_snapshot_rows(Some(collection_keys))
                 .await?
                 .is_empty()
         {
-            self.backfill_collection_snapshot_journal_from_heads(Some(collection_keys))
-                .await?;
-        }
-        if rebuilt_from_journal || rebuilt_from_source {
-            self.rebuild_collection_snapshot_heads_from_inventory(Some(collection_keys))
-                .await?;
-        }
-        if rebuilt_from_source {
             self.backfill_collection_snapshot_journal_from_heads(Some(collection_keys))
                 .await?;
         }
@@ -5843,14 +5875,7 @@ impl PostgresStore {
             .load_latest_provider_report_head_rows_from_journal()
             .await?;
         if report_rows.is_empty() {
-            if journal_rows.is_empty() {
-                self.rebuild_provider_report_heads_from_source().await?;
-                report_rows = self.load_latest_provider_report_head_rows().await?;
-                if !report_rows.is_empty() {
-                    self.backfill_provider_report_head_journal_from_heads()
-                        .await?;
-                }
-            } else {
+            if !journal_rows.is_empty() {
                 self.rebuild_provider_report_heads_from_journal().await?;
                 report_rows = self.load_latest_provider_report_head_rows().await?;
             }
@@ -5858,11 +5883,6 @@ impl PostgresStore {
             self.backfill_provider_report_head_journal_from_heads()
                 .await?;
         }
-        let rebuilt_heads_from_source = if report_rows.is_empty() {
-            false
-        } else {
-            journal_rows.is_empty()
-        };
         let mut findings_by_artifact = self.load_latest_active_findings_by_artifact().await?;
         let rebuilt_from_heads = if findings_by_artifact.is_empty() && !report_rows.is_empty() {
             findings_by_artifact = active_findings_by_artifact_from_report_heads(&report_rows)?;
@@ -5870,7 +5890,7 @@ impl PostgresStore {
         } else {
             false
         };
-        if rebuilt_heads_from_source || rebuilt_from_heads {
+        if rebuilt_from_heads {
             self.rebuild_provider_report_active_findings_from_heads()
                 .await?;
         }
@@ -9195,11 +9215,25 @@ mod tests {
         .expect("provider report heads should clear");
         sqlx::query(&format!(
             "DELETE FROM {}",
+            backend.names.provider_report_head_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report head journal should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
             backend.names.collection_snapshot_heads
         ))
         .execute(&backend.pool)
         .await
         .expect("collection snapshot heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot journal should clear");
 
         let reopened = PostgresStore::open(&database_url, &schema)
             .await
