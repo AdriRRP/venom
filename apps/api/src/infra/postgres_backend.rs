@@ -214,7 +214,7 @@ type CommandRecordMap = BTreeMap<Box<str>, ScanCommandRecord>;
 type CommandOrder = Vec<Box<str>>;
 type PendingIntegrationEventList = Vec<PendingIntegrationEvent>;
 type ActiveFindingsByArtifact = BTreeMap<(Box<str>, ArtifactKind, Box<str>), Vec<ReportedFinding>>;
-type ProviderReportSnapshotRow = (
+type ProviderReportHeadRow = (
     i64,
     String,
     String,
@@ -223,6 +223,7 @@ type ProviderReportSnapshotRow = (
     i64,
     String,
     Option<String>,
+    Json<Vec<ReportedFinding>>,
 );
 type CollectionSnapshotRow = (
     String,
@@ -3419,17 +3420,9 @@ impl PostgresStore {
         self.create_scan_commands_table().await?;
         self.create_integration_outbox_table().await?;
         self.create_system_events_table().await?;
-        self.backfill_authoritative_snapshot_tables().await?;
+        self.rebuild_provider_report_heads_from_source().await?;
         self.install_change_watermark_triggers().await?;
 
-        Ok(())
-    }
-
-    async fn backfill_authoritative_snapshot_tables(&self) -> Result<(), String> {
-        self.rebuild_provider_report_heads_from_source().await?;
-        self.rebuild_provider_report_active_findings_from_journal()
-            .await?;
-        self.rebuild_collection_snapshot_heads_from_source().await?;
         Ok(())
     }
 
@@ -3458,7 +3451,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn rebuild_provider_report_active_findings_from_journal(&self) -> Result<(), String> {
+    async fn rebuild_provider_report_active_findings_from_heads(&self) -> Result<(), String> {
         sqlx::query(&format!(
             "DELETE FROM {}",
             self.names.provider_report_active_findings
@@ -3472,18 +3465,18 @@ impl PostgresStore {
             concat!(
                 "INSERT INTO {} ",
                 "(component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id) ",
-                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id ",
-                "FROM (",
-                "SELECT component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl, severity, provider_report_id, active, ",
-                "ROW_NUMBER() OVER (",
-                "PARTITION BY component_key, artifact_kind, artifact_identity, vulnerability_id, package_name, package_version, package_purl ",
-                "ORDER BY id DESC",
-                ") AS row_rank ",
-                "FROM {}",
-                ") latest WHERE row_rank = 1 AND active = TRUE"
+                "SELECT heads.component_key, heads.artifact_kind, heads.artifact_identity, ",
+                "finding.vulnerability_id, finding.package->>'name', finding.package->>'version', ",
+                "COALESCE(finding.package->>'purl', ''), finding.severity, heads.provider_report_id ",
+                "FROM {} heads ",
+                "CROSS JOIN LATERAL jsonb_to_recordset(heads.findings) AS finding(",
+                "vulnerability_id TEXT, ",
+                "package JSONB, ",
+                "severity TEXT",
+                ")"
             ),
             self.names.provider_report_active_findings,
-            self.names.provider_report_finding_journal
+            self.names.provider_report_heads
         ))
         .execute(&self.pool)
         .await
@@ -3493,38 +3486,89 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn rebuild_collection_snapshot_heads_from_source(&self) -> Result<(), String> {
-        sqlx::query(&format!(
-            "DELETE FROM {}",
-            self.names.collection_snapshot_heads
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection snapshot head reset failed: {error}"))?;
-        sqlx::query(&format!(
-            concat!(
-                "WITH membership_lists AS (",
-                "SELECT collection_key, ",
-                "COALESCE(jsonb_agg(component_key ORDER BY component_key), '[]'::jsonb) AS membership_component_keys ",
-                "FROM {} GROUP BY collection_key",
-                ") ",
-                "INSERT INTO {} ",
-                "(collection_key, name, context_profile_key, source_kind, mode, source_component_keys, membership_component_keys) ",
-                "SELECT c.collection_key, c.name, c.context_profile_key, ",
-                "s.source_kind, s.mode, COALESCE(s.component_keys, '[]'::jsonb), ",
-                "COALESCE(m.membership_component_keys, '[]'::jsonb) ",
-                "FROM {} c ",
-                "LEFT JOIN {} s ON s.collection_key = c.collection_key ",
-                "LEFT JOIN membership_lists m ON m.collection_key = c.collection_key"
-            ),
-            self.names.collection_memberships,
-            self.names.collection_snapshot_heads,
-            self.names.collections,
-            self.names.collection_sources
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("postgres collection snapshot head backfill failed: {error}"))?;
+    async fn rebuild_collection_snapshot_heads_from_inventory(
+        &self,
+        collection_keys: Option<&[Box<str>]>,
+    ) -> Result<(), String> {
+        if let Some(keys) = collection_keys {
+            if keys.is_empty() {
+                return Ok(());
+            }
+            let key_values = keys
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>();
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE collection_key = ANY($1)",
+                self.names.collection_snapshot_heads
+            ))
+            .bind(&key_values)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                format!("postgres collection snapshot head partial reset failed: {error}")
+            })?;
+        } else {
+            sqlx::query(&format!(
+                "DELETE FROM {}",
+                self.names.collection_snapshot_heads
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| format!("postgres collection snapshot head reset failed: {error}"))?;
+        }
+        let inventory_collections = self.ingestion_ref().inventory().collections();
+        let target_keys = collection_keys.map(|keys| {
+            keys.iter()
+                .map(std::string::ToString::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        for collection in inventory_collections.into_iter().filter(|collection| {
+            target_keys
+                .as_ref()
+                .is_none_or(|keys| keys.contains(collection.collection_key.as_ref()))
+        }) {
+            let (source_kind, mode, source_component_keys) =
+                collection
+                    .source
+                    .as_ref()
+                    .map_or((None, None, Vec::new()), |source| {
+                        (
+                            Some(collection_source_kind_name(source)),
+                            Some(collection_source_mode_name(source.mode())),
+                            source
+                                .component_keys()
+                                .iter()
+                                .map(std::string::ToString::to_string)
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+            let membership_component_keys = collection
+                .component_keys
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>();
+            sqlx::query(&format!(
+                concat!(
+                    "INSERT INTO {} ",
+                    "(collection_key, name, context_profile_key, source_kind, mode, source_component_keys, membership_component_keys) ",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                ),
+                self.names.collection_snapshot_heads
+            ))
+            .bind(collection.collection_key.as_ref())
+            .bind(collection.name.as_ref())
+            .bind(collection.context_profile_key.as_deref())
+            .bind(source_kind)
+            .bind(mode)
+            .bind(Json(source_component_keys))
+            .bind(Json(membership_component_keys))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                format!("postgres collection snapshot head rebuild insert failed: {error}")
+            })?;
+        }
         Ok(())
     }
 
@@ -4646,8 +4690,23 @@ impl PostgresStore {
     }
 
     async fn load_collection_snapshots(&mut self) -> Result<(), String> {
-        let snapshots = self.load_collection_snapshot_rows(None).await?;
+        let mut snapshots = self.load_collection_snapshot_rows(None).await?;
+        let rebuilt_from_source = if snapshots.is_empty() {
+            let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
+            if source_snapshots.is_empty() {
+                false
+            } else {
+                snapshots = source_snapshots;
+                true
+            }
+        } else {
+            false
+        };
         self.apply_collection_snapshot_rows(snapshots)?;
+        if rebuilt_from_source {
+            self.rebuild_collection_snapshot_heads_from_inventory(None)
+                .await?;
+        }
         self.inventory_definition_source_watermarks
             .collection_definitions = self.load_collection_definition_source_watermark().await?;
         self.inventory_definition_source_watermarks
@@ -4664,10 +4723,28 @@ impl PostgresStore {
         if collection_keys.is_empty() {
             return Ok(());
         }
-        let snapshots = self
+        let mut snapshots = self
             .load_collection_snapshot_rows(Some(collection_keys))
             .await?;
-        self.apply_collection_snapshot_rows(snapshots)
+        let rebuilt_from_source = if snapshots.is_empty() {
+            let source_snapshots = self
+                .load_collection_snapshot_rows_from_source(Some(collection_keys))
+                .await?;
+            if source_snapshots.is_empty() {
+                false
+            } else {
+                snapshots = source_snapshots;
+                true
+            }
+        } else {
+            false
+        };
+        self.apply_collection_snapshot_rows(snapshots)?;
+        if rebuilt_from_source {
+            self.rebuild_collection_snapshot_heads_from_inventory(Some(collection_keys))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn load_collection_snapshot_rows(
@@ -4695,6 +4772,116 @@ impl PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("postgres collection snapshot load failed: {error}"))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn load_collection_snapshot_rows_from_source(
+        &self,
+        collection_keys: Option<&[Box<str>]>,
+    ) -> Result<Vec<CollectionSnapshotRow>, String> {
+        let filtered = collection_keys.is_some();
+        let collection_keys = collection_keys
+            .map(|keys| {
+                keys.iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let definitions = sqlx::query_as::<_, (String, String, Option<String>)>(&format!(
+            concat!(
+                "SELECT collection_key, name, context_profile_key ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ORDER BY collection_key"
+            ),
+            self.names.collections
+        ))
+        .bind(filtered)
+        .bind(&collection_keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection source definition load failed: {error}"))?;
+        let sources = sqlx::query_as::<_, (String, String, String, Json<Vec<String>>)>(&format!(
+            concat!(
+                "SELECT collection_key, source_kind, mode, component_keys ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ORDER BY collection_key"
+            ),
+            self.names.collection_sources
+        ))
+        .bind(filtered)
+        .bind(&collection_keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection source source load failed: {error}"))?;
+        let memberships = sqlx::query_as::<_, (String, String)>(&format!(
+            concat!(
+                "SELECT collection_key, component_key ",
+                "FROM {} WHERE NOT $1 OR collection_key = ANY($2) ",
+                "ORDER BY collection_key, component_key"
+            ),
+            self.names.collection_memberships
+        ))
+        .bind(filtered)
+        .bind(&collection_keys)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("postgres collection source membership load failed: {error}"))?;
+
+        let mut rows = definitions
+            .into_iter()
+            .map(|(collection_key, name, context_profile_key)| {
+                (
+                    collection_key,
+                    (
+                        name,
+                        context_profile_key,
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (collection_key, source_kind, mode, Json(source_component_keys)) in sources {
+            if let Some((_, _, stored_source_kind, stored_mode, stored_keys, _)) =
+                rows.get_mut(&collection_key)
+            {
+                *stored_source_kind = Some(source_kind);
+                *stored_mode = Some(mode);
+                *stored_keys = source_component_keys;
+            }
+        }
+        for (collection_key, component_key) in memberships {
+            if let Some((_, _, _, _, _, member_keys)) = rows.get_mut(&collection_key) {
+                member_keys.push(component_key);
+            }
+        }
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    collection_key,
+                    (
+                        name,
+                        context_profile_key,
+                        source_kind,
+                        mode,
+                        source_component_keys,
+                        membership_component_keys,
+                    ),
+                )| {
+                    (
+                        collection_key,
+                        name,
+                        context_profile_key,
+                        source_kind,
+                        mode,
+                        Json(source_component_keys),
+                        Json(membership_component_keys),
+                    )
+                },
+            )
+            .collect())
     }
 
     fn apply_collection_snapshot_rows(
@@ -5459,8 +5646,18 @@ impl PostgresStore {
     }
 
     async fn load_provider_report_snapshots_from_finding_journal(&mut self) -> Result<(), String> {
-        let report_rows = self.load_latest_provider_report_snapshot_rows().await?;
+        let report_rows = self.load_latest_provider_report_head_rows().await?;
         let mut findings_by_artifact = self.load_latest_active_findings_by_artifact().await?;
+        let rebuilt_from_heads = if findings_by_artifact.is_empty() && !report_rows.is_empty() {
+            findings_by_artifact = active_findings_by_artifact_from_report_heads(&report_rows)?;
+            true
+        } else {
+            false
+        };
+        if rebuilt_from_heads {
+            self.rebuild_provider_report_active_findings_from_heads()
+                .await?;
+        }
 
         for row in report_rows {
             self.apply_provider_report_snapshot_row(row, &mut findings_by_artifact)?;
@@ -5470,13 +5667,13 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn load_latest_provider_report_snapshot_rows(
+    async fn load_latest_provider_report_head_rows(
         &self,
-    ) -> Result<Vec<ProviderReportSnapshotRow>, String> {
-        sqlx::query_as::<_, ProviderReportSnapshotRow>(&format!(
+    ) -> Result<Vec<ProviderReportHeadRow>, String> {
+        sqlx::query_as::<_, ProviderReportHeadRow>(&format!(
             concat!(
                 "SELECT provider_report_id, provider_key, component_key, artifact_kind, artifact_identity, ",
-                "observed_at_micros, freshness, knowledge_revision ",
+                "observed_at_micros, freshness, knowledge_revision, findings ",
                 "FROM {} ORDER BY provider_report_id"
             ),
             self.names.provider_report_heads
@@ -5548,7 +5745,7 @@ impl PostgresStore {
 
     fn apply_provider_report_snapshot_row(
         &mut self,
-        row: ProviderReportSnapshotRow,
+        row: ProviderReportHeadRow,
         findings_by_artifact: &mut ActiveFindingsByArtifact,
     ) -> Result<(), String> {
         let (
@@ -5560,6 +5757,7 @@ impl PostgresStore {
             observed_at_micros,
             freshness,
             knowledge_revision,
+            _findings,
         ) = row;
         let artifact_kind = parse_artifact_kind(&artifact_kind)?;
         let artifact_identity = artifact_identity.into_boxed_str();
@@ -7690,6 +7888,35 @@ fn provider_report_finding_deltas(
     }
 
     deltas
+}
+
+fn active_findings_by_artifact_from_report_heads(
+    report_rows: &[ProviderReportHeadRow],
+) -> Result<ActiveFindingsByArtifact, String> {
+    let mut findings_by_artifact = ActiveFindingsByArtifact::new();
+    for (
+        _provider_report_id,
+        _provider_key,
+        component_key,
+        artifact_kind,
+        artifact_identity,
+        _observed_at_micros,
+        _freshness,
+        _knowledge_revision,
+        Json(findings),
+    ) in report_rows
+    {
+        let artifact_kind = parse_artifact_kind(artifact_kind)?;
+        findings_by_artifact.insert(
+            (
+                component_key.clone().into_boxed_str(),
+                artifact_kind,
+                artifact_identity.clone().into_boxed_str(),
+            ),
+            findings.clone(),
+        );
+    }
+    Ok(findings_by_artifact)
 }
 
 fn canonical_provider_finding_snapshots(

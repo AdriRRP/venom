@@ -513,6 +513,10 @@ Completed:
      authoritative derived state for active findings and collections, and
      tighten local `system events` fallback merges around already-fetched
      cache-native windows.
+104. `W234-canonical-cold-path-and-event-cache-closure`
+     Remove parallel cold-path rebuild logic for active findings and
+     collections, and consolidate retained `system events` ref-state into the
+     canonical recent-window cache shape.
 
 ## Exit condition
 
