@@ -521,6 +521,10 @@ Completed:
      Remove the last eager cold rebuilds, collapse collections cold fallback
      onto one compact canonical loader, and tighten `system events` query edges
      around cache-native contracts.
+106. `W236-canonical-repair-journal-closure`
+     Introduce canonical durable repair journals for provider-report heads and
+     collection snapshots so cold recovery stops depending on source-wide
+     fallback shapes.
 
 ## Exit condition
 
