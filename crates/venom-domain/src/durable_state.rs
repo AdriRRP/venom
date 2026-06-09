@@ -32,9 +32,6 @@ use std::time::{Duration, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-#[cfg(test)]
-use crate::operations::system_event_trace::SystemEventsPage;
-
 /// Minimal durable state boundary for the current domain slice.
 ///
 /// The source of truth is a local append-only JSON-lines history. In-memory
@@ -147,15 +144,6 @@ impl DurableState {
     #[must_use]
     pub fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         Arc::clone(&self.system_event_index_snapshot_cache)
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub fn query_system_events(
-        &self,
-        query: &crate::operations::system_event_trace::SystemEventsQuery,
-    ) -> SystemEventsPage {
-        self.system_event_index_snapshot_cache.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.

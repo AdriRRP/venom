@@ -400,6 +400,7 @@ impl PostgresStore {
     ///
     /// Returns an error string when Postgres cannot be initialized or the
     /// legacy seeding cannot be completed.
+    #[cfg(feature = "legacy-repair-bootstrap")]
     pub async fn bootstrap_legacy_repair_state_with_pool(
         pool: PgPool,
         schema: &str,
@@ -440,6 +441,7 @@ impl PostgresStore {
     ///
     /// Returns an error string when Postgres cannot be reached, initialized, or
     /// repaired.
+    #[cfg(feature = "legacy-repair-bootstrap")]
     pub async fn bootstrap_legacy_repair_state(
         database_url: &str,
         schema: &str,
@@ -3569,22 +3571,11 @@ impl PostgresStore {
             }
             return Ok(());
         }
-        if source_has_rows && !allow_legacy_source_bootstrap {
-            return Err(format!(
-                "postgres provider report repair state requires explicit legacy bootstrap via `{}`",
-                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
-            ));
-        }
         if source_has_rows {
-            self.rebuild_provider_report_heads_from_source().await?;
-            if !self
-                .load_latest_provider_report_head_rows()
-                .await?
-                .is_empty()
-            {
-                self.backfill_provider_report_head_journal_from_heads()
-                    .await?;
-            }
+            self.seed_provider_report_head_repair_state_from_legacy_source(
+                allow_legacy_source_bootstrap,
+            )
+            .await?;
         }
         self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS)
             .await?;
@@ -3619,16 +3610,64 @@ impl PostgresStore {
             }
             return Ok(());
         }
-        if source_has_rows && !allow_legacy_source_bootstrap {
-            return Err(format!(
-                "postgres collection snapshot repair state requires explicit legacy bootstrap via `{}`",
-                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
-            ));
-        }
         if !source_has_rows {
             self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
                 .await?;
             return Ok(());
+        }
+        self.seed_collection_snapshot_repair_state_from_legacy_source(
+            allow_legacy_source_bootstrap,
+        )
+        .await?;
+        self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "legacy-repair-bootstrap")]
+    async fn seed_provider_report_head_repair_state_from_legacy_source(
+        &self,
+        allow_legacy_source_bootstrap: bool,
+    ) -> Result<(), String> {
+        if !allow_legacy_source_bootstrap {
+            return Err(format!(
+                "postgres provider report repair state requires explicit legacy bootstrap via `{}`",
+                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
+            ));
+        }
+        self.rebuild_provider_report_heads_from_source().await?;
+        if !self
+            .load_latest_provider_report_head_rows()
+            .await?
+            .is_empty()
+        {
+            self.backfill_provider_report_head_journal_from_heads()
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "legacy-repair-bootstrap"))]
+    async fn seed_provider_report_head_repair_state_from_legacy_source(
+        &self,
+        _allow_legacy_source_bootstrap: bool,
+    ) -> Result<(), String> {
+        Err(format!(
+            "postgres provider report repair state requires explicit legacy bootstrap via `{}`",
+            crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
+        ))
+    }
+
+    #[cfg(feature = "legacy-repair-bootstrap")]
+    async fn seed_collection_snapshot_repair_state_from_legacy_source(
+        &self,
+        allow_legacy_source_bootstrap: bool,
+    ) -> Result<(), String> {
+        if !allow_legacy_source_bootstrap {
+            return Err(format!(
+                "postgres collection snapshot repair state requires explicit legacy bootstrap via `{}`",
+                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
+            ));
         }
         let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
         if !source_snapshots.is_empty() {
@@ -3641,9 +3680,18 @@ impl PostgresStore {
                 .backfill_collection_snapshot_journal_from_heads(None)
                 .await?;
         }
-        self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
-            .await?;
         Ok(())
+    }
+
+    #[cfg(not(feature = "legacy-repair-bootstrap"))]
+    async fn seed_collection_snapshot_repair_state_from_legacy_source(
+        &self,
+        _allow_legacy_source_bootstrap: bool,
+    ) -> Result<(), String> {
+        Err(format!(
+            "postgres collection snapshot repair state requires explicit legacy bootstrap via `{}`",
+            crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
+        ))
     }
 
     async fn repair_bootstrap_completed(&self, repair_key: &str) -> Result<bool, String> {
@@ -3728,6 +3776,7 @@ impl PostgresStore {
         Ok(())
     }
 
+    #[cfg(feature = "legacy-repair-bootstrap")]
     async fn rebuild_provider_report_heads_from_source(&self) -> Result<(), String> {
         sqlx::query(&format!("DELETE FROM {}", self.names.provider_report_heads))
             .execute(&self.pool)
@@ -5285,6 +5334,7 @@ impl PostgresStore {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[cfg(feature = "legacy-repair-bootstrap")]
     async fn load_collection_snapshot_rows_from_source(
         &self,
         collection_keys: Option<&[Box<str>]>,
@@ -9365,6 +9415,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[cfg(feature = "legacy-repair-bootstrap")]
     #[tokio::test]
     async fn postgres_reopen_allows_explicit_legacy_bootstrap_when_authoritative_snapshot_tables_are_empty()
      {

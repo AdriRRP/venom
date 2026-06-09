@@ -543,6 +543,10 @@ Completed:
 112. `W242-runtime-edge-contract-closure`
      Move the legacy repair maintenance flow out of the serve binary and retire
      the generic owned `SystemEventsPage` contract from non-test runtime code.
+113. `W243-maintenance-build-opt-in-and-event-query-closure`
+     Make legacy repair bootstrap a build-time maintenance capability instead
+     of part of the default runtime build, and remove the last generic owned
+     `system events` query surface in favor of cache-native mapped helpers.
 
 ## Exit condition
 

@@ -5,6 +5,15 @@ version.workspace = true
 publish.workspace = true
 default-run = "venom-api"
 
+[features]
+default = []
+legacy-repair-bootstrap = []
+
+[[bin]]
+name = "bootstrap_legacy_repair_state"
+path = "src/bin/bootstrap_legacy_repair_state.rs"
+required-features = ["legacy-repair-bootstrap"]
+
 [dependencies]
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

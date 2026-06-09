@@ -15,9 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
-use crate::operations::system_event_trace::SystemEventsPage;
-
 /// Minimal durable queue for canonical scan requests.
 ///
 /// The runtime is intentionally single-threaded and explicit for now: queue one
@@ -206,15 +203,6 @@ impl ScanCommandQueue {
             .cloned()
             .collect::<Vec<_>>();
         (!command_ids.is_empty()).then_some(command_ids)
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub fn query_system_events(
-        &self,
-        query: &crate::operations::system_event_trace::SystemEventsQuery,
-    ) -> SystemEventsPage {
-        self.system_event_index_snapshot_cache.query(query)
     }
 
     /// Publish a bounded batch of pending integration events.
