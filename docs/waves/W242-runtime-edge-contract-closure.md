@@ -1,6 +1,6 @@
 # W242-runtime-edge-contract-closure
 
-Status: `completed`
+Status: `done`
 
 ## Goal
 
