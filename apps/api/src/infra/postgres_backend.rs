@@ -357,12 +357,41 @@ impl PostgresStore {
         Self::open_with_pool(pool, schema).await
     }
 
+    /// Open or create the Postgres durable backend and rebuild in-memory state
+    /// with explicit legacy source bootstrap enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be reached, initialized, or replayed.
+    #[cfg(test)]
+    pub async fn open_with_legacy_source_bootstrap(
+        database_url: &str,
+        schema: &str,
+    ) -> Result<Self, String> {
+        let pool = Self::connect_pool(database_url).await?;
+        Self::open_with_pool_and_legacy_bootstrap(pool, schema, true).await
+    }
+
     /// Open or create the Postgres durable backend over one shared pool.
     ///
     /// # Errors
     ///
     /// Returns an error string when Postgres cannot be initialized or replayed.
     pub async fn open_with_pool(pool: PgPool, schema: &str) -> Result<Self, String> {
+        Self::open_with_pool_and_legacy_bootstrap(pool, schema, false).await
+    }
+
+    /// Open or create the Postgres durable backend over one shared pool with
+    /// an explicit legacy source bootstrap choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be initialized or replayed.
+    pub async fn open_with_pool_and_legacy_bootstrap(
+        pool: PgPool,
+        schema: &str,
+        allow_legacy_source_bootstrap: bool,
+    ) -> Result<Self, String> {
         let names = TableNames::new(schema)?;
         let mut backend = Self {
             pool,
@@ -387,7 +416,9 @@ impl PostgresStore {
             command_status_source_cursor: RowSourceCursor::default(),
         };
         backend.init_schema().await?;
-        backend.seed_legacy_repair_state_if_needed().await?;
+        backend
+            .seed_legacy_repair_state_if_needed(allow_legacy_source_bootstrap)
+            .await?;
         backend.normalize_authoritative_repair_state().await?;
         backend.rebuild().await?;
         Ok(backend)
@@ -3473,16 +3504,24 @@ impl PostgresStore {
         Ok(())
     }
 
-    async fn seed_legacy_repair_state_if_needed(&self) -> Result<(), String> {
-        self.seed_provider_report_head_repair_state_from_legacy_source_if_needed()
-            .await?;
-        self.seed_collection_snapshot_repair_state_from_legacy_source_if_needed()
-            .await?;
+    async fn seed_legacy_repair_state_if_needed(
+        &self,
+        allow_legacy_source_bootstrap: bool,
+    ) -> Result<(), String> {
+        self.seed_provider_report_head_repair_state_from_legacy_source_if_needed(
+            allow_legacy_source_bootstrap,
+        )
+        .await?;
+        self.seed_collection_snapshot_repair_state_from_legacy_source_if_needed(
+            allow_legacy_source_bootstrap,
+        )
+        .await?;
         Ok(())
     }
 
     async fn seed_provider_report_head_repair_state_from_legacy_source_if_needed(
         &self,
+        allow_legacy_source_bootstrap: bool,
     ) -> Result<(), String> {
         let completed = self
             .repair_bootstrap_completed(REPAIR_BOOTSTRAP_PROVIDER_REPORT_HEADS)
@@ -3508,6 +3547,12 @@ impl PostgresStore {
             }
             return Ok(());
         }
+        if source_has_rows && !allow_legacy_source_bootstrap {
+            return Err(format!(
+                "postgres provider report repair state requires explicit legacy bootstrap via {}",
+                crate::http::VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV,
+            ));
+        }
         if source_has_rows {
             self.rebuild_provider_report_heads_from_source().await?;
             if !self
@@ -3526,6 +3571,7 @@ impl PostgresStore {
 
     async fn seed_collection_snapshot_repair_state_from_legacy_source_if_needed(
         &self,
+        allow_legacy_source_bootstrap: bool,
     ) -> Result<(), String> {
         let completed = self
             .repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
@@ -3550,6 +3596,12 @@ impl PostgresStore {
                 );
             }
             return Ok(());
+        }
+        if source_has_rows && !allow_legacy_source_bootstrap {
+            return Err(format!(
+                "postgres collection snapshot repair state requires explicit legacy bootstrap via {}",
+                crate::http::VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV,
+            ));
         }
         if !source_has_rows {
             self.mark_repair_bootstrap_completed(REPAIR_BOOTSTRAP_COLLECTION_SNAPSHOTS)
@@ -9292,7 +9344,8 @@ mod tests {
 
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
-    async fn postgres_reopen_backfills_authoritative_snapshot_tables_when_they_are_empty() {
+    async fn postgres_reopen_allows_explicit_legacy_bootstrap_when_authoritative_snapshot_tables_are_empty()
+     {
         let Some(database_url) = postgres_test_url() else {
             return;
         };
@@ -9386,7 +9439,7 @@ mod tests {
         .await
         .expect("repair bootstrap state should clear");
 
-        let reopened = PostgresStore::open(&database_url, &schema)
+        let reopened = PostgresStore::open_with_legacy_source_bootstrap(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
 
@@ -9479,6 +9532,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_reopen_rejects_provider_report_legacy_bootstrap_without_explicit_opt_in() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("provider_report_legacy_bootstrap_requires_opt_in");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .bind_artifact("component:payments-api", artifact())
+            .await
+            .expect("artifact binding should persist");
+        let report = ProviderScanReport::new(
+            "fixture-provider",
+            "component:payments-api",
+            artifact(),
+            SystemTime::UNIX_EPOCH,
+            EvidenceFreshness::Deterministic,
+            vec![ReportedFinding::new(
+                "CVE-2026-0001",
+                PackageCoordinate::new("openssl", "3.0.0"),
+            )],
+        )
+        .with_knowledge_revision("fixture-db:2026-05-25");
+        let _ = backend
+            .record_scan_report(&report)
+            .await
+            .expect("provider report should persist");
+
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_active_findings
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("active finding heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.provider_report_head_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("provider report head journal should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.repair_bootstrap_state
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("repair bootstrap state should clear");
+
+        let error = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect_err("postgres reopen should require explicit opt-in");
+        assert!(error.contains("explicit legacy bootstrap"));
+    }
+
+    #[tokio::test]
     async fn postgres_reopen_rejects_missing_collection_snapshot_repair_state_after_bootstrap_completion()
      {
         let Some(database_url) = postgres_test_url() else {
@@ -9530,6 +9649,66 @@ mod tests {
             .await
             .expect_err("postgres reopen should fail explicitly");
         assert!(error.contains("collection snapshot repair state missing"));
+    }
+
+    #[tokio::test]
+    async fn postgres_reopen_rejects_collection_legacy_bootstrap_without_explicit_opt_in() {
+        let Some(database_url) = postgres_test_url() else {
+            return;
+        };
+        let schema = temp_schema("collection_legacy_bootstrap_requires_opt_in");
+        let mut backend = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect("postgres backend should open");
+        register_payments_component(&mut backend).await;
+        let _ = backend
+            .register_collection(CollectionRegistration::new(
+                "release:2026.05",
+                "May Release",
+            ))
+            .await
+            .expect("collection should persist");
+        let _ = backend
+            .configure_collection_source(
+                "release:2026.05",
+                CollectionSource::ComponentList(ComponentListCollectionSource::new(
+                    CollectionSourceMode::Replace,
+                    vec![Box::<str>::from("component:payments-api")],
+                )),
+            )
+            .await
+            .expect("collection source should persist");
+        let _ = backend
+            .materialize_collection_source("release:2026.05")
+            .await
+            .expect("collection materialization should persist");
+
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_heads
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot heads should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.collection_snapshot_journal
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("collection snapshot journal should clear");
+        sqlx::query(&format!(
+            "DELETE FROM {}",
+            backend.names.repair_bootstrap_state
+        ))
+        .execute(&backend.pool)
+        .await
+        .expect("repair bootstrap state should clear");
+
+        let error = PostgresStore::open(&database_url, &schema)
+            .await
+            .expect_err("postgres reopen should require explicit opt-in");
+        assert!(error.contains("explicit legacy bootstrap"));
     }
 
     #[tokio::test]

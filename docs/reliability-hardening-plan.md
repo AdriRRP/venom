@@ -533,6 +533,10 @@ Completed:
      Turn the final provider-report and collection source-table compatibility
      into explicit one-time legacy bootstrap seeding, and fail explicitly if
      canonical repair state later disappears after bootstrap completion.
+110. `W240-explicit-legacy-bootstrap-opt-in`
+     Remove implicit legacy source bootstrap from the default Postgres open
+     contract so canonical repair state is required unless operators opt in
+     explicitly for one-time compatibility seeding.
 
 ## Exit condition
 
