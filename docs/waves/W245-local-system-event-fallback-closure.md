@@ -1,6 +1,6 @@
 # W245-local-system-event-fallback-closure
 
-Status: done
+Status: `done`
 
 ## Goal
 
