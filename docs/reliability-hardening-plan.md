@@ -555,6 +555,9 @@ Completed:
      Codify bounded `system events` delta application as the normal local
      merged-snapshot refresh path and retire the residual stale-window fallback
      branch that no longer reflects the append-only lane contract.
+116. `W246-ci-node24-action-hygiene`
+     Update the pinned `rust-cache` GitHub Action to a Node 24-compatible
+     release so required CI stays warning-clean before the next feature block.
 
 ## Exit condition
 
