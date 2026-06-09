@@ -11,8 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("VENOM_DATABASE_SCHEMA").unwrap_or_else(|_| "public".to_owned());
     let allow_legacy_source_bootstrap =
         std::env::var(venom_api::VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV)
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false);
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
     let bind = std::env::var("VENOM_API_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
     let state = if let Some(database_url) = database_url {
         venom_api::ApiState::open_postgres_with_legacy_bootstrap(
