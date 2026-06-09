@@ -537,6 +537,9 @@ Completed:
      Remove implicit legacy source bootstrap from the default Postgres open
      contract so canonical repair state is required unless operators opt in
      explicitly for one-time compatibility seeding.
+111. `W241-legacy-bootstrap-maintenance-separation`
+     Remove legacy source bootstrap from the normal service-open path entirely
+     and expose it only through one explicit maintenance operation.
 
 ## Exit condition
 

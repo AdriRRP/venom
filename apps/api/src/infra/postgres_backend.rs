@@ -357,41 +357,12 @@ impl PostgresStore {
         Self::open_with_pool(pool, schema).await
     }
 
-    /// Open or create the Postgres durable backend and rebuild in-memory state
-    /// with explicit legacy source bootstrap enabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error string when Postgres cannot be reached, initialized, or replayed.
-    #[cfg(test)]
-    pub async fn open_with_legacy_source_bootstrap(
-        database_url: &str,
-        schema: &str,
-    ) -> Result<Self, String> {
-        let pool = Self::connect_pool(database_url).await?;
-        Self::open_with_pool_and_legacy_bootstrap(pool, schema, true).await
-    }
-
     /// Open or create the Postgres durable backend over one shared pool.
     ///
     /// # Errors
     ///
     /// Returns an error string when Postgres cannot be initialized or replayed.
     pub async fn open_with_pool(pool: PgPool, schema: &str) -> Result<Self, String> {
-        Self::open_with_pool_and_legacy_bootstrap(pool, schema, false).await
-    }
-
-    /// Open or create the Postgres durable backend over one shared pool with
-    /// an explicit legacy source bootstrap choice.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error string when Postgres cannot be initialized or replayed.
-    pub async fn open_with_pool_and_legacy_bootstrap(
-        pool: PgPool,
-        schema: &str,
-        allow_legacy_source_bootstrap: bool,
-    ) -> Result<Self, String> {
         let names = TableNames::new(schema)?;
         let mut backend = Self {
             pool,
@@ -416,12 +387,65 @@ impl PostgresStore {
             command_status_source_cursor: RowSourceCursor::default(),
         };
         backend.init_schema().await?;
-        backend
-            .seed_legacy_repair_state_if_needed(allow_legacy_source_bootstrap)
-            .await?;
+        backend.seed_legacy_repair_state_if_needed(false).await?;
         backend.normalize_authoritative_repair_state().await?;
         backend.rebuild().await?;
         Ok(backend)
+    }
+
+    /// Run one explicit legacy bootstrap seeding pass for canonical repair
+    /// state over one shared pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be initialized or the
+    /// legacy seeding cannot be completed.
+    pub async fn bootstrap_legacy_repair_state_with_pool(
+        pool: PgPool,
+        schema: &str,
+    ) -> Result<(), String> {
+        let names = TableNames::new(schema)?;
+        let backend = Self {
+            pool,
+            names,
+            observed_change_watermark: Arc::new(AtomicU64::new(0)),
+            ingestion: Arc::new(FindingIngestion::new()),
+            governance: Arc::new(FindingGovernance::new()),
+            read_model: Arc::new(FindingReadModel::new()),
+            inventory_snapshot_cache: Arc::new(ComponentInventory::default()),
+            read_model_snapshot_cache: Arc::new(FindingReadModel::new()),
+            inventory_definition_source_watermarks: InventoryDefinitionSourceWatermarks::default(),
+            integration_runtime_config: None,
+            provider_report_row_high_watermark: 0,
+            governance_journal_high_watermark: 0,
+            commands: Arc::new(BTreeMap::new()),
+            order: Arc::new(Vec::new()),
+            pending_integration_events: Arc::new(Vec::new()),
+            pending_integration_source_cursor: RowSourceCursor::default(),
+            system_event_index_snapshot_cache: Arc::new(SystemEventQueryIndex::new()),
+            system_event_source_cursor: EventSourceCursor::default(),
+            command_statuses_snapshot_cache: Arc::new(BTreeMap::new()),
+            command_status_source_cursor: RowSourceCursor::default(),
+        };
+        backend.init_schema().await?;
+        backend.seed_legacy_repair_state_if_needed(true).await?;
+        backend.normalize_authoritative_repair_state().await?;
+        Ok(())
+    }
+
+    /// Run one explicit legacy bootstrap seeding pass for canonical repair
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when Postgres cannot be reached, initialized, or
+    /// repaired.
+    pub async fn bootstrap_legacy_repair_state(
+        database_url: &str,
+        schema: &str,
+    ) -> Result<(), String> {
+        let pool = Self::connect_pool(database_url).await?;
+        Self::bootstrap_legacy_repair_state_with_pool(pool, schema).await
     }
 
     #[must_use]
@@ -3549,8 +3573,8 @@ impl PostgresStore {
         }
         if source_has_rows && !allow_legacy_source_bootstrap {
             return Err(format!(
-                "postgres provider report repair state requires explicit legacy bootstrap via {}",
-                crate::http::VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV,
+                "postgres provider report repair state requires explicit legacy bootstrap via `{}`",
+                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
             ));
         }
         if source_has_rows {
@@ -3599,8 +3623,8 @@ impl PostgresStore {
         }
         if source_has_rows && !allow_legacy_source_bootstrap {
             return Err(format!(
-                "postgres collection snapshot repair state requires explicit legacy bootstrap via {}",
-                crate::http::VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV,
+                "postgres collection snapshot repair state requires explicit legacy bootstrap via `{}`",
+                crate::LEGACY_REPAIR_BOOTSTRAP_COMMAND,
             ));
         }
         if !source_has_rows {
@@ -9439,7 +9463,10 @@ mod tests {
         .await
         .expect("repair bootstrap state should clear");
 
-        let reopened = PostgresStore::open_with_legacy_source_bootstrap(&database_url, &schema)
+        PostgresStore::bootstrap_legacy_repair_state(&database_url, &schema)
+            .await
+            .expect("legacy repair bootstrap should succeed");
+        let reopened = PostgresStore::open(&database_url, &schema)
             .await
             .expect("postgres backend should reopen");
 
