@@ -469,14 +469,24 @@ impl SystemEventQueryIndex {
         let windows = self.recent_windows.refs();
         let base_windows = base.recent_windows.refs();
         let delta_windows = SystemEventRecentWindowCache::with_deques(
-            newer_prefix_since_deque(windows.all_events, base_windows.all_events)?.into(),
-            newer_prefix_since_deque(windows.scheduler_events, base_windows.scheduler_events)?
+            newer_bounded_prefix_since_deque(windows.all_events, base_windows.all_events)?.into(),
+            newer_bounded_prefix_since_deque(
+                windows.scheduler_events,
+                base_windows.scheduler_events,
+            )?
+            .into(),
+            newer_bounded_prefix_since_deque(windows.command_events, base_windows.command_events)?
                 .into(),
-            newer_prefix_since_deque(windows.command_events, base_windows.command_events)?.into(),
-            newer_prefix_since_deque(windows.governance_events, base_windows.governance_events)?
-                .into(),
-            newer_prefix_since_deque(windows.publication_events, base_windows.publication_events)?
-                .into(),
+            newer_bounded_prefix_since_deque(
+                windows.governance_events,
+                base_windows.governance_events,
+            )?
+            .into(),
+            newer_bounded_prefix_since_deque(
+                windows.publication_events,
+                base_windows.publication_events,
+            )?
+            .into(),
         );
         let index = Self::from_recent_window_cache(
             SystemEventWindowTotals {
@@ -608,6 +618,25 @@ fn decrement_retained_event_ref(
 }
 
 fn newer_prefix_since_deque(
+    current: &VecDeque<Arc<SystemEvent>>,
+    base: &VecDeque<Arc<SystemEvent>>,
+) -> Option<Vec<Arc<SystemEvent>>> {
+    if base.len() > current.len() {
+        return None;
+    }
+    let suffix_start = current.len() - base.len();
+    for index in 0..base.len() {
+        let left = current.get(suffix_start + index)?;
+        let right = base.get(index)?;
+        if left.event_id != right.event_id || left.occurred_at_unix_ms != right.occurred_at_unix_ms
+        {
+            return None;
+        }
+    }
+    Some(current.iter().take(suffix_start).cloned().collect())
+}
+
+fn newer_bounded_prefix_since_deque(
     current: &VecDeque<Arc<SystemEvent>>,
     base: &VecDeque<Arc<SystemEvent>>,
 ) -> Option<Vec<Arc<SystemEvent>>> {
