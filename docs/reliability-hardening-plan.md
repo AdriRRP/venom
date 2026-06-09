@@ -547,6 +547,10 @@ Completed:
      Make legacy repair bootstrap a build-time maintenance capability instead
      of part of the default runtime build, and remove the last generic owned
      `system events` query surface in favor of cache-native mapped helpers.
+114. `W244-bounded-system-event-delta-rollover-closure`
+     Teach bounded `system events` deltas to survive recent-window rollover
+     and let the local merged snapshot apply dual-side bounded deltas before
+     falling back to full recent-window recomposition.
 
 ## Exit condition
 

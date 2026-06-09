@@ -611,19 +611,25 @@ fn newer_prefix_since_deque(
     current: &VecDeque<Arc<SystemEvent>>,
     base: &VecDeque<Arc<SystemEvent>>,
 ) -> Option<Vec<Arc<SystemEvent>>> {
-    if base.len() > current.len() {
-        return None;
-    }
-    let suffix_start = current.len() - base.len();
-    for index in 0..base.len() {
-        let left = current.get(suffix_start + index)?;
-        let right = base.get(index)?;
-        if left.event_id != right.event_id || left.occurred_at_unix_ms != right.occurred_at_unix_ms
-        {
-            return None;
+    let max_overlap = current.len().min(base.len());
+    for overlap_len in (0..=max_overlap).rev() {
+        let prefix_len = current.len().saturating_sub(overlap_len);
+        let mut matches = true;
+        for index in 0..overlap_len {
+            let left = current.get(prefix_len + index)?;
+            let right = base.get(index)?;
+            if left.event_id != right.event_id
+                || left.occurred_at_unix_ms != right.occurred_at_unix_ms
+            {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            return Some(current.iter().take(prefix_len).cloned().collect());
         }
     }
-    Some(current.iter().take(suffix_start).cloned().collect())
+    None
 }
 
 fn stitch_recent_append_deque(
@@ -1085,6 +1091,51 @@ mod tests {
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
             vec!["event-004", "event-003"]
+        );
+    }
+
+    #[test]
+    fn system_event_query_index_delta_since_survives_bounded_window_rollover() {
+        let base = SystemEventQueryIndex::from_newest_first(
+            (0..MAX_SYSTEM_EVENTS_LIMIT)
+                .map(|index| {
+                    timed_event(
+                        &format!("event-{index:03}"),
+                        u64::try_from(index).expect("index should fit"),
+                        SystemEventKind::ScanCommandCompleted,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .iter(),
+        );
+        let current = SystemEventQueryIndex::from_newest_first(
+            (0..(MAX_SYSTEM_EVENTS_LIMIT + 3))
+                .map(|index| {
+                    timed_event(
+                        &format!("event-{index:03}"),
+                        u64::try_from(index).expect("index should fit"),
+                        SystemEventKind::ScanCommandCompleted,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .iter(),
+        );
+
+        let (delta, delta_windows) = current
+            .delta_since_with_recent_window_cache(&base)
+            .expect("delta should survive bounded rollover");
+        let (total, returned, _limit, returned_events) =
+            query_events_from_index(&delta, &SystemEventsQuery::new().with_limit(10));
+
+        assert_eq!(total, 3);
+        assert_eq!(returned, 3);
+        assert_eq!(delta_windows.recent_event_count(), 3);
+        assert_eq!(
+            returned_events
+                .iter()
+                .map(|event| event.event_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["event-202", "event-201", "event-200"]
         );
     }
 
