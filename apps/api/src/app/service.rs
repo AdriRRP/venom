@@ -529,14 +529,13 @@ struct MergedSystemEventSnapshot {
     merged: Arc<SystemEventQueryIndex>,
 }
 
-enum LaneWindowUpdate {
-    Unchanged(venom_domain::SystemEventRecentWindowCache),
-    Delta {
-        delta: SystemEventQueryIndex,
-        delta_windows: venom_domain::SystemEventRecentWindowCache,
-        current_windows: venom_domain::SystemEventRecentWindowCache,
-    },
-    Diverged(venom_domain::SystemEventRecentWindowCache),
+struct LaneWindowUpdate {
+    current_windows: venom_domain::SystemEventRecentWindowCache,
+    delta: Option<(
+        SystemEventQueryIndex,
+        venom_domain::SystemEventRecentWindowCache,
+    )>,
+    diverged: bool,
 }
 
 impl LocalStore {
@@ -546,12 +545,20 @@ impl LocalStore {
         snapshot_windows: &venom_domain::SystemEventRecentWindowCache,
     ) -> LaneWindowUpdate {
         if Arc::ptr_eq(current, snapshot) {
-            return LaneWindowUpdate::Unchanged(snapshot_windows.clone());
+            return LaneWindowUpdate {
+                current_windows: snapshot_windows.clone(),
+                delta: None,
+                diverged: false,
+            };
         }
         if current.window_totals() == snapshot.window_totals()
             && current.recent_window_cache_ref() == snapshot_windows
         {
-            return LaneWindowUpdate::Unchanged(snapshot_windows.clone());
+            return LaneWindowUpdate {
+                current_windows: snapshot_windows.clone(),
+                delta: None,
+                diverged: false,
+            };
         }
         if let Some((delta, delta_windows)) =
             current.delta_since_with_recent_window_cache(snapshot.as_ref())
@@ -560,13 +567,17 @@ impl LocalStore {
                 snapshot_windows,
                 &delta_windows,
             );
-            return LaneWindowUpdate::Delta {
-                delta,
-                delta_windows,
+            return LaneWindowUpdate {
                 current_windows,
+                delta: Some((delta, delta_windows)),
+                diverged: false,
             };
         }
-        LaneWindowUpdate::Diverged(current.recent_window_cache())
+        LaneWindowUpdate {
+            current_windows: current.recent_window_cache(),
+            delta: None,
+            diverged: true,
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -593,63 +604,34 @@ impl LocalStore {
                 &snapshot.runtime_windows,
             );
 
-            if !matches!(state_update, LaneWindowUpdate::Diverged(_))
-                && !matches!(runtime_update, LaneWindowUpdate::Diverged(_))
-            {
-                let state_windows = match &state_update {
-                    LaneWindowUpdate::Unchanged(windows) | LaneWindowUpdate::Diverged(windows) => {
-                        windows.clone()
-                    }
-                    LaneWindowUpdate::Delta {
-                        current_windows, ..
-                    } => current_windows.clone(),
-                };
-                let runtime_windows = match &runtime_update {
-                    LaneWindowUpdate::Unchanged(windows) | LaneWindowUpdate::Diverged(windows) => {
-                        windows.clone()
-                    }
-                    LaneWindowUpdate::Delta {
-                        current_windows, ..
-                    } => current_windows.clone(),
-                };
+            if !state_update.diverged && !runtime_update.diverged {
+                let state_windows = state_update.current_windows.clone();
+                let runtime_windows = runtime_update.current_windows.clone();
                 let mut merged_windows = snapshot.merged_windows.clone();
-                let mut merged_index = None;
-
-                if let LaneWindowUpdate::Delta {
-                    delta,
-                    delta_windows,
-                    ..
-                } = &state_update
-                {
+                let mut merged_index = if let Some((delta, delta_windows)) = &state_update.delta {
                     merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &merged_windows,
                         delta_windows,
                     );
-                    merged_index = Some(SystemEventQueryIndex::merged(
+                    Some(SystemEventQueryIndex::merged(
                         snapshot.merged.as_ref(),
                         delta,
-                    ));
-                }
-                if let LaneWindowUpdate::Delta {
-                    delta,
-                    delta_windows,
-                    ..
-                } = &runtime_update
-                {
+                    ))
+                } else {
+                    None
+                };
+                if let Some((delta, delta_windows)) = &runtime_update.delta {
                     merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
                         &merged_windows,
                         delta_windows,
                     );
-                    merged_index = Some(match merged_index {
-                        Some(current) => SystemEventQueryIndex::merged(&current, delta),
-                        None => SystemEventQueryIndex::merged(snapshot.merged.as_ref(), delta),
-                    });
+                    merged_index = Some(merged_index.map_or_else(
+                        || SystemEventQueryIndex::merged(snapshot.merged.as_ref(), delta),
+                        |current| SystemEventQueryIndex::merged(&current, delta),
+                    ));
                 }
 
-                let merged = match merged_index {
-                    Some(index) => Arc::new(index),
-                    None => Arc::clone(&snapshot.merged),
-                };
+                let merged = merged_index.map_or_else(|| Arc::clone(&snapshot.merged), Arc::new);
                 *cache = Some(MergedSystemEventSnapshot {
                     state,
                     runtime,
