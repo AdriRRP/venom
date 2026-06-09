@@ -13,6 +13,7 @@ pub const LEGACY_REPAIR_BOOTSTRAP_COMMAND: &str = "bootstrap-legacy-repair-state
 ///
 /// Returns an error string when Postgres cannot be reached or legacy repair
 /// state cannot be seeded.
+#[cfg(feature = "legacy-repair-bootstrap")]
 pub async fn bootstrap_postgres_legacy_repair_state(
     database_url: &str,
     schema: &str,

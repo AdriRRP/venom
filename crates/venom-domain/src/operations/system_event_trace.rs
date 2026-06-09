@@ -146,16 +146,6 @@ impl SystemEventsQuery {
     }
 }
 
-/// One bounded recent timeline for operators.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SystemEventsPage {
-    pub total: usize,
-    pub returned: usize,
-    pub limit: usize,
-    pub events: Arc<[Arc<SystemEvent>]>,
-}
-
 /// One bounded, truthful query index over operator-facing system events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemEventQueryIndex {
@@ -550,34 +540,6 @@ impl SystemEventQueryIndex {
         index
     }
 
-    #[cfg(test)]
-    #[must_use]
-    pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
-        let limit = query.normalized_limit();
-        let total = match query.category {
-            None => self.total,
-            Some(SystemEventCategory::Scheduler) => self.scheduler_total,
-            Some(SystemEventCategory::Command) => self.command_total,
-            Some(SystemEventCategory::Governance) => self.governance_total,
-            Some(SystemEventCategory::Publication) => self.publication_total,
-        };
-        let window = match query.category {
-            None => &self.recent_windows.all_events,
-            Some(SystemEventCategory::Scheduler) => &self.recent_windows.scheduler_events,
-            Some(SystemEventCategory::Command) => &self.recent_windows.command_events,
-            Some(SystemEventCategory::Governance) => &self.recent_windows.governance_events,
-            Some(SystemEventCategory::Publication) => &self.recent_windows.publication_events,
-        };
-        let events = window.iter().take(limit).cloned().collect::<Arc<[_]>>();
-        let returned = events.len();
-        SystemEventsPage {
-            total,
-            returned,
-            limit,
-            events,
-        }
-    }
-
     pub fn map_query_events<T>(
         &self,
         query: &SystemEventsQuery,
@@ -769,42 +731,42 @@ fn compare_recent_event_order(left: &SystemEvent, right: &SystemEvent) -> std::c
 }
 
 #[cfg(test)]
-#[must_use]
-pub fn query_system_events<'a>(
-    events: impl IntoIterator<Item = &'a SystemEvent>,
-    query: &SystemEventsQuery,
-) -> SystemEventsPage {
-    let limit = query.normalized_limit();
-    let mut total = 0;
-    let mut returned_events = Vec::with_capacity(limit);
-
-    for event in events.into_iter().filter(|event| {
-        query
-            .category
-            .is_none_or(|category| event.category() == category)
-    }) {
-        total += 1;
-        if returned_events.len() < limit {
-            returned_events.push(Arc::new(event.clone()));
-        }
-    }
-
-    SystemEventsPage {
-        total,
-        returned: returned_events.len(),
-        limit,
-        events: returned_events.into(),
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::{
         DEFAULT_SYSTEM_EVENTS_LIMIT, MAX_SYSTEM_EVENTS_LIMIT, SystemEvent, SystemEventCategory,
         SystemEventKind, SystemEventQueryIndex, SystemEventRecentWindows, SystemEventWindowTotals,
-        SystemEventsQuery, query_system_events,
+        SystemEventsQuery,
     };
     use std::sync::Arc;
+
+    fn query_events_from_iter<'a>(
+        events: impl IntoIterator<Item = &'a SystemEvent>,
+        query: &SystemEventsQuery,
+    ) -> (usize, usize, usize, Vec<Arc<SystemEvent>>) {
+        let limit = query.normalized_limit();
+        let mut total = 0;
+        let mut returned_events = Vec::with_capacity(limit);
+
+        for event in events.into_iter().filter(|event| {
+            query
+                .category
+                .is_none_or(|category| event.category() == category)
+        }) {
+            total += 1;
+            if returned_events.len() < limit {
+                returned_events.push(Arc::new(event.clone()));
+            }
+        }
+
+        (total, returned_events.len(), limit, returned_events)
+    }
+
+    fn query_events_from_index(
+        index: &SystemEventQueryIndex,
+        query: &SystemEventsQuery,
+    ) -> (usize, usize, usize, Vec<Arc<SystemEvent>>) {
+        index.map_query_events(query, Arc::clone)
+    }
 
     fn event(event_id: &str, kind: SystemEventKind) -> SystemEvent {
         SystemEvent {
@@ -844,12 +806,13 @@ mod tests {
             event("event-003", SystemEventKind::ScanCommandCompleted),
         ];
 
-        let page = query_system_events(events.iter(), &SystemEventsQuery::new().with_limit(2));
+        let (total, returned, limit, returned_events) =
+            query_events_from_iter(events.iter(), &SystemEventsQuery::new().with_limit(2));
 
-        assert_eq!(page.total, 3);
-        assert_eq!(page.returned, 2);
-        assert_eq!(page.limit, 2);
-        assert_eq!(page.events.len(), 2);
+        assert_eq!(total, 3);
+        assert_eq!(returned, 2);
+        assert_eq!(limit, 2);
+        assert_eq!(returned_events.len(), 2);
     }
 
     #[test]
@@ -860,28 +823,31 @@ mod tests {
             event("event-003", SystemEventKind::ScanCommandCompleted),
         ];
 
-        let page = query_system_events(
+        let (total, returned, _limit, returned_events) = query_events_from_iter(
             events.iter(),
             &SystemEventsQuery::new()
                 .with_category(SystemEventCategory::Governance)
                 .with_limit(1),
         );
 
-        assert_eq!(page.total, 2);
-        assert_eq!(page.returned, 1);
-        assert_eq!(page.events[0].category(), SystemEventCategory::Governance);
+        assert_eq!(total, 2);
+        assert_eq!(returned, 1);
+        assert_eq!(
+            returned_events[0].category(),
+            SystemEventCategory::Governance
+        );
     }
 
     #[test]
     fn system_events_query_normalizes_large_limits() {
-        let page = query_system_events(
+        let (total, returned, limit, _returned_events) = query_events_from_iter(
             [event("event-001", SystemEventKind::ScanCommandCompleted)].iter(),
             &SystemEventsQuery::new().with_limit(MAX_SYSTEM_EVENTS_LIMIT + 500),
         );
 
-        assert_eq!(page.limit, MAX_SYSTEM_EVENTS_LIMIT);
-        assert_eq!(page.total, 1);
-        assert_eq!(page.returned, 1);
+        assert_eq!(limit, MAX_SYSTEM_EVENTS_LIMIT);
+        assert_eq!(total, 1);
+        assert_eq!(returned, 1);
     }
 
     #[test]
@@ -908,10 +874,10 @@ mod tests {
         );
 
         let merged = SystemEventQueryIndex::merged(&left, &right);
-        let page = merged.query(&SystemEventsQuery::new().with_limit(4));
+        let (total, _returned, _limit, returned_events) =
+            query_events_from_index(&merged, &SystemEventsQuery::new().with_limit(4));
 
-        let ordered_ids = page
-            .events
+        let ordered_ids = returned_events
             .iter()
             .map(|event| event.event_id.as_ref())
             .collect::<Vec<_>>();
@@ -919,7 +885,7 @@ mod tests {
             ordered_ids,
             vec!["event-004", "event-003", "event-002", "event-001"]
         );
-        assert_eq!(page.total, 4);
+        assert_eq!(total, 4);
     }
 
     #[test]
@@ -955,15 +921,16 @@ mod tests {
             },
         );
 
-        let page = index.query(
+        let (total, returned, _limit, returned_events) = query_events_from_index(
+            &index,
             &SystemEventsQuery::new()
                 .with_category(SystemEventCategory::Scheduler)
                 .with_limit(5),
         );
 
-        assert_eq!(page.total, 1);
-        assert_eq!(page.returned, 1);
-        assert_eq!(page.events[0].event_id.as_ref(), "scheduler-001");
+        assert_eq!(total, 1);
+        assert_eq!(returned, 1);
+        assert_eq!(returned_events[0].event_id.as_ref(), "scheduler-001");
     }
 
     #[test]
@@ -1047,26 +1014,27 @@ mod tests {
             SystemEventKind::ScanCommandCompleted,
         ));
 
-        let all_page = index.query(&SystemEventsQuery::new().with_limit(10));
-        let command_page = index.query(
-            &SystemEventsQuery::new()
-                .with_category(SystemEventCategory::Command)
-                .with_limit(10),
-        );
+        let (all_total, _all_returned, _all_limit, all_events) =
+            query_events_from_index(&index, &SystemEventsQuery::new().with_limit(10));
+        let (command_total, _command_returned, _command_limit, command_events) =
+            query_events_from_index(
+                &index,
+                &SystemEventsQuery::new()
+                    .with_category(SystemEventCategory::Command)
+                    .with_limit(10),
+            );
 
-        assert_eq!(all_page.total, 4);
+        assert_eq!(all_total, 4);
         assert_eq!(
-            all_page
-                .events
+            all_events
                 .iter()
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
             vec!["event-004", "event-003", "event-002", "event-001"]
         );
-        assert_eq!(command_page.total, 3);
+        assert_eq!(command_total, 3);
         assert_eq!(
-            command_page
-                .events
+            command_events
                 .iter()
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
@@ -1107,11 +1075,12 @@ mod tests {
         let delta = current
             .delta_since(&base)
             .expect("delta should exist for appended recent windows");
-        let page = delta.query(&SystemEventsQuery::new().with_limit(10));
+        let (total, _returned, _limit, returned_events) =
+            query_events_from_index(&delta, &SystemEventsQuery::new().with_limit(10));
 
-        assert_eq!(page.total, 2);
+        assert_eq!(total, 2);
         assert_eq!(
-            page.events
+            returned_events
                 .iter()
                 .map(|event| event.event_id.as_ref())
                 .collect::<Vec<_>>(),
@@ -1137,17 +1106,20 @@ mod tests {
         );
 
         let merged = SystemEventQueryIndex::merged(&left, &right);
-        let page = merged.query(&SystemEventsQuery::new().with_limit(10));
-        let publication_page = merged.query(
-            &SystemEventsQuery::new()
-                .with_category(SystemEventCategory::Publication)
-                .with_limit(10),
-        );
+        let (total, returned, _limit, _returned_events) =
+            query_events_from_index(&merged, &SystemEventsQuery::new().with_limit(10));
+        let (publication_total, _publication_returned, _publication_limit, publication_events) =
+            query_events_from_index(
+                &merged,
+                &SystemEventsQuery::new()
+                    .with_category(SystemEventCategory::Publication)
+                    .with_limit(10),
+            );
 
-        assert_eq!(page.total, 4);
-        assert_eq!(page.events.len(), 4);
-        assert_eq!(publication_page.total, 1);
-        assert_eq!(publication_page.events[0].event_id.as_ref(), "event-004");
+        assert_eq!(total, 4);
+        assert_eq!(returned, 4);
+        assert_eq!(publication_total, 1);
+        assert_eq!(publication_events[0].event_id.as_ref(), "event-004");
     }
 
     #[test]
@@ -1169,10 +1141,9 @@ mod tests {
 
         let (merged, windows) = SystemEventQueryIndex::merged_with_recent_windows(&left, &right);
 
-        assert_eq!(
-            merged.query(&SystemEventsQuery::new().with_limit(10)).total,
-            4
-        );
+        let (total, _returned, _limit, _returned_events) =
+            query_events_from_index(&merged, &SystemEventsQuery::new().with_limit(10));
+        assert_eq!(total, 4);
         assert_eq!(
             windows
                 .recent_events
