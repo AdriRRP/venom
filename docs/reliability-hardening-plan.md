@@ -551,6 +551,10 @@ Completed:
      Teach bounded `system events` deltas to survive recent-window rollover
      and let the local merged snapshot apply dual-side bounded deltas before
      falling back to full recent-window recomposition.
+115. `W245-local-system-event-fallback-closure`
+     Codify bounded `system events` delta application as the normal local
+     merged-snapshot refresh path and retire the residual stale-window fallback
+     branch that no longer reflects the append-only lane contract.
 
 ## Exit condition
 
