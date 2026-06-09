@@ -147,6 +147,7 @@ impl SystemEventsQuery {
 }
 
 /// One bounded recent timeline for operators.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemEventsPage {
     pub total: usize,
@@ -549,6 +550,7 @@ impl SystemEventQueryIndex {
         index
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn query(&self, query: &SystemEventsQuery) -> SystemEventsPage {
         let limit = query.normalized_limit();
@@ -766,6 +768,7 @@ fn compare_recent_event_order(left: &SystemEvent, right: &SystemEvent) -> std::c
         .then_with(|| right.event_id.cmp(&left.event_id))
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn query_system_events<'a>(
     events: impl IntoIterator<Item = &'a SystemEvent>,

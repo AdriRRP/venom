@@ -20,8 +20,7 @@ use crate::{
     RegisterContextProfileChange, RegisterContextProfileResult, RemoveCollectionComponentChange,
     RemoveCollectionComponentResult, ReopenFindingChange, ReopenFindingResult, ReportedFinding,
     RiskAcceptance, Severity, SuppressFindingChange, SuppressFindingResult, Suppression,
-    SystemEvent, SystemEventKind, SystemEventsPage, SystemEventsQuery,
-    findings::finding_read_model::canonicalize_reported_findings,
+    SystemEvent, SystemEventKind, findings::finding_read_model::canonicalize_reported_findings,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -32,6 +31,9 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+#[cfg(test)]
+use crate::operations::system_event_trace::SystemEventsPage;
 
 /// Minimal durable state boundary for the current domain slice.
 ///
@@ -147,8 +149,12 @@ impl DurableState {
         Arc::clone(&self.system_event_index_snapshot_cache)
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
+    pub fn query_system_events(
+        &self,
+        query: &crate::operations::system_event_trace::SystemEventsQuery,
+    ) -> SystemEventsPage {
         self.system_event_index_snapshot_cache.query(query)
     }
 
