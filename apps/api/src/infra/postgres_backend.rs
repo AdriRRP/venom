@@ -2104,15 +2104,13 @@ impl PostgresStore {
     #[must_use]
     pub fn system_events_snapshot(&self) -> Vec<SystemEvent> {
         self.system_event_index_snapshot_cache
-            .query(
+            .map_query_events(
                 &venom_domain::operations::SystemEventsQuery::new().with_limit(
                     venom_domain::operations::system_event_trace::MAX_SYSTEM_EVENTS_LIMIT,
                 ),
+                |event| event.as_ref().clone(),
             )
-            .events
-            .iter()
-            .map(|event| event.as_ref().clone())
-            .collect()
+            .3
     }
 
     #[must_use]

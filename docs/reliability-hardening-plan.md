@@ -540,6 +540,9 @@ Completed:
 111. `W241-legacy-bootstrap-maintenance-separation`
      Remove legacy source bootstrap from the normal service-open path entirely
      and expose it only through one explicit maintenance operation.
+112. `W242-runtime-edge-contract-closure`
+     Move the legacy repair maintenance flow out of the serve binary and retire
+     the generic owned `SystemEventsPage` contract from non-test runtime code.
 
 ## Exit condition
 

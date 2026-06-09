@@ -4,8 +4,7 @@ use crate::operations::system_event_trace::SystemEventQueryIndex;
 use crate::{
     DurableState, DurableStateError, FindingChangeSet, FindingProvider,
     IntegrationEventPublicationFailure, IntegrationEventPublisher, PendingIntegrationEvent,
-    PublishIntegrationEventsResult, ScanRequest, SystemEvent, SystemEventKind, SystemEventsPage,
-    SystemEventsQuery,
+    PublishIntegrationEventsResult, ScanRequest, SystemEvent, SystemEventKind,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
@@ -15,6 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+use crate::operations::system_event_trace::SystemEventsPage;
 
 /// Minimal durable queue for canonical scan requests.
 ///
@@ -206,8 +208,12 @@ impl ScanCommandQueue {
         (!command_ids.is_empty()).then_some(command_ids)
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn query_system_events(&self, query: &SystemEventsQuery) -> SystemEventsPage {
+    pub fn query_system_events(
+        &self,
+        query: &crate::operations::system_event_trace::SystemEventsQuery,
+    ) -> SystemEventsPage {
         self.system_event_index_snapshot_cache.query(query)
     }
 
