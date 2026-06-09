@@ -529,7 +529,57 @@ struct MergedSystemEventSnapshot {
     merged: Arc<SystemEventQueryIndex>,
 }
 
+struct LaneWindowUpdate {
+    current_windows: venom_domain::SystemEventRecentWindowCache,
+    delta: Option<(
+        SystemEventQueryIndex,
+        venom_domain::SystemEventRecentWindowCache,
+    )>,
+    diverged: bool,
+}
+
 impl LocalStore {
+    fn classify_lane_window_update(
+        current: &Arc<SystemEventQueryIndex>,
+        snapshot: &Arc<SystemEventQueryIndex>,
+        snapshot_windows: &venom_domain::SystemEventRecentWindowCache,
+    ) -> LaneWindowUpdate {
+        if Arc::ptr_eq(current, snapshot) {
+            return LaneWindowUpdate {
+                current_windows: snapshot_windows.clone(),
+                delta: None,
+                diverged: false,
+            };
+        }
+        if current.window_totals() == snapshot.window_totals()
+            && current.recent_window_cache_ref() == snapshot_windows
+        {
+            return LaneWindowUpdate {
+                current_windows: snapshot_windows.clone(),
+                delta: None,
+                diverged: false,
+            };
+        }
+        if let Some((delta, delta_windows)) =
+            current.delta_since_with_recent_window_cache(snapshot.as_ref())
+        {
+            let current_windows = venom_domain::SystemEventRecentWindowCache::merged(
+                snapshot_windows,
+                &delta_windows,
+            );
+            return LaneWindowUpdate {
+                current_windows,
+                delta: Some((delta, delta_windows)),
+                diverged: false,
+            };
+        }
+        LaneWindowUpdate {
+            current_windows: current.recent_window_cache(),
+            delta: None,
+            diverged: true,
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn system_event_index_snapshot_arc(&self) -> Arc<SystemEventQueryIndex> {
         let state = self.state.system_event_index_snapshot_arc();
@@ -543,6 +593,55 @@ impl LocalStore {
             && Arc::ptr_eq(&snapshot.runtime, &runtime)
         {
             return Arc::clone(&snapshot.merged);
+        }
+
+        if let Some(snapshot) = cache.as_ref() {
+            let state_update =
+                Self::classify_lane_window_update(&state, &snapshot.state, &snapshot.state_windows);
+            let runtime_update = Self::classify_lane_window_update(
+                &runtime,
+                &snapshot.runtime,
+                &snapshot.runtime_windows,
+            );
+
+            if !state_update.diverged && !runtime_update.diverged {
+                let state_windows = state_update.current_windows.clone();
+                let runtime_windows = runtime_update.current_windows.clone();
+                let mut merged_windows = snapshot.merged_windows.clone();
+                let mut merged_index = if let Some((delta, delta_windows)) = &state_update.delta {
+                    merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
+                        &merged_windows,
+                        delta_windows,
+                    );
+                    Some(SystemEventQueryIndex::merged(
+                        snapshot.merged.as_ref(),
+                        delta,
+                    ))
+                } else {
+                    None
+                };
+                if let Some((delta, delta_windows)) = &runtime_update.delta {
+                    merged_windows = venom_domain::SystemEventRecentWindowCache::merged(
+                        &merged_windows,
+                        delta_windows,
+                    );
+                    merged_index = Some(merged_index.map_or_else(
+                        || SystemEventQueryIndex::merged(snapshot.merged.as_ref(), delta),
+                        |current| SystemEventQueryIndex::merged(&current, delta),
+                    ));
+                }
+
+                let merged = merged_index.map_or_else(|| Arc::clone(&snapshot.merged), Arc::new);
+                *cache = Some(MergedSystemEventSnapshot {
+                    state,
+                    runtime,
+                    state_windows,
+                    runtime_windows,
+                    merged_windows,
+                    merged: Arc::clone(&merged),
+                });
+                return merged;
+            }
         }
 
         let (state_windows, runtime_windows) = match cache.as_ref() {
