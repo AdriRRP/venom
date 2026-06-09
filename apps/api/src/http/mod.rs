@@ -43,6 +43,9 @@ use venom_domain::scanning::ScanCommandStatus;
 
 type ApiMutationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
 
+pub const VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP_ENV: &str =
+    "VENOM_POSTGRES_ALLOW_LEGACY_SOURCE_BOOTSTRAP";
+
 #[derive(Clone)]
 pub struct ApiState {
     inner: Arc<ApiStateInner>,
@@ -265,10 +268,30 @@ impl ApiState {
     ///
     /// Returns an error string when the Postgres durable backend cannot be opened.
     pub async fn open_postgres(database_url: &str, schema: &str) -> Result<Self, String> {
+        Self::open_postgres_with_legacy_bootstrap(database_url, schema, false).await
+    }
+
+    /// Open the API state over a Postgres durable backend with an explicit
+    /// legacy compatibility choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the Postgres durable backend cannot be opened.
+    pub async fn open_postgres_with_legacy_bootstrap(
+        database_url: &str,
+        schema: &str,
+        allow_legacy_source_bootstrap: bool,
+    ) -> Result<Self, String> {
         let pool =
             crate::infra::postgres_backend::PostgresStore::connect_pool(database_url).await?;
-        let state_backend =
-            crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?;
+        let state_backend = if allow_legacy_source_bootstrap {
+            crate::infra::postgres_backend::PostgresStore::open_with_pool_and_legacy_bootstrap(
+                pool, schema, true,
+            )
+            .await?
+        } else {
+            crate::infra::postgres_backend::PostgresStore::open_with_pool(pool, schema).await?
+        };
         let state_service = ApiApplication::from_postgres_store(state_backend);
         Ok(Self::new_partitioned(
             state_service,
