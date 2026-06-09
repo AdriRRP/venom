@@ -128,7 +128,7 @@ skip_if_browser_forbidden() {
 VENOM_STATE_PATH="${state_path}" \
 VENOM_RUNTIME_PATH="${runtime_path}" \
 VENOM_API_BIND="127.0.0.1:${api_port}" \
-cargo run -p venom-api >"${api_log}" 2>&1 &
+cargo run -p venom-api --bin venom-api >"${api_log}" 2>&1 &
 api_pid=$!
 
 sleep 1
