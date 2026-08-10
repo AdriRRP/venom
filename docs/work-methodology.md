@@ -322,6 +322,14 @@ Required repository checks:
 - `tests`
 - `audit`
 
+Required-check coverage:
+
+- `tests` must provide a real PostgreSQL service and make missing integration
+  configuration fail explicitly; a green required check must not rely on the
+  PostgreSQL tests returning early
+- `audit` must inspect the committed Rust and frontend lockfiles without
+  regenerating either dependency graph
+
 Enforcement:
 
 - configure these workflow checks as required in GitHub rulesets or branch protection
