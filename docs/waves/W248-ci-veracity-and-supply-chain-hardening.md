@@ -1,6 +1,7 @@
 # W248-ci-veracity-and-supply-chain-hardening
 
-Status: `in_progress`
+Status: `done`
+Infra profile: `db`
 
 ## Goal
 
@@ -43,3 +44,10 @@ keeping advisory workflows out of the required pull-request path.
 - Reusable workflow impact: CI reuses repository-owned gates
 - Documentation compaction opportunity: keep the required-check contract in
   `docs/work-methodology.md` and the GitHub ruleset runbook
+
+## Notes
+
+- the PostgreSQL rehearsal exercises 58 persistence and integration tests that
+  previously returned early in required CI
+- exact-lock auditing exposed and remediated two Rust vulnerabilities and four
+  high-severity npm advisories that the previous audit path did not report

@@ -26,5 +26,5 @@ __pycache__/
 /test-results
 **/test-results
 
-# Local durable runtime state
-/var/state
+# Local runtime state
+/var/

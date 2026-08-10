@@ -8,7 +8,7 @@ if [[ "${VENOM_REQUIRE_POSTGRES_TESTS:-0}" == "1" && -z "${VENOM_TEST_POSTGRES_U
   false
 fi
 
-cargo test --workspace --all-targets --all-features
+cargo test --locked --workspace --all-targets --all-features
 
 if [[ -f apps/web/package.json ]]; then
   ./scripts/check-web.sh --lane test

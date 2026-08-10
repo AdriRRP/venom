@@ -59,7 +59,7 @@ jobs:
 
       - name: Install web dependencies
         if: ${{ hashFiles('apps/web/package.json') != '' }}
-        run: npm --prefix apps/web install
+        run: npm --prefix apps/web ci
 
       - name: Install Playwright browser
         if: ${{ hashFiles('apps/web/e2e/**/*') != '' }}

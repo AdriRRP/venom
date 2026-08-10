@@ -61,3 +61,10 @@ Verify after apply:
 2. the required contexts are `quality`, `tests`, and `audit`
 3. first branch creation is allowed, but later updates to `main` are governed by the required checks
 4. add separate pull-request review rules later only if the workflow needs them
+
+## Scheduled workflow recovery
+
+GitHub can disable scheduled workflows after repository inactivity. Re-enable
+`dependency-freshness` and `unused-deps` from Actions or the GitHub API, then
+verify that both workflow states are `active`. A committed schedule does not by
+itself prove that GitHub is still executing it.
