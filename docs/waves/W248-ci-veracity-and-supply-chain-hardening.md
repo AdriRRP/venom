@@ -49,5 +49,8 @@ keeping advisory workflows out of the required pull-request path.
 
 - the PostgreSQL rehearsal exercises 58 persistence and integration tests that
   previously returned early in required CI
+- the first required PostgreSQL run exposed a deterministic legacy-repair bug:
+  collection snapshots were rebuilt before their component and context-profile
+  prerequisites; the repair lane now loads those prerequisites first
 - exact-lock auditing exposed and remediated two Rust vulnerabilities and four
   high-severity npm advisories that the previous audit path did not report
