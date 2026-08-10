@@ -6,6 +6,7 @@ trap 'echo "RESULT: FAIL"' ERR
 cargo fmt --all -- --check
 
 cargo clippy \
+  --locked \
   --workspace \
   --all-targets \
   --all-features \

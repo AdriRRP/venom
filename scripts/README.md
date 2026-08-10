@@ -11,8 +11,12 @@ Rules:
 - let CI call the same scripts whenever that keeps local and remote verification aligned
 - keep one script per verification lane when that avoids hidden CI-only behavior
 - keep network-dependent checks advisory until they prove cheap and stable enough for the default path
+- use committed lockfiles in required CI (`npm ci` and Cargo `--locked`)
 - let `infra-smoke.sh` own standalone real-infra checks when a full compose stack is unnecessary
 - let `check-git-discipline.sh` enforce that completed waves are verified from a clean committed tree
 - let `check-performance-baseline.sh` own local benchmarkable hot-path baselines before larger optimization waves change behavior
 - let `check-web.sh` own the default frontend quality, test, and build path when `apps/web` exists
 - let `check-web-e2e.sh` own deterministic browser-driven frontend smoke verification when `apps/web/e2e/**` exists
+- set `VENOM_REQUIRE_POSTGRES_TESTS=1` in required CI and provide
+  `VENOM_TEST_POSTGRES_URL`; missing required integration configuration must
+  fail before the test runner starts

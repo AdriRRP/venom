@@ -42,7 +42,7 @@ jobs:
 
       - name: Install web dependencies
         if: ${{ hashFiles('apps/web/package.json') != '' }}
-        run: npm --prefix apps/web install
+        run: npm --prefix apps/web ci
 
       - name: Run quality gate
         run: ./scripts/check-quality.sh

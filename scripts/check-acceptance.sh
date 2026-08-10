@@ -7,7 +7,7 @@ fail() {
   exit 1
 }
 
-if ! cargo run -p venom-domain --example acceptance --all-features; then
+if ! cargo run --locked -p venom-domain --example acceptance --all-features; then
   fail "acceptance runner failed"
 fi
 

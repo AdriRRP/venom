@@ -21,6 +21,23 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      VENOM_REQUIRE_POSTGRES_TESTS: "1"
+      VENOM_TEST_POSTGRES_URL: postgres://venom:venom@127.0.0.1:5432/venom
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: venom
+          POSTGRES_USER: venom
+          POSTGRES_PASSWORD: venom
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U venom -d venom"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -42,7 +59,7 @@ jobs:
 
       - name: Install web dependencies
         if: ${{ hashFiles('apps/web/package.json') != '' }}
-        run: npm --prefix apps/web install
+        run: npm --prefix apps/web ci
 
       - name: Install Playwright browser
         if: ${{ hashFiles('apps/web/e2e/**/*') != '' }}

@@ -3672,6 +3672,8 @@ impl PostgresStore {
         let source_snapshots = self.load_collection_snapshot_rows_from_source(None).await?;
         if !source_snapshots.is_empty() {
             let mut repair_backend = Self::detached(self.pool.clone(), self.names.clone());
+            repair_backend.load_components().await?;
+            repair_backend.load_context_profiles().await?;
             repair_backend.apply_collection_snapshot_rows(source_snapshots)?;
             repair_backend
                 .rebuild_collection_snapshot_heads_from_inventory(None)
